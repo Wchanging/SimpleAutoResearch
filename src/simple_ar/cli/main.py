@@ -323,8 +323,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
     if args.max_research_iterations < 0:
         raise SystemExit("--max-research-iterations cannot be negative.")
     task_kind = str(getattr(args, "task_kind", "auto") or "auto").strip().lower()
-    if task_kind not in {"auto", "survey", "bug_fix"}:
-        raise SystemExit("--task-kind must be auto, survey or bug_fix.")
+    if task_kind not in {"auto", "survey", "bug_fix", "measurement"}:
+        raise SystemExit("--task-kind must be auto, survey, bug_fix or measurement.")
     command = tuple(args.command_argv or ())
     execution_details = getattr(args, "execution_details", {})
     if command and execution_details.get("pairs"):
@@ -336,6 +336,11 @@ def _print_research_session(args: argparse.Namespace) -> None:
         raise SystemExit("--task-kind bug_fix requires --outputs bug_fix or no explicit outputs.")
     if task_kind == "survey" and (command or execution_details or getattr(args, "code_task_config", None)):
         raise SystemExit("--task-kind survey cannot include execution or CodeTask configuration.")
+    if task_kind == "measurement":
+        if outputs != ["experiments"]:
+            raise SystemExit("--task-kind measurement requires --outputs experiments.")
+        if not command or getattr(args, "code_task_config", None) or execution_details.get("pairs") or execution_details.get("baseline_policy") in {"run", "reuse"}:
+            raise SystemExit("--task-kind measurement requires one explicit command without CodeTask, paired runs, or baseline comparison.")
     if outputs and (args.with_report or args.no_report):
         raise SystemExit("Use explicit outputs or --with-report/--no-report, not both.")
     for field in ("total_tokens", "llm_requests", "max_output_tokens", "process_invocations", "process_wall_seconds"):
@@ -555,6 +560,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
     intents = (
         ("bug_fix",) if task_kind == "bug_fix"
         else ("survey",) if task_kind == "survey"
+        else ("measurement",) if task_kind == "measurement"
         else ("research", "experiment") if experiment_requested else ("research",)
     )
     requested_outputs = (
@@ -589,6 +595,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
             from simple_ar.app.research_application import load_session
             from dataclasses import replace
             app = load_session(session_root, services=replace(services, config={}))
+            app.require_llm_binding(include_legacy_usage=True)
             explicit = getattr(args, "_explicit_resume_destinations", set())
             interaction_update = (
                 args.interaction

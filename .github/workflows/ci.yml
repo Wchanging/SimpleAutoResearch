@@ -1,0 +1,28 @@
+name: Offline checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: uv sync --locked --extra examples
+      - name: Check CLI entrypoint
+        run: uv run --no-sync simple-ar --help
+      - name: Run offline contract and application checks
+        run: uv run --no-sync simple-ar-checks quick core application research code-task report llm
+      - name: Build distribution
+        run: uv build --wheel

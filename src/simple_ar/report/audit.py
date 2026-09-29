@@ -61,7 +61,11 @@ def build_report_audit(
     metric = _metric_audit(report_body, context)
     claim = _claim_audit(memory)
     findings = citation.warnings + metric.warnings + claim.warnings
-    reviewer_findings = list(memory.reviewer_findings) + _mechanical_findings(findings)
+    reviewer_findings = (
+        list(memory.reviewer_findings)
+        + _mechanical_findings(findings)
+        + _reader_facing_handle_findings(report_body)
+    )
     status = _overall_status([citation.status, metric.status, claim.status])
     if any(finding.severity == "critical" for finding in reviewer_findings):
         status = "failed"
@@ -83,6 +87,23 @@ def build_report_audit(
             "Semantic support of final prose is unchecked; metric visibility and section review do not prove final conclusions.",
         ],
     )
+
+
+def _reader_facing_handle_findings(report_body: str) -> list[ReviewerFinding]:
+    """Keep internal provenance handles out of a published report body.
+
+    The source map and audit artifacts still retain those handles for inspection;
+    this check only flags their accidental appearance in reader-facing prose.
+    """
+    if not re.search(r"(?<![A-Za-z0-9_])artifact:[A-Za-z0-9_.-]+", report_body):
+        return []
+    return [ReviewerFinding(
+        finding_id="internal-artifact-handle",
+        type="style",
+        severity="major",
+        message="An internal artifact handle appears in the reader-facing report body.",
+        suggested_action="Replace the handle with a reader-facing source description; keep provenance in run artifacts.",
+    )]
 
 
 def audit_report(request: ReportAuditRequest) -> ReportAudit:
@@ -221,11 +242,14 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
         errors = _measurement_table_errors(report_body, context)
         return MetricAudit(status="failed" if errors else "passed", warnings=errors)
     metrics = _report_metric_sources(context)
-    lower = report_body.lower()
+    # A generated figure's filename (for example, paired-1.svg) is not a
+    # reported numeric result even when its alt text names a metric.
+    visibility_body = re.sub(r"(?m)^[ \t]*!\[[^\]\r\n]*\]\([^\r\n]*\)[ \t]*$", "", report_body)
+    lower = visibility_body.lower()
     matched: list[str] = []
     unmatched: list[str] = []
     for metric in metrics:
-        if _metric_is_visible(report_body, lower, metric):
+        if _metric_is_visible(visibility_body, lower, metric):
             matched.append(metric.metric_id)
         else:
             unmatched.append(metric.metric_id)
@@ -278,22 +302,22 @@ def _measurement_table_errors(report_body: str, context: ReportContext) -> list[
 def _claim_audit(memory: ReportMemory) -> ClaimAudit:
     findings: list[ReviewerFinding] = []
     for claim in memory.claims_evidence_matrix:
-        # ``unsupported`` is a valid scientific outcome when the analysis
-        # recorded the measured evidence that failed to support a hypothesis.
-        # It is not the same as an unsupported assertion in the report. Only
-        # flag a rejected claim when its record has no evidence or measurement
-        # link at all; the Writer/Reviewer remains responsible for wording.
+        # ``unsupported`` may mean either a measured negative result or an
+        # untested hypothesis. This audit sees the structured claim record,
+        # not whether the prose asserts the hypothesis as a fact. An empty
+        # evidence link is a provenance gap, never proof of a false statement
+        # in the report; semantic review remains a separate responsibility.
         if claim.status == "unsupported" and not (
             claim.evidence_handles or claim.metric_ids or claim.citation_ids
         ):
             findings.append(
                 ReviewerFinding(
                     finding_id=f"claim-{len(findings)+1:03d}",
-                    type="unsupported_claim",
-                    severity="major",
-                    message=f"Rejected claim has no linked evidence: {claim.claim}",
+                    type="unlinked_analysis_claim",
+                    severity="minor",
+                    message=f"Analysis claim has no linked evidence or measurement: {claim.claim}",
                     claim_id=claim.claim_id,
-                    suggested_action="Link the measured evidence or remove the claim.",
+                    suggested_action="Link relevant observations if available; otherwise describe it as untested, not refuted.",
                 )
             )
     status = "warning" if findings else "passed"

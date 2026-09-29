@@ -308,6 +308,32 @@ class ResearchApplication:
         settings = _bind_budget_services(settings, ledger, controller.manifest.session_id)
         return cls(controller, brief, assets, settings, ledger)
 
+    def require_llm_binding(self, *, include_legacy_usage: bool = False) -> None:
+        """Prevent a resumed model-backed session from silently changing modes.
+
+        The application enforces an explicit creation-time mode. The CLI also
+        checks historical LLM reservations for older sessions that lack the
+        creation-time marker. Programmatic callers may intentionally compose
+        deterministic and model-backed capabilities in those legacy sessions.
+        Read-only inspection through ``load``/``view`` remains available.
+        """
+        if self.services.llm_client is not None:
+            return
+        runtime = _read_runtime_config(self.controller)
+        saved_requirement = runtime.get("llm_required")
+        used_llm = include_legacy_usage and any(
+            entry.actual_source != "user_authorization"
+            and (entry.reserved.get("llm_requests", 0) > 0
+                 or entry.actual.get("llm_requests", 0) > 0)
+            for entry in self.budget_ledger.entries
+        )
+        if saved_requirement is True or used_llm:
+            raise ResearchApplicationError(
+                "This saved session used an LLM. Resume with an LLM client "
+                "(CLI: pass --model env or --model MODEL); its saved work "
+                "cannot silently continue in deterministic mode."
+            )
+
     def view(self) -> ResearchApplicationView:
         manifest = self.controller.manifest
         diagnostics = list(self._input_diagnostics())
@@ -334,6 +360,7 @@ class ResearchApplication:
         """Run at most ``max_actions`` actions and return current state."""
         if max_actions < 1:
             raise ValueError("max_actions must be positive.")
+        self.require_llm_binding()
         with self.controller.mutation_scope():
             self._reconcile_running_attempt()
             terminal = {attempt.attempt_id for attempt in self.controller.list_attempts()
@@ -394,6 +421,7 @@ class ResearchApplication:
         additional_attempts: int = 0,
         additional_no_progress: int = 0,
     ) -> ResearchApplicationView:
+        self.require_llm_binding()
         if interaction is not None and interaction not in INTERACTION_MODES:
             raise ResearchApplicationError(
                 f"interaction must be one of {', '.join(INTERACTION_MODES)}."
@@ -1064,7 +1092,10 @@ class ResearchApplication:
 
     def report_inputs(self):
         """Project accepted research facts into the existing Writer input contract."""
-        from simple_ar.report.projection import build_research_report_inputs, attach_report_read_evidence, attach_implementation_evidence
+        from simple_ar.report.projection import (
+            build_research_report_inputs, attach_report_read_evidence,
+            attach_implementation_evidence, attach_experiment_history,
+        )
         from simple_ar.research.analysis import AnalysisHandoff
         from simple_ar.research.design import ResearchDesignResult
         from simple_ar.report.schema import SourceHandle
@@ -1122,6 +1153,10 @@ class ResearchApplication:
                 memory.limitations.append(
                     "The collection's implementation revision was not confirmed by every candidate measurement."
                 )
+            context, memory = attach_experiment_history(
+                context, memory, self._report_experiment_observations(),
+                current_ref=analysis.execution_ref, include_prior_metrics=False,
+            )
             memory.source_handles = list(context.source_handles)
             return attach_report_read_evidence(context, memory, documents=self._load_documents(),
                                                read=self._load_read(), read_ref=refs["read"])
@@ -1135,6 +1170,10 @@ class ResearchApplication:
             baseline_ref = self._artifact_ref(comparison.get("baseline_ref")) or baseline_ref
         if baseline_ref is not None:
             execution["baseline"] = dict(self.controller.store.read_json(baseline_ref))
+        diagnosis_ref = self._experiment_diagnosis_ref(analysis.execution_ref)
+        if diagnosis_ref is not None:
+            diagnosis = self.controller.store.read_json(diagnosis_ref)
+            execution["failure_diagnosis"] = self._compact_failure_diagnosis(diagnosis)
         context, memory = build_research_report_inputs(
             topic=self._experiment_report_topic(), brief=self._load_synthesis(),
             search=self._load_search(), documents=self._load_documents(), execution=execution,
@@ -1154,6 +1193,12 @@ class ResearchApplication:
                 handles.append(SourceHandle(handle=f"artifact:{key}", kind=key, artifact=refs[key].path))
         if baseline_ref is not None and baseline_ref.path not in {item.artifact for item in handles}:
             handles.append(SourceHandle(handle="artifact:current_baseline", kind="experiment_result", artifact=baseline_ref.path))
+        if diagnosis_ref is not None:
+            handles.append(SourceHandle(
+                handle="artifact:failure_diagnosis", kind="experiment_diagnosis",
+                artifact=diagnosis_ref.path,
+                summary="Captured failed-run diagnosis and stderr tail; not a scientific verdict.",
+            ))
         context.metric_sources, memory.metric_sources = metrics, metrics
         context.source_handles, memory.source_handles = handles, handles
         implementation_ref = self._artifact_ref(execution.get("implementation_ref"))
@@ -1172,8 +1217,23 @@ class ResearchApplication:
         if "experiment_contract" in execution:
             context.experiment_plan = dict(execution["experiment_contract"])
             memory.key_decisions.append("Experiment protocol comes from the measured execution; research design records motivation, not proof of implementation.")
+        context, memory = attach_experiment_history(
+            context, memory, self._report_experiment_observations(),
+            current_ref=analysis.execution_ref,
+        )
         return attach_report_read_evidence(context, memory, documents=self._load_documents(),
                                            read=self._load_read(), read_ref=refs["read"])
+
+    def _report_experiment_observations(self) -> list[tuple[str, ArtifactRef, Mapping[str, Any]]]:
+        refs = self.controller.manifest.state_refs
+        if "task_plan" not in refs:
+            return []
+        return [
+            (step.action, refs[step.state_name], self.controller.store.read_json(refs[step.state_name]))
+            for step in self._load_task_plan().steps
+            if step.capability == "experiment" and step.state_name in refs
+            and self._step_completed(step)
+        ]
 
     def _implementation_lineage_refs(self, final_ref: ArtifactRef) -> tuple[ArtifactRef, ...]:
         """Return implementation attempts in order, including repair deltas."""
@@ -1212,6 +1272,7 @@ class ResearchApplication:
                 self.services.llm_client is not None
                 and planner_mode != "deterministic"
                 and not protocol_accepted
+                and self._task_kind() != "measurement"
             )
             task_plan = TaskPlanRequest(
                 task_kind=self._task_kind(),
@@ -1243,7 +1304,7 @@ class ResearchApplication:
                     use_llm=use_llm,
                     llm_client=self.services.llm_client,
                     task_plan_request=task_plan,
-                    task_plan_only=self._task_kind() == "bug_fix" or "plan" in self.controller.manifest.state_refs,
+                    task_plan_only=self._task_kind() in {"bug_fix", "measurement"} or "plan" in self.controller.manifest.state_refs,
                 ), self._input_refs("brief", "assets", "runtime_config")
             )
         if action == "summarize":
@@ -1432,7 +1493,12 @@ class ResearchApplication:
                 if not selected:
                     selected = assessment.get("recommended_idea_id")
                     reason = assessment.get("recommendation_reason", "")
-                if not selected and has_execution and isinstance(execution.get("code_task"), Mapping):
+                if (not selected and has_execution and isinstance(execution.get("code_task"), Mapping)
+                        and assessment.get("generation_mode") == "deterministic"):
+                    # An explicit model abstention is a research judgment, not
+                    # permission to silently run the first structurally ready
+                    # candidate. Only the non-model fallback may use this
+                    # provisional execution-readiness order.
                     ready = [row for row in assessment.get("assessments", [])
                              if isinstance(row, Mapping) and row.get("status") == "ready"
                              and str(row.get("idea_id") or "").strip()]
@@ -1526,7 +1592,11 @@ class ResearchApplication:
             return self._run_candidate_preparation(action)
         if action.startswith("revise_candidate:"):
             return self._run_candidate_revision(action)
+        if action.startswith("repair_candidate:"):
+            return self._run_candidate_technical_repair(action)
         if action.startswith("research_candidate:"):
+            return self._run_candidate_measurement(action)
+        if action.startswith("retest_candidate:"):
             return self._run_candidate_measurement(action)
         if action == "implement" or action.startswith(("repair:", "matrix_repair_")):
             if self._task_kind() == "bug_fix":
@@ -1630,7 +1700,7 @@ class ResearchApplication:
                 self.controller.pause(str(exc))
                 self._persist_application_views()
                 return False
-            inputs = self._input_refs("design", "runtime_config")
+            inputs = self._input_refs("runtime_config") if self._task_kind() == "measurement" else self._input_refs("design", "runtime_config")
             if "preparation" in self.controller.manifest.state_refs:
                 inputs += self._input_refs("preparation")
             if action.startswith("matrix_candidate_") and "implementation" in self.controller.manifest.state_refs:
@@ -1727,6 +1797,36 @@ class ResearchApplication:
                 iteration = int(action.rsplit(":", 1)[1])
             except (TypeError, ValueError) as exc:
                 raise ResearchApplicationError(f"Invalid research reanalysis action: {action}") from exc
+            failed_measurement = self._failed_followup_measurement(iteration)
+            if failed_measurement is not None:
+                failed_name, failed_ref = failed_measurement
+                refs = self.controller.manifest.state_refs
+                baseline_ref = None
+                if failed_name.startswith("experiment_supplement_"):
+                    baseline_ref = refs.get(failed_name.replace("experiment_", "baseline_", 1))
+                elif failed_name.startswith("experiment_revision_"):
+                    suffix = failed_name.removeprefix(f"experiment_revision_{iteration}")
+                    if suffix.startswith("_") and suffix[1:].isdigit():
+                        baseline_ref = refs.get(f"matrix_baseline_{suffix[1:]}")
+                baseline_ref = baseline_ref or refs.get("baseline") or next(
+                    iter(self._revision_baseline_refs()), None
+                )
+                inputs = [failed_ref, *self._optional_refs("decision")]
+                measured_implementation = self._measured_implementation_ref(failed_ref)
+                if measured_implementation is not None:
+                    inputs.append(measured_implementation)
+                previous = self._latest_analysis_ref()
+                if previous is not None:
+                    inputs.append(previous)
+                if baseline_ref is not None:
+                    inputs.insert(0, baseline_ref)
+                return self._execute(
+                    "analysis", f"analysis_r{iteration}", None, tuple(inputs),
+                    allow_partial=True, baseline_ref=baseline_ref,
+                    result_ref=failed_ref, analysis_context=self._analysis_context(),
+                    use_llm=self.services.llm_client is not None,
+                    client=self.services.llm_client,
+                )
             revision_candidates = self._revision_candidate_refs(iteration)
             pairs = execution_pairs(
                 self._execution_config().get("execution"),
@@ -1738,13 +1838,17 @@ class ResearchApplication:
                     raise ResearchApplicationError(
                         f"Reanalysis {iteration} requires the original baseline measurement."
                     )
-                inputs = [baseline_ref, revision_candidates[0], *self._optional_refs(
-                    f"implementation_r{iteration}", "analysis", "decision",
+                current_candidate = revision_candidates[-1]
+                inputs = [baseline_ref, current_candidate, *self._optional_refs(
+                    "analysis", "decision",
                 )]
+                measured_implementation = self._measured_implementation_ref(current_candidate)
+                if measured_implementation is not None:
+                    inputs.append(measured_implementation)
                 return self._execute(
                     "analysis", f"analysis_r{iteration}", None, tuple(inputs),
                     allow_partial=True, baseline_ref=baseline_ref,
-                    result_ref=revision_candidates[0],
+                    result_ref=current_candidate,
                     analysis_context=self._analysis_context(),
                     use_llm=self.services.llm_client is not None,
                     client=self.services.llm_client,
@@ -1874,7 +1978,12 @@ class ResearchApplication:
             )
         if action == "report_write":
             from simple_ar.report.writing import ReportWritingRequest
-            report_context, memory, config, template, _ = self._report_writing_parts()
+            try:
+                report_context, memory, config, template, _ = self._report_writing_parts()
+            except ResearchApplicationError as exc:
+                self.controller.pause(f"Report inputs are not ready: {exc}")
+                self._persist_application_views()
+                return False
             sources = tuple(ref for key, ref in self.controller.manifest.state_refs.items() if key not in {"work_plan", "work_plan_markdown", "readiness"})
             resume_ref = None
             for attempt in reversed(self.controller.list_attempts()):
@@ -1998,8 +2107,55 @@ class ResearchApplication:
             allow_partial=True,
         )
 
+    def _run_candidate_technical_repair(self, action: str) -> bool:
+        iteration, repair_index = _candidate_action_parts(action)
+        if repair_index is None or repair_index < 1:
+            raise ResearchApplicationError(f"Invalid technical repair action: {action}")
+        failed_name = (
+            f"experiment_revision_{iteration}" if repair_index == 1
+            else f"experiment_revision_{iteration}_repair_{repair_index - 1}"
+        )
+        failed_ref = self.controller.manifest.state_refs.get(failed_name)
+        if failed_ref is None or not self._state_failed(failed_name):
+            self.controller.pause("Technical candidate repair requires a recorded failed measurement.")
+            self._persist_application_views()
+            return False
+        execution = self._execution_config().get("execution")
+        if not isinstance(execution, Mapping):
+            self.controller.pause("Technical candidate repair requires the accepted execution configuration.")
+            self._persist_application_views()
+            return False
+        try:
+            request = implementation_request(
+                execution, self.services.llm_client, validate=False,
+                task_text=self.brief.request_text,
+                revision_instruction=self._revision_instruction(),
+                contract=self._execution_contract(),
+            )
+            request = replace(
+                request, failure_ref=failed_ref,
+                message_callback=self.services.message_callback,
+                budget_ledger=self.budget_ledger,
+                session_id=self.controller.manifest.session_id,
+            )
+        except (TypeError, ValueError) as exc:
+            self.controller.pause(f"Technical candidate repair is not executable: {exc}")
+            self._persist_application_views()
+            return False
+        inputs = [failed_ref, *self._input_refs(
+            "brief", "runtime_config", f"preparation_r{iteration}",
+        ), self._implementation_design_ref()]
+        inputs.extend(self._revision_baseline_refs())
+        inputs.extend(self._optional_refs("analysis", "decision"))
+        return self._execute(
+            "implement", f"implementation_r{iteration}_repair_{repair_index}",
+            request, tuple(inputs),
+        )
+
     def _run_candidate_measurement(self, action: str) -> bool:
-        iteration, pair_index = _candidate_action_parts(action)
+        iteration, suffix = _candidate_action_parts(action)
+        repair_index = suffix if action.startswith("retest_candidate:") else None
+        pair_index = None if repair_index is not None else suffix
         execution = self._execution_config().get("execution")
         try:
             request = execution_request(
@@ -2015,10 +2171,16 @@ class ResearchApplication:
             self._persist_application_views()
             return False
         inputs = [self._implementation_design_ref(), *self._input_refs("runtime_config", f"preparation_r{iteration}")]
-        inputs.extend(self._optional_refs(f"implementation_r{iteration}", "analysis", "decision"))
+        implementation_name = (
+            f"implementation_r{iteration}_repair_{repair_index}"
+            if repair_index is not None else f"implementation_r{iteration}"
+        )
+        inputs.extend(self._optional_refs(implementation_name, "analysis", "decision"))
         if pair_index is not None:
             inputs.extend(self._revision_baseline_refs())
         state_name = (
+            f"experiment_revision_{iteration}_repair_{repair_index}"
+            if repair_index is not None else
             f"experiment_revision_{iteration}"
             if pair_index is None else f"experiment_revision_{iteration}_{pair_index}"
         )
@@ -2163,13 +2325,54 @@ class ResearchApplication:
         return refs, ""
 
     def _revision_candidate_refs(self, iteration: int) -> list[ArtifactRef]:
-        prefix = f"experiment_revision_{iteration}"
         refs = self.controller.manifest.state_refs
-        keys = sorted(
-            (key for key in refs if key == prefix or key.startswith(prefix + "_")),
-            key=lambda key: (0 if key == prefix else 1, key),
-        )
-        return [refs[key] for key in keys]
+        return [refs[step.state_name] for step in self._load_task_plan().steps
+                if step.capability == "experiment"
+                and (step.action == f"research_candidate:{iteration}"
+                     or step.action.startswith(f"research_candidate:{iteration}_")
+                     or step.action.startswith(f"retest_candidate:{iteration}_"))
+                and step.state_name in refs]
+
+    def _measured_implementation_ref(self, result_ref: ArtifactRef) -> ArtifactRef | None:
+        payload = self.controller.store.read_json(result_ref)
+        ref = self._artifact_ref(payload.get("implementation_ref")) if isinstance(payload, Mapping) else None
+        if ref is not None and ref.kind != "implementation_result":
+            raise ResearchApplicationError("A measurement references a non-implementation artifact as its producing patch.")
+        return ref
+
+    def _experiment_diagnosis_ref(self, result_ref: ArtifactRef) -> ArtifactRef | None:
+        if result_ref.kind != "experiment_result":
+            return None
+        payload = self.controller.store.read_json(result_ref)
+        if not isinstance(payload, Mapping) or str(payload.get("execution_status") or "").lower() == "passed":
+            return None
+        artifacts = payload.get("artifacts")
+        relative = artifacts.get("diagnosis") if isinstance(artifacts, Mapping) else None
+        if not isinstance(relative, str) or not relative.strip():
+            return None
+        try:
+            ref = self.controller.store.ref(
+                Path(result_ref.path).parent / relative,
+                kind="experiment_diagnosis", schema="experiment_diagnosis.v1",
+                producer="research.experiment",
+            )
+        except ValueError:
+            return None
+        return ref if self.controller.store.exists(ref) else None
+
+    @staticmethod
+    def _compact_failure_diagnosis(diagnosis: Mapping[str, Any]) -> dict[str, Any]:
+        details = diagnosis.get("context")
+        return {
+            "status": str(diagnosis.get("status") or "unknown"),
+            "summary": str(diagnosis.get("summary") or "")[:600],
+            "deficiencies": [
+                {key: row[key] for key in ("category", "code", "message") if key in row}
+                for row in diagnosis.get("deficiencies", [])[:8] if isinstance(row, Mapping)
+            ] if isinstance(diagnosis.get("deficiencies"), list) else [],
+            "stderr_tail": str(details.get("stderr_tail") or "")[-2200:]
+            if isinstance(details, Mapping) else "",
+        }
 
     def _execute(
         self, capability: str, state_name: str,
@@ -2184,6 +2387,10 @@ class ResearchApplication:
             preparation = self._active_preparation_ref()
             if preparation is not None and preparation not in inputs:
                 inputs += (preparation,)
+        if capability == "analysis" and isinstance(kwargs.get("result_ref"), ArtifactRef):
+            diagnosis_ref = self._experiment_diagnosis_ref(kwargs["result_ref"])
+            if diagnosis_ref is not None and diagnosis_ref not in inputs:
+                inputs += (diagnosis_ref,)
         attempt_id = self.controller.allocate_attempt_id(capability)
         request = self._request_for_attempt(request, attempt_id)
         if request is not None:
@@ -2414,6 +2621,10 @@ class ResearchApplication:
                 "and use technical recovery separately before another scientific round."
             )
             options = [{"action": "technical_retry", "reason": "Inspect the failed attempt before retrying the technical fault."}]
+        elif self._task_kind() == "measurement":
+            accepted_action = "stop"
+            disposition = "deliver_observed_result"
+            reason = "The requested direct measurement and analysis are complete; no research candidate or scientific follow-up was requested."
         elif requested_action not in {"supplement", "revise_candidate", "stop", "request_input"}:
             accepted_action = "request_input"
             disposition = "await_input"
@@ -2494,12 +2705,20 @@ class ResearchApplication:
                 else:
                     _, validation_reason = self._validated_baseline_refs(execution)
             if validation_reason:
-                accepted_action = "request_input"
-                disposition = "await_input"
-                reason = (
-                    reason or "The analysis proposed a candidate revision."
-                ) + " Application validation did not accept it: " + validation_reason
-                options = [{"action": "stop", "reason": "Preserve the observed result until a valid candidate lineage is available."}]
+                if recommendation.get("revision_purpose") == "verification_only":
+                    accepted_action = "stop"
+                    disposition = "deliver_with_limits"
+                    reason = (
+                        reason or "The analysis proposed a candidate revision."
+                    ) + " No new training was run: " + validation_reason
+                    options = [{"action": "request_input", "reason": "Supply an authorized low-cost method check or a distinct scientific direction to continue."}]
+                else:
+                    accepted_action = "request_input"
+                    disposition = "await_input"
+                    reason = (
+                        reason or "The analysis proposed a candidate revision."
+                    ) + " Application validation did not accept it: " + validation_reason
+                    options = [{"action": "stop", "reason": "Preserve the observed result until a valid candidate lineage is available."}]
             else:
                 accepted_action = "revise_candidate"
                 automatic_follow_up = True
@@ -2659,6 +2878,11 @@ class ResearchApplication:
         extended = append_research_followup(
             plan, iteration, action=action, pair_count=pair_count,
             revision_base=revision_base, supplement_count=supplement_count,
+            repair_count=(
+                repair_limit(execution)
+                if action == "revise_candidate" and not pair_count and isinstance(execution, Mapping)
+                else 0
+            ),
         )
         if extended == plan:
             return None
@@ -2770,6 +2994,8 @@ class ResearchApplication:
         return int(state.removeprefix("analysis_r") or 0)
 
     def _research_iteration_limit(self) -> int:
+        if self._task_kind() == "measurement":
+            return 0
         value = self._effective_config().get("research_max_iterations", 1)
         maximum = value if type(value) is int and value >= 0 else 1
         # Design clarification is a technical handoff, not a scientific round.
@@ -2827,6 +3053,8 @@ class ResearchApplication:
             return "A candidate revision must include an analysis reason."
         if not str(recommendation.get("revision_intent") or "").strip():
             return "A candidate revision must state the intended change."
+        if recommendation.get("revision_purpose") != "method_change":
+            return "A scientific candidate revision must change the tested method; verification-only instrumentation cannot trigger another identical training run."
         if str(recommendation.get("revision_base") or "candidate").strip().lower() not in {"candidate", "baseline"}:
             return "A candidate revision must choose candidate or baseline as its revision base."
         return ""
@@ -3313,6 +3541,7 @@ class ResearchApplication:
                     "max_chunks": self.services.max_chunks,
                     "idea_limit": self.services.idea_limit,
                     "budget_limits": _json_safe(self.services.budget_limits),
+                    "llm_required": self.services.llm_client is not None,
                 }, kind="runtime_config", schema="research_application_config.v1",
                 producer="research_application",
             ),
@@ -3919,7 +4148,9 @@ class ResearchApplication:
 
     def _report_writing_parts(self):
         from simple_ar.report.schema import ReportRuntimeConfig
-        from simple_ar.report.templates import load_report_template_bundle, resolve_experiment_delivery
+        from simple_ar.report.templates import (
+            load_report_template_bundle, resolve_experiment_delivery, resolve_research_only_delivery,
+        )
 
         report_context, memory = self.report_inputs()
         config = ReportRuntimeConfig.model_validate(self._effective_config().get("report", {}))
@@ -3931,6 +4162,10 @@ class ResearchApplication:
             config, delivery = resolve_experiment_delivery(config, analysis, decision)
             memory.template = config.template
             report_context.results["delivery"] = delivery
+            memory.key_decisions.append(json.dumps(delivery, ensure_ascii=False))
+        elif report_context.report_mode == "research_only":
+            config, delivery = resolve_research_only_delivery(config, source_count=len(report_context.papers))
+            memory.template = config.template
             memory.key_decisions.append(json.dumps(delivery, ensure_ascii=False))
         template = load_report_template_bundle(report_mode=report_context.report_mode, config=config)
         return report_context, memory, config, template, delivery
@@ -4105,7 +4340,12 @@ class ResearchApplication:
             )
 
         if action == "report_write" and requires_confirmation(mode, "delivery", action):
-            _, _, config, template, delivery = self._report_writing_parts()
+            try:
+                _, _, config, template, delivery = self._report_writing_parts()
+            except ResearchApplicationError as exc:
+                self.controller.pause(f"Report inputs are not ready: {exc}")
+                self._persist_application_views()
+                return True
             requested_template = self._effective_config().get("report", {})
             requested_template = requested_template.get("template", "auto") if isinstance(requested_template, Mapping) else "auto"
             goal = delivery.get("goal_assessment") if isinstance(delivery, Mapping) else None
@@ -4173,7 +4413,7 @@ class ResearchApplication:
         for step in plan.steps:
             if self._step_completed(step):
                 continue
-            if not self._condition_applies(step.condition):
+            if not self._step_condition_applies(step):
                 continue
             return step.action
         return None
@@ -4234,6 +4474,14 @@ class ResearchApplication:
             )
         if prefix == "after_success":
             return self._state_succeeded(target)
+        if prefix == "after_observation":
+            if "task_plan" not in self.controller.manifest.state_refs:
+                return False
+            return any(
+                step.state_name == target and step.capability == "experiment"
+                and self._step_completed(step)
+                for step in self._load_task_plan().steps
+            )
         if prefix == "on_request":
             requested = {str(item).strip().lower() for item in self.brief.requested_outputs}
             return target in requested or (target == "report" and bool(requested & {"paper", "full_paper"}))
@@ -4244,6 +4492,35 @@ class ResearchApplication:
             payload = self.controller.store.read_json(ref)
             return isinstance(payload, Mapping) and str(payload.get("action") or "").strip().lower() == target.lower()
         raise ResearchApplicationError(f"Unsupported accepted-plan condition: {condition}")
+
+    def _step_condition_applies(self, step: Any) -> bool:
+        # Older accepted follow-up plans used after_success for reanalysis.
+        # Preserve those plan artifacts, but honor the evidence boundary when
+        # a persisted experiment result is a failure rather than a success.
+        if step.action.startswith("reanalysis:") and step.condition.startswith("after_success:"):
+            iteration = int(step.action.rsplit(":", 1)[1])
+            if self._failed_followup_measurement(iteration) is not None:
+                return True
+        return self._condition_applies(step.condition)
+
+    def _failed_followup_measurement(self, iteration: int) -> tuple[str, ArtifactRef] | None:
+        refs = self.controller.manifest.state_refs
+        latest = None
+        for step in self._load_task_plan().steps:
+            action = step.action
+            if not (
+                action == f"research_candidate:{iteration}"
+                or action.startswith(f"research_candidate:{iteration}_")
+                or action == f"supplement_baseline:{iteration}"
+                or action.startswith(f"supplement_baseline:{iteration}_")
+                or action == f"supplement_candidate:{iteration}"
+                or action.startswith(f"supplement_candidate:{iteration}_")
+                or action.startswith(f"retest_candidate:{iteration}_")
+            ):
+                continue
+            if self._step_completed(step):
+                latest = (step.state_name, refs[step.state_name])
+        return latest if latest is not None and self._state_failed(latest[0]) else None
 
     def _state_failed(self, name: str) -> bool:
         ref = self.controller.manifest.state_refs.get(name)
@@ -4283,6 +4560,8 @@ class ResearchApplication:
         bug_intents = {"bug", "bug_fix", "bug_repair", "repair"}
         if configured in bug_intents:
             return "bug_fix"
+        if configured == "measurement":
+            return "measurement"
         if any(str(item).strip().lower() in bug_intents for item in self.brief.intents):
             return "bug_fix"
         if configured == "survey" or any(
@@ -4317,7 +4596,7 @@ class ResearchApplication:
                 attempt = self._attempt_for_ref(refs[step.state_name])
                 if attempt is not None:
                     row["attempt_id"] = attempt.attempt_id
-            elif not self._condition_applies(step.condition):
+            elif not self._step_condition_applies(step):
                 row["status"] = "skipped"
             else:
                 row["status"] = "ready" if step.action == next_action else "pending"

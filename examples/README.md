@@ -14,6 +14,10 @@ The coding cases use standalone `code-task`; they are not full autonomous
 research or paper-quality acceptance. Research cases use `research-session`.
 A runnable case is not a claim of scientific or writing-quality acceptance.
 
+[TabM research](tabm_research/README.md) is kept separately as an experimental
+prepared-server diagnostic. Its external paper, code, data and Python environment
+are not included in a fresh checkout; it is not a quick-start case.
+
 ## Files and outputs
 
 - `examples/<case>/`: reusable case inputs only, never generated runs or credentials.

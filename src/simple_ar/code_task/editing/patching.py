@@ -318,15 +318,37 @@ def propose_patch_edits(
             # A request for missing source is a read operation, not permission
             # to edit those files. Keep the accepted targets and patch budget.
             request = proposal.get("context_request")
-            if not proposal.get("edits") and isinstance(request, dict):
-                request = _normalize_context_request(request, _known_paths(index))
+            if not proposal.get("edits") and _implementation_feedback(
+                proposal.get("implementation_feedback")
+            ) is None:
+                request = _normalize_context_request(
+                    request if isinstance(request, dict) else {}, _known_paths(index),
+                )
+                source_fallback = False
+                if not (request["files"] or request["query"] or request["symbols"]):
+                    # A model can fail to name a useful source request even
+                    # after one clarification. If an approved edit target was
+                    # only partially shown, spend the remaining read budget
+                    # on that same file before declaring the edit blocked.
+                    # This does not add an editable path or change the design.
+                    truncated_targets = list(dict.fromkeys(
+                        item["path"] for item in snippets
+                        if item.get("truncated") and item.get("path") in proposal_allowed_files
+                    ))
+                    if truncated_targets:
+                        request = {
+                            "files": truncated_targets[:max_files], "query": "", "symbols": [],
+                            "literal": "", "reason": "Bounded continuation of truncated editable source",
+                        }
+                        source_fallback = True
                 total_chars = 2 * max_files * max_source_chars_per_file
                 if loaded_context is not None:
                     total_chars = int(loaded_context.context_pack.get("budget", {}).get("max_total_chars", total_chars))
                 extra = _requested_source_context(workspace_dir, index, request,
                     supplied=[*snippets, *reference_snippets], max_files=max_files,
                     max_chars=max_source_chars_per_file,
-                    max_total_chars=max(0, total_chars - sum(len(item["text"]) for item in snippets)))
+                    max_total_chars=max(0, total_chars - sum(len(item["text"]) for item in snippets)),
+                    max_windows_per_file=2 if source_fallback else 1)
                 if extra:
                     context_followup = {"request": request, "snippets": extra,
                                         "initial_summary": proposal.get("summary", ""),
@@ -336,12 +358,21 @@ def propose_patch_edits(
                     write_json(meta_dir / "edit_context_followup.json", context_followup)
                     if extra:
                         _emit(message_callback, "Reading requested source context before one edit-proposal retry.")
+                        allowed_extra = [
+                            {**item, "access_role": "editable"}
+                            for item in extra if item["path"] in proposal_allowed_files
+                        ]
+                        reference_extra = [
+                            item for item in extra if item["path"] not in proposal_allowed_files
+                        ]
                         proposal = client.ask_json(
                             CODE_TASK_EDIT_SYSTEM,
                             _edit_user_prompt(
                                 task_text=task_text, patch_plan=patch_plan, index=index,
-                                snippets=snippets, reference_snippets=extra,
-                                read_only_context=list(dict.fromkeys([*read_only_context, *(item["path"] for item in extra)])),
+                                snippets=[*snippets, *allowed_extra], reference_snippets=reference_extra,
+                                read_only_context=list(dict.fromkeys([
+                                    *read_only_context, *(item["path"] for item in reference_extra),
+                                ])),
                                 allowed_patterns=allowed_patterns, protected_patterns=protected_patterns,
                                 budget=budget, allowed_edit_files=proposal_allowed_files,
                                 batch_work_item=batch_constraints.get("work_item", {}),
@@ -542,8 +573,8 @@ def _ask_llm_for_edits(
     task_text: str,
     patch_plan: str,
     index: dict[str, Any],
-    snippets: list[dict[str, str]],
-    reference_snippets: list[dict[str, str]],
+    snippets: list[dict[str, Any]],
+    reference_snippets: list[dict[str, Any]],
     read_only_context: list[str],
     allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
@@ -575,16 +606,30 @@ def _ask_llm_for_edits(
         response,
         snippets=[*snippets, *reference_snippets],
         allowed_edit_files=allowed_edit_files,
+        known_paths=_known_paths(index),
     ):
+        partial_source = any(
+            item.get("truncated") for item in [*snippets, *reference_snippets]
+            if item.get("path") in allowed_edit_files
+        )
+        source_guidance = (
+            "Some allowed source snippets are truncated. If the missing behavior is outside "
+            "the shown span, request another bounded read with `context_request.files` "
+            "naming the same file and, when possible, a specific `query` or `symbols`. "
+            "A visible file is not necessarily a fully inspected file. Do not invent edits. "
+            if partial_source else
+            "The requested editable files and source snippets were already provided. "
+            "Do not ask to inspect complete files again. "
+        )
         response = client.ask_json(
             CODE_TASK_EDIT_SYSTEM,
             prompt
             + "\n\n"
-            + "You returned no edits while the requested editable files and source snippets "
-            + "were already provided above. Do not ask to inspect those files again. "
-            + "Produce exact old/new replacements for the allowed editable files now. "
-            + "Only return an empty `edits` list if the approved patch plan is impossible "
-            + "within the edit scope, and then explain the concrete blocker in `validation`.",
+            + "You returned no edits and no actionable source request. "
+            + source_guidance
+            + "Produce exact old/new replacements when the needed source is visible. "
+            + "Only declare the approved patch plan impossible for a concrete design or "
+            + "scope blocker, not because a bounded snippet omitted later code.",
             label="code-task-propose-edits-retry",
         )
     return response
@@ -593,10 +638,14 @@ def _ask_llm_for_edits(
 def _should_retry_empty_context_request(
     response: dict[str, Any],
     *,
-    snippets: list[dict[str, str]],
+    snippets: list[dict[str, Any]],
     allowed_edit_files: list[str],
+    known_paths: set[str],
 ) -> bool:
-    if response.get("implementation_feedback"):
+    # Only a validated design-gap handoff can suppress source clarification.
+    # An arbitrary truthy object is discarded at normalization and must not
+    # turn a recoverable clipped-source request into a permanent stop.
+    if _implementation_feedback(response.get("implementation_feedback")) is not None:
         return False
     edits = response.get("edits")
     if isinstance(edits, list) and edits:
@@ -606,16 +655,11 @@ def _should_retry_empty_context_request(
     if not editable_snippet_paths:
         return False
     context_request = response.get("context_request")
-    if not isinstance(context_request, dict):
-        return True
-    if context_request.get("symbols") or context_request.get("query"):
-        return False
-    requested_files = {
-        str(path).strip()
-        for path in context_request.get("files", [])
-        if str(path).strip()
-    }
-    return not requested_files
+    normalized_request = _normalize_context_request(
+        context_request if isinstance(context_request, dict) else {}, known_paths,
+    )
+    return not (normalized_request["files"] or normalized_request["query"]
+                or normalized_request["symbols"])
 
 
 def _edit_user_prompt(
@@ -623,8 +667,8 @@ def _edit_user_prompt(
     task_text: str,
     patch_plan: str,
     index: dict[str, Any],
-    snippets: list[dict[str, str]],
-    reference_snippets: list[dict[str, str]],
+    snippets: list[dict[str, Any]],
+    reference_snippets: list[dict[str, Any]],
     read_only_context: list[str],
     allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
@@ -660,7 +704,9 @@ def _edit_user_prompt(
     ]
     snippet_text = "\n\n".join(
         f"### {item.get('path', '')} "
-        f"({item.get('access_role', 'editable')})\n"
+        f"({item.get('access_role', 'editable')}; "
+        f"{'partial' if item.get('truncated') else 'complete'} source, "
+        f"{item.get('source_chars', 'unknown')} total chars)\n"
         f"```text\n{item.get('text', '')}\n```"
         for item in snippets
     )
@@ -699,11 +745,12 @@ def _edit_user_prompt(
         "combine them into one larger old/new replacement.\n"
         "- Keep the patch minimal and aligned with the approved patch plan.\n\n"
         "Context discipline:\n"
-        "- If an allowed editable file appears in Selected source snippets, treat it "
-        "as already inspected and propose exact old/new replacements when the "
-        "approved plan calls for changes in that file.\n"
-        "- Do not return a context_request that only asks for files already present "
-        "in Selected source snippets or Reference source snippets.\n"
+        "- A selected file can be only partially visible. If the required behavior is "
+        "outside a partial snippet, request a bounded continuation of that same file "
+        "using `context_request.files` and a concrete query or symbol when known. "
+        "This is a read request, not permission to edit beyond the allowed files.\n"
+        "- Do not request source already visible in a complete snippet or repeat "
+        "an identical supplied span.\n"
         "- Return an empty `edits` list only when the task is impossible within the "
         "allowed files, edit budget, or safety policy; explain the blocker in "
         "`validation`.\n\n"
@@ -1309,19 +1356,23 @@ def _context_pack_editable_snippets(
     *,
     selected_files: list[str],
     max_chars_per_file: int,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     selected_set = set(selected_files)
-    snippets: list[dict[str, str]] = []
+    snippets: list[dict[str, Any]] = []
     for row in loaded.snippets:
         path = _string(row.get("path"))
         text = row.get("text")
         if path not in selected_set or not isinstance(text, str):
             continue
+        limit = max(200, max_chars_per_file)
         snippets.append(
             {
                 "path": path,
                 "access_role": "editable",
-                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
+                "text": _clip_text(text, max_chars=limit),
+                "source_offset": 0,
+                "source_chars": row.get("source_chars", len(text)),
+                "truncated": bool(row.get("truncated")) or len(text) > limit,
             }
         )
     return snippets
@@ -1333,19 +1384,23 @@ def _context_pack_reference_snippets(
     excluded_files: list[str],
     max_files: int,
     max_chars_per_file: int,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     excluded = set(excluded_files)
-    snippets: list[dict[str, str]] = []
+    snippets: list[dict[str, Any]] = []
     for row in loaded.snippets:
         path = _string(row.get("path"))
         text = row.get("text")
         if not path or path in excluded or not isinstance(text, str):
             continue
+        limit = max(200, max_chars_per_file)
         snippets.append(
             {
                 "path": path,
                 "access_role": "reference",
-                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
+                "text": _clip_text(text, max_chars=limit),
+                "source_offset": 0,
+                "source_chars": row.get("source_chars", len(text)),
+                "truncated": bool(row.get("truncated")) or len(text) > limit,
             }
         )
         if len(snippets) >= max(1, max_files):
@@ -1578,8 +1633,8 @@ def _source_snippets(
     selected_files: list[str],
     *,
     max_chars_per_file: int,
-) -> list[dict[str, str]]:
-    snippets: list[dict[str, str]] = []
+) -> list[dict[str, Any]]:
+    snippets: list[dict[str, Any]] = []
     workspace = workspace_dir.resolve()
     for rel_path in selected_files:
         path = _workspace_file(workspace, rel_path)
@@ -1594,6 +1649,9 @@ def _source_snippets(
                 "path": rel_path,
                 "access_role": "editable",
                 "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
+                "source_offset": 0,
+                "source_chars": len(text),
+                "truncated": len(text) > max(200, max_chars_per_file),
             }
         )
     return snippets

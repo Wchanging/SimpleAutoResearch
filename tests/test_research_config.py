@@ -12,6 +12,17 @@ from simple_ar.cli.research_config import research_defaults
 
 
 class ResearchConfigTests(unittest.TestCase):
+    def test_direct_measurement_kind_requires_experiments_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "measurement.toml"
+            path.write_text('[task]\ngoal="Measure supplied command"\nkind="measurement"\noutputs=["experiments"]\n', encoding="utf-8")
+            defaults = research_defaults(["research-session", "--config", str(path)])
+            args = build_parser(research_defaults=defaults).parse_args(["research-session", "--config", str(path)])
+            self.assertEqual((args.task_kind, args.outputs), ("measurement", ["experiments"]))
+            path.write_text(path.read_text(encoding="utf-8").replace('outputs=["experiments"]', 'outputs=["report"]'), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, 'requires task.outputs'):
+                research_defaults(["research-session", "--config", str(path)])
+
     def test_document_review_is_explicit_and_can_be_disabled_on_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "research.toml"
@@ -534,6 +545,33 @@ class ResearchConfigTests(unittest.TestCase):
                 self.assertTrue(args.research_use_fulltext)
                 self.assertTrue(args.research_allow_pdf_download)
                 self.assertTrue(args.research_keep_raw_pdf)
+
+    def test_tabm_example_declares_extensible_single_seed_protocol(self):
+        import tomllib
+        from simple_ar.app.research_execution import normalize_execution_config
+
+        root = Path(__file__).resolve().parents[1]
+        with (root / "examples/tabm_research/research.toml").open("rb") as stream:
+            example = tomllib.load(stream)
+        boundary = example["execution"]
+        self.assertEqual(boundary["seeds"], [0])
+        self.assertEqual(boundary["seed_flag"], "--seed")
+        defaults = research_defaults([
+            "research-session", "--config", str(root / "examples/tabm_research/research.toml"),
+        ])
+        self.assertEqual(defaults["execution_details"]["seeds"], [0])
+        self.assertEqual(defaults["execution_details"]["seed_flag"], "--seed")
+        command = ["python", "run_tabm.py", "--seed", "0"]
+        accepted = normalize_execution_config({
+            "command": command,
+            "baseline": {"command": command},
+            "timeout_sec": boundary["timeout_sec"],
+            "seeds": boundary["seeds"],
+            "seed_flag": boundary["seed_flag"],
+        })
+        self.assertEqual(len(accepted["pairs"]), 1)
+        self.assertEqual(accepted["pairs"][0]["seed"], 0)
+        self.assertEqual(accepted["protocol_seed_flag"], "--seed")
 
     def test_report_figures_are_forwarded_as_existing_report_config(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -19,7 +19,7 @@ def _paper_to_bibtex(paper: Paper) -> str:
     fields = {
         "title": paper.title,
         "author": " and ".join(paper.authors),
-        "url": paper.url,
+        "url": "" if paper.source == "local_files" else paper.url,
     }
     if paper.published:
         fields["year"] = paper.published[:4]

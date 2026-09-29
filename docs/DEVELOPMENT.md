@@ -440,6 +440,18 @@ This is bounded technical repair, not model-directed research revision or comple
 report generation. The default attempt cap may need an explicit increase for a
 longer authorized workflow; a repair limit does not enlarge other budgets.
 
+The same explicit repair limit applies after a **single-condition research
+revision** fails at execution: the accepted plan can schedule
+`repair_candidate` then `retest_candidate`, and always reaches `reanalysis`
+after an observed result, including a final failure. The repair consumes the
+failed run's immutable artifact and the original revision handoff; retesting
+uses the unchanged protocol. Paired follow-up repairs are not yet supported,
+and a missing/invalid repair proposal pauses before remeasurement. For report
+provenance, the Writer receives all completed plan-order measurements, while
+failed runs contribute status and captured diagnosis rather than fabricated
+metric values. The analysis handoff requires the producing implementation ref
+for the measured revision, not the globally latest patch.
+
 `ResearchApplication.latest_experiment_ref()` selects the last recorded candidate
 from the application action sequence. Analysis, experiment deliverable references
 and the exported snapshot use this same selection; they do not treat the initial

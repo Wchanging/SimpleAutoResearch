@@ -12,6 +12,8 @@ from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import validate_citations
 from simple_ar.integrations.llm import LLMError
 from simple_ar.report.agent import (
+    REVIEWER_SYSTEM,
+    WRITER_SYSTEM,
     _compact_execution_results,
     _is_claim_record_response,
     _merge_revision_draft,
@@ -34,6 +36,8 @@ from simple_ar.report.citations import (
     strip_references_section as _strip_references_section,
 )
 from simple_ar.report.memory import initialize_report_memory
+from simple_ar.report.projection import attach_experiment_history
+from simple_ar.core.capabilities import ArtifactRef
 from simple_ar.report.schema import (
     ClaimEvidenceRecord,
     MetricSource,
@@ -224,6 +228,65 @@ def _extract_prompt_value(prompt: str, key: str) -> str:
 
 
 class ReportSafetyTests(unittest.TestCase):
+    def test_writer_and_reviewer_distinguish_failed_execution_from_written_code(self) -> None:
+        for instruction in (WRITER_SYSTEM, REVIEWER_SYSTEM):
+            self.assertIn("A failed run", instruction)
+            self.assertIn("not as a computation that actually occurred", instruction)
+
+    def test_history_keeps_earlier_passed_candidate_when_latest_failed(self) -> None:
+        context = ReportContext(topic="Compare revisions", report_mode="experiment",
+                                results={"status": "failed", "metrics": {}})
+        memory = ReportMemory()
+        initial = ArtifactRef("attempts/experiment-1/results.json", kind="experiment_result")
+        failed = ArtifactRef("attempts/experiment-2/results.json", kind="experiment_result")
+        context, memory = attach_experiment_history(context, memory, [
+            ("experiment", initial, {"status": "passed", "execution_status": "passed",
+                                     "metrics": {"rmse": 0.4443}, "result_schema": {"primary_metric": "rmse"}}),
+            ("research_candidate:1", failed, {"status": "failed", "execution_status": "failed",
+                                                "metrics": {}}),
+        ], current_ref=failed)
+        compact = _compact_execution_results(context.results)
+        self.assertEqual([row["status"] for row in compact["measurement_history"]],
+                         ["passed", "failed"])
+        self.assertEqual(compact["measurement_history"][0]["metrics"]["rmse"], 0.4443)
+        self.assertEqual(compact["measurement_history"][1]["metrics"], {})
+        self.assertEqual([(row.label, row.value) for row in memory.metric_sources],
+                         [("experiment", 0.4443)])
+        self.assertEqual(len(context.source_handles), 2)
+
+    def test_writer_receives_failure_diagnosis_separately_from_metrics(self) -> None:
+        compact = _compact_execution_results({
+            "status": "failed", "metrics": {},
+            "failure_diagnosis": {
+                "status": "failed", "summary": "Run exited early.",
+                "stderr_tail": "TypeError: unexpected argument type",
+            },
+        })
+        self.assertIn("TypeError", compact["failure_diagnosis"]["stderr_tail"])
+        self.assertEqual(compact["metrics"], {})
+
+    def test_paired_history_stays_visible_without_pooling_old_revision_metrics(self) -> None:
+        context = ReportContext(topic="Paired revisions", report_mode="experiment",
+                                results={"status": "passed"})
+        memory = ReportMemory()
+        prior = ArtifactRef("attempts/experiment-old/results.json", kind="experiment_result")
+        current = ArtifactRef("outputs/experiment_set.json", kind="experiment_set")
+        context, memory = attach_experiment_history(context, memory, [
+            ("matrix_candidate_0", prior, {"status": "passed", "metrics": {"accuracy": 0.7}}),
+        ], current_ref=current, include_prior_metrics=False)
+        self.assertEqual(context.results["measurement_history"][0]["metrics"], {"accuracy": 0.7})
+        self.assertEqual(memory.metric_sources, [])
+
+    def test_large_history_prompt_keeps_total_and_passed_candidate_count(self) -> None:
+        history = [{"action": f"research_candidate:{index}", "status": "passed",
+                    "metrics": {"accuracy": index / 100}, "artifact": f"attempts/{index}/results.json"}
+                   for index in range(30)]
+        compact = _compact_execution_results({"measurement_history": history})
+        self.assertEqual(compact["measurement_history_total"], 30)
+        self.assertEqual(compact["measurement_history_omitted"], 6)
+        self.assertEqual(compact["passed_candidate_measurements"], 30)
+        self.assertEqual(len(compact["measurement_history"]), 24)
+
     def test_report_agents_receive_bounded_verified_execution_comparison(self) -> None:
         compact = _compact_execution_results(
             {
@@ -577,6 +640,22 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertNotIn("References", {section.heading for section in memory.section_plan})
         self.assertIn("paper:paper-1", {handle.handle for handle in memory.source_handles})
         self.assertIn("P1", {handle.citation_key for handle in memory.source_handles})
+
+    def test_research_only_auto_delivery_respects_source_count_and_explicit_template(self) -> None:
+        from simple_ar.report.templates import resolve_research_only_delivery
+
+        small, small_delivery = resolve_research_only_delivery(ReportRuntimeConfig(), source_count=1)
+        self.assertEqual(small.template, "source_review")
+        self.assertEqual(small_delivery["template"], "source_review")
+        source_template = load_report_template_bundle(report_mode="research_only", config=small)
+        self.assertEqual(source_template.name, "source_review")
+        self.assertIn("single supplied source", source_template.template_markdown)
+
+        multiple, multiple_delivery = resolve_research_only_delivery(ReportRuntimeConfig(), source_count=3)
+        self.assertEqual(multiple.template, "auto")
+        self.assertEqual(multiple_delivery["template"], "survey")
+        explicit, _ = resolve_research_only_delivery(ReportRuntimeConfig(template="survey"), source_count=1)
+        self.assertEqual(explicit.template, "survey")
 
     def test_report_templates_can_resolve_from_packaged_resources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1033,7 +1112,9 @@ class ReportSafetyTests(unittest.TestCase):
         )
 
         self.assertEqual(audit.claim_audit.status, "warning")
-        self.assertEqual(audit.claim_audit.findings[0].type, "unsupported_claim")
+        self.assertEqual(audit.claim_audit.findings[0].type, "unlinked_analysis_claim")
+        self.assertEqual(audit.claim_audit.findings[0].severity, "minor")
+        self.assertIn("untested", audit.claim_audit.findings[0].suggested_action)
 
     def test_report_audit_does_not_treat_pass_at_k_as_citation(self) -> None:
         paper = Paper(

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from simple_ar.integrations.llm import LLMError
 from simple_ar.result_analysis import AnalysisContext, run_result_analysis
+from simple_ar.result_analysis.service import compact_project_results_for_prompt
 
 
 class FakeAnalysisClient:
@@ -32,6 +33,17 @@ class FakeAnalysisClient:
 
 
 class ResultAnalysisTests(unittest.TestCase):
+    def test_failed_execution_carries_diagnosis_into_analysis_prompt(self) -> None:
+        compact = compact_project_results_for_prompt({
+            "execution_result": {"status": "failed", "metrics": {}},
+            "failure_diagnosis": {
+                "summary": "Run exited early.",
+                "stderr_tail": "TypeError: unexpected argument type",
+            },
+        }, {})
+        self.assertIn("TypeError", compact["failure_diagnosis"]["stderr_tail"])
+        self.assertEqual(compact["execution_result"]["status"], "failed")
+
     def test_goal_judgment_is_separate_and_requires_resolvable_evidence(self):
         from simple_ar.result_analysis.service import parse_goal_assessment
         context = AnalysisContext(metrics={"accuracy": 0.7})
@@ -146,6 +158,7 @@ class ResultAnalysisTests(unittest.TestCase):
                 "reason": "The measured candidate leaves a documented objective gap.",
                 "evidence_refs": ["attempts/experiment-0010/results.json", "attempts/experiment-0012/results.json"],
                 "revision_intent": "Test one distinct candidate direction against the observed results.",
+                "revision_purpose": "method_change",
                 "revision_constraints": ["Keep the accepted command, data and evaluator unchanged."],
                 "revision_base": "candidate",
                 "supplement": {},
@@ -178,9 +191,38 @@ class ResultAnalysisTests(unittest.TestCase):
         result = run_result_analysis(context, client=client, use_llm=True)
 
         self.assertEqual(result.recommendation.action, "revise_candidate")
+        self.assertEqual(result.recommendation.revision_purpose, "method_change")
         self.assertIn("does not prohibit revise_candidate", client.user)
         self.assertIn("future candidate or comparison", client.user)
         self.assertIn("attempts/experiment-0012/results.json", client.user)
+
+    def test_verification_only_revision_is_corrected_before_decision(self) -> None:
+        import json
+        from unittest.mock import Mock
+
+        context = AnalysisContext(
+            task_id="verification-only", metrics={"accuracy": 0.8},
+            metadata={"research_goal": "Improve accuracy", "remaining_authorized_rounds": 1},
+        )
+        client = Mock()
+        client.ask.side_effect = [
+            json.dumps({"recommendation": {
+                "action": "revise_candidate", "task_disposition": "continue",
+                "reason": "Record an extra debug value.", "revision_purpose": "verification_only",
+                "revision_intent": "Add a log line without changing the candidate.",
+            }}),
+            json.dumps({"recommendation": {
+                "action": "stop", "task_disposition": "stop",
+                "reason": "No authorized additional measurement or distinct supported candidate remains.",
+                "alternatives_considered": ["The supplied alternatives lack implementation evidence."],
+            }}),
+        ]
+
+        result = run_result_analysis(context, client=client, use_llm=True)
+
+        self.assertEqual(result.recommendation.action, "stop")
+        self.assertEqual(client.ask.call_count, 2)
+        self.assertIn("cannot justify another identical training run", client.ask.call_args.args[1])
 
     def test_prompt_preserves_canonical_comparison_without_condition_tables(self) -> None:
         import json
@@ -236,6 +278,7 @@ class ResultAnalysisTests(unittest.TestCase):
                 "reason": "The error pattern identifies a bounded candidate change.",
                 "evidence_refs": ["attempts/a/analysis.json"],
                 "revision_intent": "Change the candidate rule for the observed error class.",
+                "revision_purpose": "method_change",
                 "revision_constraints": ["Keep the evaluator unchanged."],
                 "revision_base": "candidate",
                 "supplement": {"command": ["do-not-execute"], "seed": 9},
@@ -247,6 +290,7 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertEqual(result.recommendation.action, "revise_candidate")
         self.assertEqual(result.recommendation.supplement, {"seed": 9})
         self.assertEqual(result.recommendation.revision_base, "candidate")
+        self.assertEqual(result.recommendation.revision_purpose, "method_change")
         self.assertEqual(result.decision_context, context.metadata)
         self.assertIn("recommendation", client.user)
 

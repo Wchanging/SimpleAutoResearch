@@ -81,7 +81,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("Interaction: checkpoints", output)
         self.assertIn("0123456789abcdef", output)
         self.assertIn("simple-ar", output)
-        self.assertIn("& 'simple-ar'", output)
+        self.assertIn("--session-root", output)
+        self.assertIn("a session", output)
         self.assertIn("--decision-response", output)
         self.assertIn("REPLACE_WITH_YOUR_GUIDANCE", output)
         self.assertIn("Options: accept: Run the protocol", output)
@@ -94,7 +95,7 @@ class CliTests(unittest.TestCase):
         ResearchConsole(console).state(view)
         delivery_output = stream.getvalue()
         self.assertIn("--report-template", delivery_output)
-        self.assertIn("'analysis_report'", delivery_output)
+        self.assertIn("analysis_report", delivery_output)
 
     def test_delivery_revision_uses_the_pending_reply_not_request_report(self):
         from dataclasses import replace
@@ -151,7 +152,7 @@ class CliTests(unittest.TestCase):
                     main(base)
             self.assertIn(decision_id, prompt.getvalue())
             self.assertIn("--report-template", prompt.getvalue())
-            self.assertIn("'analysis_report'", prompt.getvalue())
+            self.assertIn("analysis_report", prompt.getvalue())
             # Other resume branches must not silently discard a requested mode.
             for extra in (["--reanalyze"], ["--report-template", "analysis_report"]):
                 with (
@@ -314,6 +315,27 @@ class CliTests(unittest.TestCase):
             self.assertIn("task_plan", resumed.view().state_refs)
             self.assertEqual(resumed.view().budget["attempts"], len(resumed.view().attempts))
 
+    def test_research_session_cli_resume_without_model_fails_before_mutation(self) -> None:
+        from simple_ar.app.research_application import (
+            ResearchApplicationServices, create_session,
+        )
+        from simple_ar.research.workflow_contracts import ResearchBrief
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            create_session(ResearchBrief(
+                request_text="Summarize this question.",
+                objective="Summarize this question.",
+                requested_outputs=("summary",),
+            ), root=session, services=ResearchApplicationServices(llm_client=object()))
+            before = {path.relative_to(session): path.read_bytes()
+                      for path in session.rglob("*") if path.is_file()}
+            with self.assertRaisesRegex(SystemExit, "--model env or --model MODEL"):
+                main(["research-session", "--session-root", str(session)])
+            after = {path.relative_to(session): path.read_bytes()
+                     for path in session.rglob("*") if path.is_file()}
+            self.assertEqual(after, before)
+
     def test_research_session_cli_without_command_stays_literature_only(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -396,7 +418,7 @@ class CliTests(unittest.TestCase):
             services = creator.call_args.kwargs["services"]
             self.assertEqual(brief.requested_outputs, ("report",))
             self.assertEqual(services.config["report"]["mode"], "research_only")
-            self.assertEqual(services.config["report"]["template"], "survey")
+            self.assertEqual(services.config["report"]["template"], "auto")
             self.assertEqual(services.budget_limits["process_wall_seconds"], 0)
 
     def test_research_session_parser_accepts_shared_cache_dir(self) -> None:
@@ -702,35 +724,9 @@ class CliTests(unittest.TestCase):
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             root = Path(tmp)
-            paper = root / "reliable_agents.md"
-            paper.write_text(
-                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
-                encoding="utf-8",
-            )
             output_root = root / "sessions"
-            with contextlib.redirect_stdout(io.StringIO()):
-                main(
-                    [
-                        "research-session",
-                        "--topic",
-                        "reliable agents",
-                        "--local-document",
-                        str(paper),
-                        "--output-root",
-                        str(output_root),
-                        "--cwd",
-                        str(root),
-                        "--primary-metric",
-                        "accuracy",
-                        "--metric-direction",
-                        "accuracy=higher",
-                        "--command",
-                        sys.executable,
-                        "-c",
-                        "print('accuracy: 0.75')",
-                    ]
-                )
-            session_root = next(output_root.iterdir())
+            session_root = output_root / "existing-session"
+            session_root.mkdir(parents=True)
             final_view = SimpleNamespace(
                 session_root=session_root,
                 status="completed",
@@ -738,7 +734,6 @@ class CliTests(unittest.TestCase):
                 next_action=None,
                 state_refs={
                     "report": SimpleNamespace(path="attempts/report-001/report.md"),
-                    "report_audit": SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
                 },
                 attempts=(),
             )
@@ -772,6 +767,7 @@ class CliTests(unittest.TestCase):
                     "simple_ar.app.research_application.load_session",
                     return_value=app,
                 ) as loader,
+                patch("simple_ar.app.research_application.create_session", side_effect=AssertionError("must not create a new session")),
                 contextlib.redirect_stdout(stdout),
             ):
                 main(
@@ -980,7 +976,6 @@ class CliTests(unittest.TestCase):
                 next_action=None,
                 state_refs={
                     "report": SimpleNamespace(path="attempts/report-001/report.md"),
-                    "report_audit": SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
                 },
                 attempts=(),
             )
@@ -1049,7 +1044,6 @@ class CliTests(unittest.TestCase):
                 next_action=None,
                 state_refs={
                     "report": SimpleNamespace(path="attempts/report-001/report.md"),
-                    "report_audit": SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
                 },
                 attempts=(),
             )

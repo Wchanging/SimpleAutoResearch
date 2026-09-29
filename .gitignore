@@ -23,6 +23,7 @@ wheels/
 .mypy_cache/
 .tmp_tests/
 .simple_ar_cache/
+.tmp_codex_tests/
 
 # Runtime outputs
 .local/

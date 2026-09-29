@@ -618,6 +618,21 @@ def analyze_experiment_capability(
     project_results = dict(base_context.project_results)
     project_results.pop("implementation_ref", None)  # Legacy global-active hint is not measurement lineage.
     project_results["execution_result"] = dict(payload)
+    diagnosis_refs = [ref for ref in context.inputs if ref.kind == "experiment_diagnosis"]
+    if diagnosis_refs and execution_status != "passed":
+        diagnosis = context.read_input_json(diagnosis_refs[-1])
+        if isinstance(diagnosis, Mapping):
+            detail = diagnosis.get("context")
+            project_results["failure_diagnosis"] = {
+                "artifact": diagnosis_refs[-1].path,
+                "summary": str(diagnosis.get("summary") or "")[:600],
+                "deficiencies": [
+                    {key: row[key] for key in ("category", "code", "message") if key in row}
+                    for row in diagnosis.get("deficiencies", [])[:8] if isinstance(row, Mapping)
+                ] if isinstance(diagnosis.get("deficiencies"), list) else [],
+                "stderr_tail": str(detail.get("stderr_tail") or "")[-2200:]
+                if isinstance(detail, Mapping) else "",
+            }
     # A measurement must carry the implementation revision that produced it.
     # Do not fall back to the application's globally active implementation:
     # that would let a later candidate's method evidence explain an older run.

@@ -11,7 +11,10 @@ conditions belong to the research TOML or its referenced CodeTask TOML.
 
 ## Research TOML: sections and defaults
 
-`report.template` defaults to `auto`: literature tasks use a survey; experimental
+`report.template` defaults to `auto`: literature tasks with at most one citable
+source use a concise single-source evidence review, while multi-source tasks
+use a survey. An explicit `source_review`, `survey`, or custom template wins;
+automatic selection never invents a comparison absent from the sources. Experimental
 tasks select a paper, reproduction report or concise analysis report using the
 analysis goal judgment. Execution `passed` is not scientific success. Unmet or
 uncertain goals default to an analysis report; explicit templates still win and
@@ -29,7 +32,7 @@ File-relative paths resolve from the TOML directory; command argv remains litera
 
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
-| `[task]` | `goal`, `kind`, `outputs`, `output_root`, `selected_idea_id` | `goal` is required for a new session. `kind` defaults to `auto` and accepts `auto`, `survey`, `bug_fix`. `outputs` is optional and is derived from the requested task/report/execution shape; if written, use `summary`, `report`, `experiments`, and/or `bug_fix`. `output_root` defaults to `runs/research-session`; `selected_idea_id` is optional and must select an existing grounded candidate. |
+| `[task]` | `goal`, `kind`, `outputs`, `output_root`, `selected_idea_id` | `goal` is required for a new session. `kind` defaults to `auto` and accepts `auto`, `survey`, `bug_fix`, `measurement`. `outputs` is optional except that `measurement` requires `outputs = ["experiments"]`. Explicit outputs use `summary`, `report`, `experiments`, and/or `bug_fix`. `output_root` defaults to `runs/research-session`; `selected_idea_id` is optional and must select an existing grounded candidate. |
 | `[model]` | `name`, `max_output_tokens` | A file config defaults `name` to `env`, which reads `SIMPLE_AR_MODEL`; `name = ""` selects deterministic processing. `max_output_tokens` is optional. Credentials stay in the environment. |
 | `[budget]` | `total_tokens`, `llm_requests`, `process_invocations`, `process_wall_seconds` | Token/request caps are optional for a new session (omitted means no cap for that dimension). Process values default from the task shape; set them explicitly when execution is requested. Resume keeps the saved ledger and does not reset usage. |
 
@@ -63,6 +66,13 @@ search/ingestion settings are rejected on resume when they differ from saved val
 explicit report settings can invalidate only writer/report/audit outputs, not research
 evidence or measurements. Use `research-report` to add a report to an existing prefix.
 
+Choose `task.kind = "measurement"` only to run and analyze one supplied command
+as-is, without literature discovery, candidate design, CodeTask editing, or a
+baseline comparison. It requires `outputs = ["experiments"]`, an explicit
+`execution.command`, and finite process limits. Use `auto`/research for an
+evidence-driven candidate or a comparative experiment; a measurement is not
+proof of a scientific improvement.
+
 Advanced experiments may either use `[[execution.pairs]]` rows with a unique integer
 `seed`, `baseline_command` and `candidate_command` (literal argv arrays), or declare
 one literal `execution.command` together with explicit `seed_count`/`seeds` and an
@@ -77,6 +87,10 @@ benchmark commands for the research matrix. CodeTask still owns edit scope and
 implementation settings.
 For a single fixed command, `seed_flag` alone records its literal integer seed
 (`--seed 0` or `--seed=0`) without creating pairs or permitting seed extensions.
+To start with one paired seed but leave an evidence-driven extension possible,
+declare both `seeds = [0]` and `seed_flag = "--seed"`. This runs only the initial
+seed by default; another seed still requires an analysis recommendation, a
+matched baseline/candidate pair, remaining process budget and an accepted decision.
 Explicit seed expansion replaces an existing argument rather than appending a
 duplicate. A command seed conflicting with `protocol.comparison_conditions.seed`
 is rejected. Declared protocol settings flow to design, measurement and reporting;
@@ -238,7 +252,7 @@ Sparse/empty workspace options remain limited to standalone CodeTask.
 | `[execute].planning_mode` | Greenfield planning: `tool_agent` uses requirements, architecture, interfaces, file plan, and bounded review (at least five calls); `compact` uses one architecture call before retries. Both share file generation and execution; call counts do not establish research quality. |
 | `[execute].planning_review_rounds` | Maximum reviewer-directed greenfield planning revision rounds for standalone code-task runs. Default `2`; lower to `1` for lightweight smoke examples, raise only when plan convergence matters more than token/time cost. |
 | `[execute].llm_retry_attempts` | Number of stage-level LLM work-plan, patch-plan, greenfield architecture, and greenfield file-generation attempts before stopping or explicitly falling back. Each stage attempt still uses the provider-level retry/backoff configured by `SIMPLE_AR_LLM_RETRY_ATTEMPTS`. |
-| `[execute].repair_rounds` | Number of bounded repair proposals after validation/benchmark failure. Repairs still require review. |
+| `[execute].repair_rounds` | Non-negative bound (default `0`) for technical repair after failed validation/benchmark execution. In `research-session` with a CodeTask project, this also bounds repair/retest after a failed single-condition research revision; each retest uses the accepted protocol and process budget. It does not authorize a scientific method change, seed extension, or paired-revision repair. Repairs still require review. |
 | `[execute].max_files` | Max files included in LLM context for plan/proposal/repair steps. |
 | `[execute].max_source_chars_per_file` | Per-file source snippet budget for LLM context. |
 | `[execute].max_generated_lines` | Greenfield generation line budget. If omitted, execute falls back to `[resource].max_generated_lines`, then to a conservative default. |

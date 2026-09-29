@@ -59,6 +59,8 @@ _STEP_TEXT = {
     "prepare_candidate": ("Create a fresh isolated workspace from the recorded original project for a candidate revision.", "Revision workspace lineage and copy report."),
     "revise_candidate": ("Apply and validate the analysis-directed candidate revision in the isolated workspace.", "Candidate revision patch, validation, and lineage."),
     "research_candidate": ("Measure the analysis-directed candidate revision under the accepted comparison condition.", "Candidate revision measurement and diagnostics."),
+    "repair_candidate": ("Repair a failed candidate revision without changing its scientific hypothesis.", "Technical repair patch and failed-run lineage."),
+    "retest_candidate": ("Remeasure the technically repaired candidate under the same protocol.", "Repaired candidate measurement."),
     "refine_implementation": ("Resolve explicit implementation design questions without changing the protocol.", "Clarified design or unresolved evidence needs."),
     "prepare_implementation": ("Prepare a fresh workspace for the clarified implementation.", "New workspace with preserved original lineage."),
 }
@@ -66,7 +68,8 @@ _ACTION_RE = re.compile(
     r"^(?:repair:\d+|retest:\d+|matrix_repair_\d+|matrix_baseline_\d+|"
     r"matrix_candidate(?:_r\d+)?_\d+|supplement_baseline:\d+(?:_\d+)?|"
     r"supplement_candidate:\d+(?:_\d+)?|reanalysis:\d+|research_design_revision:\d+|prepare_candidate:\d+|"
-    r"revise_candidate:\d+|research_candidate:\d+(?:_\d+)?|refine_implementation:\d+|prepare_implementation:\d+)$"
+    r"revise_candidate:\d+|research_candidate:\d+(?:_\d+)?|repair_candidate:\d+_\d+|"
+    r"retest_candidate:\d+_\d+|refine_implementation:\d+|prepare_implementation:\d+)$"
 )
 _PROCESS_CAPABILITIES = {"prepare_execution", "implement", "experiment"}
 _PROCESS_RESPONSIBILITIES = {
@@ -141,7 +144,7 @@ class TaskPlanRequest:
     llm_client: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.task_kind not in {"survey", "bug_fix", "research"}:
+        if self.task_kind not in {"survey", "bug_fix", "measurement", "research"}:
             raise ValueError(f"Unsupported task kind: {self.task_kind!r}")
         if not self.goal.strip() or not self.request_text.strip():
             raise ValueError("Task plan goal and request_text cannot be empty.")
@@ -191,7 +194,7 @@ class TaskPlanResult:
             raise ValueError("Only accepted task plans can be dispatched.")
         task_kind = str(data.get("task_kind") or "research")
         goal = str(data.get("goal") or "").strip()
-        if task_kind not in {"survey", "bug_fix", "research"} or not goal:
+        if task_kind not in {"survey", "bug_fix", "measurement", "research"} or not goal:
             raise ValueError("Accepted task plan has an invalid task kind or goal.")
         return cls(
             task_kind=task_kind,
@@ -237,6 +240,14 @@ The application will validate and execute the plan.""",
                 trace.append(record)
             try:
                 raw = response.get("steps") if isinstance(response, Mapping) else None
+                if not isinstance(raw, list) and isinstance(response, Mapping) and len(response) == 1:
+                    # Some providers wrap a corrected JSON object once. Accept
+                    # only an unambiguous single wrapper, then apply every normal
+                    # action, prerequisite, condition and authorization check.
+                    wrapper, nested = next(iter(response.items()))
+                    if isinstance(nested, Mapping) and isinstance(nested.get("steps"), list):
+                        raw = nested["steps"]
+                        record["normalized_from_wrapper"] = str(wrapper)
                 if not isinstance(raw, list) or not raw:
                     raise ValueError("Task-plan response must contain a non-empty steps list.")
                 # Routing and storage names belong to the executor, not the model.
@@ -307,6 +318,9 @@ def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:
     if request.task_kind == "bug_fix":
         return _bug_fix_steps(request.execution or {})
 
+    if request.task_kind == "measurement":
+        return [_row("experiment"), _row("analysis")]
+
     if _provided_materials_only(request):
         # Supplied papers are an input boundary, not the output of a fake
         # search attempt.  The downstream reader and report contracts still
@@ -368,6 +382,7 @@ def append_research_followup(
     pair_count: int = 0,
     supplement_count: int = 1,
     revision_base: str = "candidate",
+    repair_count: int = 0,
 ) -> TaskPlanResult:
     """Extend one accepted plan with one analysis-authorized research action.
 
@@ -386,6 +401,10 @@ def append_research_followup(
         raise ValueError("Research supplement count must be a positive integer.")
     if revision_base not in {"candidate", "baseline"}:
         raise ValueError("Research revision_base must be candidate or baseline.")
+    if type(repair_count) is not int or repair_count < 0:
+        raise ValueError("Research repair_count must be a non-negative integer.")
+    if repair_count and pair_count:
+        raise ValueError("Paired follow-up repair requires condition-specific routing and is not supported.")
     marker = f"reanalysis:{iteration}"
     if any(step.action == marker for step in plan.steps):
         return plan
@@ -414,7 +433,9 @@ def append_research_followup(
             state = _state_name(candidate_action)
             supplement_rows.append(_row(candidate_action, condition=f"after_success:{previous}"))
             previous = state
-        supplement_rows.append(_row(marker, condition=f"after_success:{previous}"))
+        # A failed measurement is still an observation. Reanalysis must not be
+        # skipped merely because the final planned experiment did not pass.
+        supplement_rows.append(_row(marker, condition=f"after_observation:{_state_name(baseline_actions[0])}"))
         followup_rows = tuple(supplement_rows)
         message = f"Accepted one analysis-directed supplement round {iteration}."
     else:
@@ -438,12 +459,21 @@ def append_research_followup(
             f"after_success:{_state_name(design_revision)}"
             if revision_base == "baseline" else "on_decision:revise_candidate"
         )
+        repair_rows: list[dict[str, Any]] = []
+        previous_measurement = _state_name(candidate_actions[-1])
+        for repair_index in range(1, repair_count + 1):
+            repair_action = f"repair_candidate:{iteration}_{repair_index}"
+            retest_action = f"retest_candidate:{iteration}_{repair_index}"
+            repair_rows.append(_row(repair_action, condition=f"on_failure:{previous_measurement}"))
+            repair_rows.append(_row(retest_action, condition=f"after_success:{_state_name(repair_action)}"))
+            previous_measurement = _state_name(retest_action)
         followup_rows = (
             *prefix_rows,
             _row(preparation, condition=preparation_condition),
             _row(revision, condition=f"after_success:{_state_name(preparation)}"),
             *candidate_rows,
-            _row(marker, condition=f"after_success:{previous}"),
+            *repair_rows,
+            _row(marker, condition=f"after_observation:{_state_name(candidate_actions[0])}"),
         )
         message = f"Accepted one analysis-directed candidate revision round {iteration}."
     insertion = next(
@@ -523,6 +553,10 @@ def _planning_boundary(request: TaskPlanRequest) -> dict[str, Any]:
         allowed_rows = _bug_fix_steps(execution or {})
         checkpoint = "implementation"
         unauthorized_reason = "Bug-fix routing authorizes only its preparation and implementation actions."
+    elif request.task_kind == "measurement":
+        allowed_rows = [_row("experiment")] if configured else []
+        checkpoint = "measurement"
+        unauthorized_reason = "Direct measurement authorizes only its supplied execution command."
     elif request.task_kind == "survey":
         checkpoint = "evidence"
         unauthorized_reason = "Survey routing does not authorize process actions."
@@ -611,6 +645,15 @@ def _normalize_steps(rows: list[Any]) -> tuple[TaskPlanStep, ...]:
         condition = str(raw.get("condition") or "").strip()
         if condition and not _valid_condition(condition):
             raise ValueError(f"Unsupported task plan condition: {condition!r}")
+        if condition.startswith("after_observation:"):
+            observed_state = condition.split(":", 1)[1].strip()
+            if not any(
+                previous.state_name == observed_state and previous.capability == "experiment"
+                for previous in steps
+            ):
+                raise ValueError(
+                    f"Observation condition {condition!r} must reference an earlier experiment step."
+                )
         problem, observation = _STEP_TEXT.get(action, ("Advance the accepted task plan.", "Inspect the declared capability result."))
         steps.append(TaskPlanStep(
             step_id=step_id,
@@ -632,6 +675,8 @@ def _required_output_actions(request: TaskPlanRequest) -> tuple[str, ...]:
     requested = {str(item).strip().lower() for item in request.requested_outputs}
     if request.task_kind == "bug_fix":
         return ()
+    if request.task_kind == "measurement":
+        return ("analysis",)
     actions: list[str] = []
     if not requested or requested & {"summarize", "summary", "research_summary"}:
         actions.append("summarize")
@@ -657,7 +702,7 @@ def _complete_required_steps(
     proposal and the inserted actions remain visible in the attempt trace.
     """
 
-    if request.task_kind == "bug_fix":
+    if request.task_kind in {"bug_fix", "measurement"}:
         return proposed, ()
     steps = list(proposed)
     explicit = {step.action for step in steps}
@@ -712,6 +757,14 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
             and actions.index("implement") < actions.index("prepare_execution")
         ):
             errors.append("Bug-fix implementation must follow preparation.")
+        if errors:
+            raise ValueError("\n".join(errors))
+        return
+    if request.task_kind == "measurement":
+        if actions != ["experiment", "analysis"]:
+            errors.append("Direct measurement requires exactly experiment then analysis; it does not perform research discovery or design.")
+        if not isinstance(request.execution, Mapping) or not request.execution.get("command"):
+            errors.append("Direct measurement requires an explicit execution command.")
         if errors:
             raise ValueError("\n".join(errors))
         return
@@ -836,7 +889,11 @@ def _capability(action: str) -> str:
         return "research_design"
     if action.startswith("revise_candidate:"):
         return "implement"
+    if action.startswith("repair_candidate:"):
+        return "implement"
     if action.startswith("research_candidate:"):
+        return "experiment"
+    if action.startswith("retest_candidate:"):
         return "experiment"
     if action.startswith("reanalysis:"):
         return "analysis"
@@ -871,16 +928,22 @@ def _state_name(action: str) -> str:
         return f"preparation_r{action.split(':', 1)[1]}"
     if action.startswith("revise_candidate:"):
         return f"implementation_r{action.split(':', 1)[1]}"
+    if action.startswith("repair_candidate:"):
+        iteration, repair_index = action.split(":", 1)[1].split("_", 1)
+        return f"implementation_r{iteration}_repair_{repair_index}"
     if action.startswith("research_candidate:"):
         suffix = action.split(":", 1)[1]
         return f"experiment_revision_{suffix}"
+    if action.startswith("retest_candidate:"):
+        iteration, repair_index = action.split(":", 1)[1].split("_", 1)
+        return f"experiment_revision_{iteration}_repair_{repair_index}"
     if action.startswith("reanalysis:"):
         return f"analysis_r{action.split(':', 1)[1]}"
     return action
 
 
 def _valid_condition(condition: str) -> bool:
-    return condition.startswith(("on_failure:", "on_failure_prefix:", "after_success:", "on_request:", "on_decision:")) and bool(condition.split(":", 1)[1].strip())
+    return condition.startswith(("on_failure:", "on_failure_prefix:", "after_success:", "after_observation:", "on_request:", "on_decision:")) and bool(condition.split(":", 1)[1].strip())
 
 
 def _needs_preparation(execution: Mapping[str, object]) -> bool:
@@ -956,6 +1019,7 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
         "`prepare_execution` creates an isolated workspace, `implement` only locates/patches/validates "
         "authorized code, `experiment` measures a configured condition, `analysis` interprets completed "
         "measurements, and none of these actions is a substitute for research design or report writing. "
+        "For measurement, use exactly experiment then analysis; the supplied command is the accepted measurement protocol, not a research candidate. "
         "For bug_fix, use only prepare_execution (when required) and implement; implementation "
         "already includes validation and the repair explanation, so do not append summary or report steps. "
         "Do not invent dynamic indices, repair rounds, capabilities, processes, or parallel work. "

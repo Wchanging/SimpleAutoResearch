@@ -18,6 +18,9 @@ with a codebase that remains understandable and straightforward to extend.
 > run means artifacts were delivered, not that a hypothesis is correct or a
 > paper is ready for publication.
 
+This is a source-visible preview. A project license has not yet been selected;
+do not treat public access to the repository as an open-source license.
+
 ## What can you do with it?
 
 | Your task | What you provide | What to inspect afterward |
@@ -120,6 +123,8 @@ Generated outputs stay in `runs/`.
 | [Multi-file code review](examples/code_task_medium_review/README.md) | Trying scoped edits and validation | Included project; Python standard library |
 
 The last two use standalone `code-task`, not the complete research loop.
+The [TabM research case](examples/tabm_research/README.md) is an experimental
+prepared-server diagnostic, not a ready-to-run example on a fresh checkout.
 For the classical-ML example, install `uv sync --extra examples` and retain that
 extra when running with `uv run --extra examples ...`.
 
@@ -235,8 +240,9 @@ revision, and writing revision serve different purposes.
 
 ## Contributing and acknowledgements
 
-Issues, reproducible bug reports, case studies, and focused pull requests are
-welcome. Include the command, relevant config, and diagnostics—**remove API
+Issues, reproducible bug reports, and case studies are welcome. Please discuss
+code contributions before opening a pull request while the project license is
+undecided. Include the command, relevant config, and diagnostics—**remove API
 keys, credentials, and private data first**. Report-quality improvements and
 clearer examples are as valuable as code changes.
 

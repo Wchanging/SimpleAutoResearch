@@ -15,6 +15,13 @@ HEADING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# PDF text extraction often inserts a space after a drop-cap ("1 I NTRODUCTION")
+# or uses a descriptive numbered heading ("3.3 A RCHITECTURE"). Keep this
+# conservative: a table row or numbered sentence is not a section boundary.
+NUMBERED_UPPER_HEADING = re.compile(
+    r"^(?:[1-9]\d?(?:\.\d{1,2})*|[A-Z])[.)]?\s+([A-Z][^\n]{2,90})$"
+)
+
 SECTION_ALIASES = {
     "abstract": "abstract",
     "introduction": "introduction",
@@ -155,16 +162,44 @@ def _strip_leading_title(text: str) -> str:
 
 def _heading_for_line(line: str) -> str | None:
     stripped = line.strip()
-    if not stripped or len(stripped) > 80:
+    if not stripped or len(stripped) > 100:
         return None
     match = HEADING_PATTERN.match(stripped)
-    if not match:
+    if match:
+        return match.group(1).strip()
+    numbered = NUMBERED_UPPER_HEADING.match(stripped)
+    if numbered is None:
         return None
-    return match.group(1).strip()
+    title = numbered.group(1).strip()
+    letters = [char for char in title if char.isalpha()]
+    if len(letters) < 4 or len(title.split()) > 15:
+        return None
+    if sum(char.isupper() for char in letters) / len(letters) < 0.8:
+        return None
+    return title
 
 
 def _normalize_section(heading: str) -> str:
-    return SECTION_ALIASES.get(heading.strip().lower(), "body")
+    direct = SECTION_ALIASES.get(heading.strip().lower())
+    if direct:
+        return direct
+    compact = re.sub(r"[^a-z]", "", heading.lower())
+    for term, section in (
+        ("references", "references"), ("bibliography", "references"),
+        ("abstract", "abstract"), ("relatedwork", "related_work"),
+        ("background", "related_work"), ("introduction", "introduction"),
+        ("evaluation", "experiments"), ("evaluating", "experiments"),
+        ("experiment", "experiments"), ("baseline", "experiments"),
+        ("dataset", "experiments"),
+        ("architecture", "method"), ("implementation", "method"),
+        ("algorithm", "method"), ("modification", "method"), ("method", "method"),
+        ("results", "results"), ("performance", "results"),
+        ("analysis", "results"), ("discussion", "discussion"),
+        ("limitation", "limitations"), ("conclusion", "conclusion"),
+    ):
+        if term in compact:
+            return section
+    return "body"
 
 
 def _read_text(path: Path) -> str:

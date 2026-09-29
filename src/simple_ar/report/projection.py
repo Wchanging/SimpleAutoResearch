@@ -401,6 +401,63 @@ def attach_paired_report_measurements(
     return context, memory
 
 
+def attach_experiment_history(
+    context: ReportContext,
+    memory: ReportMemory,
+    measurements: Sequence[tuple[str, ArtifactRef, Mapping[str, Any]]],
+    *,
+    current_ref: ArtifactRef,
+    include_prior_metrics: bool = True,
+) -> tuple[ReportContext, ReportMemory]:
+    """Keep every accepted-plan observation visible, without pooling revisions.
+
+    The newest result alone cannot answer whether an earlier candidate ran or
+    measured a metric. Rows are read from immutable experiment artifacts; failed
+    runs contribute status and provenance, never invented metric values.
+    """
+
+    history: list[dict[str, Any]] = []
+    handles = list(context.source_handles)
+    metrics = list(context.metric_sources)
+    seen: set[str] = set()
+    for action, ref, result in measurements:
+        if ref.path in seen:
+            continue
+        seen.add(ref.path)
+        status = str(result.get("execution_status") or result.get("status") or "unknown").lower()
+        measured = result.get("metrics") if status == "passed" else None
+        row = {
+            "action": action,
+            "artifact": ref.path,
+            "status": status,
+            "metrics": dict(measured) if isinstance(measured, Mapping) else {},
+            "implementation_ref": result.get("implementation_ref"),
+        }
+        history.append(row)
+        handles.append(SourceHandle(
+            handle=f"artifact:measurement:{action}", kind="experiment_result",
+            artifact=ref.path, summary=f"{action}: {status}",
+        ))
+        if (include_prior_metrics and status == "passed"
+                and ref.path != current_ref.path and action != "baseline"):
+            metrics.extend(metric.model_copy(update={
+                "metric_id": f"metric:history:{action}:{metric.name}",
+                "label": action,
+            }) for metric in metric_sources_from_execution(result, artifact=ref.path)
+                if metric.label == "candidate")
+    context.results = {**context.results, "measurement_history": history}
+    context.source_handles = handles
+    memory.source_handles = list(handles)
+    context.metric_sources = metrics
+    memory.metric_sources = list(metrics)
+    if len(history) > 1:
+        memory.key_decisions.append(
+            "Measurement history lists each baseline, candidate, and technical remeasurement separately. "
+            "Do not infer that no earlier candidate ran from the latest failed result."
+        )
+    return context, memory
+
+
 def attach_report_read_evidence(
     context: ReportContext,
     memory: ReportMemory,
@@ -617,7 +674,10 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
             lines.append(
                 "No persisted comparison rows are available."
                 if not comparisons
-                else "No declared primary or required metric matched a persisted comparison row."
+                else (
+                    "No valid paired comparison row matched the declared metrics; "
+                    "available individual measurements are listed below."
+                )
             )
 
     if isinstance(comparisons, list) and rendered:

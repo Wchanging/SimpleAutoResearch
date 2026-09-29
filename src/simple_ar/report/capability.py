@@ -112,27 +112,30 @@ def assemble_report_document(
         request.papers,
         request.citation_key_map,
     )
+    renderer = figure_renderer or DeterministicFigureRenderer()
+    if request.paired_comparisons and figure_renderer is None:
+        from simple_ar.report.figures import add_paired_measurement_figures
+        rendered = add_paired_measurement_figures(report_markdown=report_body, report_dir=report_dir,
+            comparisons=list(request.paired_comparisons), summaries=list(request.paired_summaries), config=config.figures)
+    else:
+        rendered = renderer.render(
+            report_markdown=report_body,
+            report_dir=report_dir,
+            config=config.figures,
+            template_name=request.template_name,
+            document_plan=document_plan,
+        )
+    # Keep figures in the citation-key body shared by Markdown, audit, and
+    # downstream exports instead of leaving them only in the display report.
+    report_body = rendered.report_markdown
     citation_map = citation_display_map(cited)
     report = append_references_section(
         display_citation_numbers(report_body, citation_map),
         cited,
         citation_map,
     )
-    renderer = figure_renderer or DeterministicFigureRenderer()
-    if request.paired_comparisons and figure_renderer is None:
-        from simple_ar.report.figures import add_paired_measurement_figures
-        rendered = add_paired_measurement_figures(report_markdown=report, report_dir=report_dir,
-            comparisons=list(request.paired_comparisons), summaries=list(request.paired_summaries), config=config.figures)
-    else:
-        rendered = renderer.render(
-            report_markdown=report,
-            report_dir=report_dir,
-            config=config.figures,
-            template_name=request.template_name,
-            document_plan=document_plan,
-        )
     report = apply_section_numbering(
-        rendered.report_markdown,
+        report,
         mode=config.section_numbering,
         template_name=request.template_name,
         style=config.style,

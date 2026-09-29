@@ -15,12 +15,247 @@ from simple_ar.app.research_application import (
     load_session,
 )
 from simple_ar.core.budget import BudgetLedger
-from simple_ar.integrations.llm import LLMClient, LLMSettings
+from simple_ar.integrations.llm import LLMClient, LLMError, LLMSettings
 from simple_ar.research.planning.capability import ResearchPlanRequest
 from simple_ar.research.workflow_contracts import ResearchBrief
+from simple_ar.research.task_plan import TaskPlanResult, TaskPlanStep
+from simple_ar.research.implementation import ImplementationRequest
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_report_input_gap_pauses_without_uncaught_exception_or_writer_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(
+                ResearchBrief(request_text="Report measured evidence.", requested_outputs=("report",)),
+                root=Path(tmp) / "session",
+            )
+            with patch.object(
+                app, "_report_writing_parts",
+                side_effect=ResearchApplicationError("Analyze the latest measurement first."),
+            ):
+                self.assertFalse(app._run_action("report_write"))
+            view = app.view()
+            self.assertEqual(view.status, "paused")
+            self.assertIn("Analyze the latest measurement first", view.status_reason)
+            self.assertNotIn("writer", view.state_refs)
+
+    def test_failed_run_diagnosis_keeps_captured_runtime_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(
+                ResearchBrief(request_text="Explain a failed candidate."),
+                root=Path(tmp) / "session",
+            )
+            diagnosis = app.controller.store.write_json(
+                "attempts/experiment-0001/diagnosis.json", {
+                    "status": "failed", "summary": "Missing declared metrics.",
+                    "deficiencies": [{"category": "runtime", "code": "nonzero_returncode",
+                                      "message": "Process returned 1."}],
+                    "context": {"stderr_tail": "Traceback: TypeError: invalid argument type"},
+                }, kind="experiment_diagnosis", producer="test",
+            )
+            result = app.controller.store.write_json(
+                "attempts/experiment-0001/results.json", {
+                    "status": "failed", "execution_status": "failed",
+                    "artifacts": {"diagnosis": "diagnosis.json"},
+                }, kind="experiment_result", producer="test",
+            )
+            self.assertEqual(app._experiment_diagnosis_ref(result).path, diagnosis.path)
+            compact = app._compact_failure_diagnosis(app.controller.store.read_json(diagnosis))
+            self.assertIn("TypeError", compact["stderr_tail"])
+            self.assertEqual(compact["deficiencies"][0]["code"], "nonzero_returncode")
+
+    def test_failed_followup_observation_reaches_reanalysis_in_new_and_saved_plans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(
+                ResearchBrief(request_text="Analyze a bounded failed observation."),
+                root=Path(tmp) / "session",
+            )
+            candidate = TaskPlanStep(
+                step_id="candidate", action="research_candidate:1", capability="experiment",
+                state_name="experiment_revision_1", problem_solved="", observation="",
+            )
+            failed_ref = app.controller.store.write_json(
+                "outputs/failed_revision.json", {"status": "failed", "execution_status": "failed"},
+                kind="experiment_result", schema="experiment_result.v1", producer="test",
+            )
+            baseline_ref = app.controller.store.write_json(
+                "outputs/baseline.json", {"status": "passed", "execution_status": "passed"},
+                kind="experiment_result", schema="experiment_result.v1", producer="test",
+            )
+            app.controller.manifest.state_refs["experiment_revision_1"] = failed_ref
+            app.controller.manifest.state_refs["baseline"] = baseline_ref
+            for condition in (
+                "after_observation:experiment_revision_1",
+                "after_success:experiment_revision_1",  # Older persisted plan.
+            ):
+                analysis = TaskPlanStep(
+                    step_id="reanalysis", action="reanalysis:1", capability="analysis",
+                    state_name="analysis_r1", problem_solved="", observation="",
+                    condition=condition,
+                )
+                plan = TaskPlanResult(
+                    task_kind="research", goal="Analyze the failed attempt.",
+                    steps=(candidate, analysis), mode="deterministic",
+                )
+                app.controller.manifest.state_refs["task_plan"] = app.controller.store.write_json(
+                    f"outputs/plan-{condition.split(':', 1)[0]}.json", plan.to_handoff_dict(),
+                    kind="task_plan", schema="research_task_plan.v1", producer="test",
+                )
+                with patch.object(app, "_load_task_plan", return_value=plan), patch.object(
+                    app, "_step_completed", side_effect=lambda step: step.action == candidate.action,
+                ):
+                    self.assertEqual(
+                        app._failed_followup_measurement(1),
+                        ("experiment_revision_1", failed_ref),
+                    )
+                    self.assertTrue(app._step_condition_applies(analysis))
+                    with patch.object(app, "_analysis_context", return_value={}), patch.object(
+                        app, "_execute", return_value=True,
+                    ) as execute:
+                        self.assertTrue(app._run_action("reanalysis:1"))
+                    self.assertEqual(execute.call_args.kwargs["result_ref"], failed_ref)
+                    self.assertEqual(execute.call_args.kwargs["baseline_ref"], baseline_ref)
+
+    def test_revision_repair_uses_same_handoff_and_failed_measurement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(
+                ResearchBrief(request_text="Repair a failed candidate measurement."),
+                root=Path(tmp) / "session",
+            )
+            failed_ref = app.controller.store.write_json(
+                "outputs/failed.json", {"status": "failed", "execution_status": "failed"},
+                kind="experiment_result", schema="experiment_result.v1", producer="test",
+            )
+            baseline_ref = app.controller.store.write_json(
+                "outputs/baseline.json", {"status": "passed"},
+                kind="experiment_result", schema="experiment_result.v1", producer="test",
+            )
+            app.controller.manifest.state_refs["experiment_revision_1"] = failed_ref
+            app.controller.manifest.state_refs["baseline"] = baseline_ref
+            request = ImplementationRequest(
+                Path(tmp), Path(tmp), "Authorized isolated repair", object(),
+            )
+            with patch.object(app, "_execution_config", return_value={"execution": {}}), patch.object(
+                app, "_execution_contract", return_value={"objective": "same design"},
+            ), patch.object(app, "_revision_instruction", return_value="Keep the accepted hypothesis."), patch.object(
+                app, "_revision_baseline_refs", return_value=[baseline_ref],
+            ), patch.object(app, "_input_refs", return_value=[]), patch.object(
+                app, "_implementation_design_ref", return_value=baseline_ref,
+            ), patch("simple_ar.app.research_application.implementation_request", return_value=request) as make_request, patch.object(
+                app, "_execute", return_value=True,
+            ) as execute:
+                self.assertTrue(app._run_action("repair_candidate:1_1"))
+            self.assertEqual(make_request.call_args.kwargs["revision_instruction"],
+                             "Keep the accepted hypothesis.")
+            self.assertFalse(make_request.call_args.kwargs["validate"])
+            sent = execute.call_args.args
+            self.assertEqual(sent[:2], ("implement", "implementation_r1_repair_1"))
+            self.assertEqual(sent[2].failure_ref, failed_ref)
+            self.assertIn(baseline_ref, sent[3])
+
+    def test_repaired_revision_selects_latest_measurement_in_plan_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(
+                ResearchBrief(request_text="Compare the repaired candidate."),
+                root=Path(tmp) / "session",
+            )
+            steps = tuple(TaskPlanStep(
+                step_id=action, action=action, capability="experiment",
+                state_name=state, problem_solved="", observation="",
+            ) for action, state in (
+                ("research_candidate:1", "experiment_revision_1"),
+                ("retest_candidate:1_2", "experiment_revision_1_repair_2"),
+                ("retest_candidate:1_10", "experiment_revision_1_repair_10"),
+            ))
+            refs = app.controller.manifest.state_refs
+            for step in steps:
+                failed = step == steps[0]
+                refs[step.state_name] = app.controller.store.write_json(
+                    f"outputs/{step.state_name}.json",
+                    {"status": "failed" if failed else "passed"},
+                    kind="experiment_result", schema="experiment_result.v1", producer="test",
+                )
+            plan = TaskPlanResult(
+                task_kind="research", goal="Compare revised measurements.",
+                steps=steps, mode="deterministic",
+            )
+            with patch.object(app, "_load_task_plan", return_value=plan), patch.object(
+                app, "_step_completed", return_value=True,
+            ):
+                self.assertEqual(app._revision_candidate_refs(1)[-1],
+                                 refs["experiment_revision_1_repair_10"])
+                self.assertIsNone(app._failed_followup_measurement(1))
+
+    def test_model_backed_resume_cannot_silently_change_to_deterministic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            app = create_session(ResearchBrief(
+                request_text="Study the supplied question.",
+                requested_outputs=("summary",),
+            ), root=session, services=ResearchApplicationServices(llm_client=object()))
+            self.assertTrue(app.controller.store.read_json(
+                app.view().state_refs["runtime_config"])["llm_required"])
+            resumed = load_session(session)
+            before = resumed.view()
+            with self.assertRaisesRegex(ResearchApplicationError, "cannot silently continue"):
+                resumed.advance()
+            with self.assertRaisesRegex(ResearchApplicationError, "cannot silently continue"):
+                resumed.continue_session()
+            self.assertEqual(resumed.view().state_refs, before.state_refs)
+            self.assertEqual(resumed.view().attempts, before.attempts)
+            resumed = load_session(session, services=ResearchApplicationServices(llm_client=object()))
+            resumed.require_llm_binding()
+
+    def test_legacy_llm_ledger_also_requires_client_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            app = create_session(ResearchBrief(
+                request_text="Study the supplied question.",
+                requested_outputs=("summary",),
+            ), root=session)
+            self.assertFalse(app.controller.store.read_json(
+                app.view().state_refs["runtime_config"])["llm_required"])
+            app.budget_ledger.reserve("legacy-call", {"llm_requests": 1})
+            app.budget_ledger.save()
+            with self.assertRaisesRegex(ResearchApplicationError, "cannot silently continue"):
+                load_session(session).require_llm_binding(include_legacy_usage=True)
+
+    def test_llm_budget_authorization_is_not_evidence_of_a_model_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / "session"
+            app = create_session(ResearchBrief(
+                request_text="Study the supplied question.",
+                requested_outputs=("summary",),
+            ), root=session)
+            app.budget_ledger.authorize_remaining(
+                {"llm_requests": 3}, authorization_id="additional-allowance",
+                reason="Allow future model calls if explicitly configured.",
+            )
+            load_session(session).require_llm_binding(include_legacy_usage=True)
+
+    def test_direct_measurement_runs_without_research_discovery_or_design(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = create_session(ResearchBrief(
+                request_text="Measure the supplied command once.",
+                intents=("measurement",), requested_outputs=("experiments",),
+            ), root=root / "session", services=ResearchApplicationServices(
+                config={"research_task_kind": "measurement", "interaction": "autonomous", "execution": {
+                    "command": [sys.executable, "-c", "print('accuracy: 0.7')"],
+                    "cwd": str(root), "timeout_sec": 5, "result_schema": {"primary_metric": "accuracy"},
+                }}, budget_limits={"process_invocations": 1, "process_wall_seconds": 10},
+            ))
+            completed = app.advance(max_actions=8)
+            self.assertEqual(completed.status, "completed", completed.status_reason)
+            self.assertIn("no research candidate", completed.status_reason)
+            self.assertEqual([row["capability"] for row in reversed(completed.attempts)], ["plan", "experiment", "analysis"])
+            self.assertNotIn("search", completed.state_refs)
+            self.assertNotIn("design", completed.state_refs)
+            self.assertEqual(app.controller.store.read_json(completed.state_refs["experiment"])["status"], "passed")
+            resumed = load_session(root / "session")
+            self.assertEqual(resumed.view().status, "completed")
+            self.assertEqual(len(resumed.view().attempts), 3)
+
     def test_explicit_interrupted_recovery_retries_current_step_without_losing_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -541,10 +776,31 @@ class ResearchApplicationTests(unittest.TestCase):
     def test_real_code_task_modification_is_measured_by_application_once(self):
         self._exercise_code_task_lifecycle()
 
+    def test_verification_only_work_is_not_a_scientific_candidate_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(
+                ResearchBrief(request_text="Evaluate an existing candidate."),
+                root=Path(tmp) / "session",
+                services=ResearchApplicationServices(),
+            )
+            proposal = {
+                "reason": "Mechanism evidence is missing.",
+                "revision_intent": "Add logging and repeat the same seed.",
+                "revision_purpose": "verification_only",
+                "revision_base": "candidate",
+            }
+            self.assertIn("cannot trigger another identical training run", app._validate_revision_recommendation(proposal))
+            proposal["revision_purpose"] = "method_change"
+            proposal["revision_intent"] = "Change the candidate rule based on the observed error class."
+            self.assertEqual(app._validate_revision_recommendation(proposal), "")
+
     def test_design_gap_refines_in_fresh_workspace_and_preserves_baseline(self):
         self._exercise_code_task_lifecycle(refine=True)
 
-    def _exercise_code_task_lifecycle(self, *, refine=False):
+    def test_failed_research_revision_repairs_then_remeasures_once(self):
+        self._exercise_code_task_lifecycle(revised_failure=True)
+
+    def _exercise_code_task_lifecycle(self, *, refine=False, revised_failure=False):
         """Keep the old real bridge check, but exercise the formal lifecycle."""
         class FakeClient:
             model = "fake-research-and-code-model"
@@ -567,6 +823,7 @@ class ResearchApplicationTests(unittest.TestCase):
                     "alternatives_considered": [] if revise else ["No additional supplied candidate is justified by this fixture."],
                     "continuation_conditions": [] if revise else ["A new evidence-backed candidate would require an explicit revised task."],
                     "revision_intent": "Add lottery keyword support." if revise else "Report the measured comparison.",
+                    "revision_purpose": "method_change" if revise else "unspecified",
                     "revision_constraints": ["Preserve the evaluator and existing API."],
                 }})
 
@@ -594,6 +851,18 @@ class ResearchApplicationTests(unittest.TestCase):
                             "unresolved_questions": []}
                 if label.startswith("code-task-review-"):
                     return {"findings": []}
+                if label == "code-task-repair" and revised_failure:
+                    return {
+                        "summary": "Replace the unresolved variable from the failed run.",
+                        "edits": [{
+                            "path": "spam_model.py",
+                            "old": "    return unresolved_keyword\n",
+                            "new": "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize', 'lottery')) else 'ham'\n",
+                            "reason": "The failed candidate called an undefined name.",
+                        }],
+                        "validation": ["Remeasure under the accepted protocol."],
+                        "risks": [],
+                    }
                 if label == "code-task-work-plan":
                     return {
                         "summary": "Improve prize-message classification in one small batch.",
@@ -672,6 +941,8 @@ class ResearchApplicationTests(unittest.TestCase):
                             "    lowered = text.lower()\n"
                             "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize', 'lottery')) else 'ham'\n"
                         )
+                        if revised_failure:
+                            new = "def predict(text):\n    lowered = text.lower()\n    return unresolved_keyword\n"
                         summary = "Add lottery keyword support."
                     return {
                         "summary": summary,
@@ -726,7 +997,8 @@ class ResearchApplicationTests(unittest.TestCase):
                 "cwd": str(project), "timeout_sec": 20,
                 "result_schema": {"primary_metric": "accuracy", "metric_directions": {"accuracy": "higher"}},
                 "code_task": {"code_root": str(project), "allowed_patterns": ["spam_model.py"],
-                              "approval_note": "Approve only the isolated spam_model.py keyword edit."},
+                              "approval_note": "Approve only the isolated spam_model.py keyword edit.",
+                              "max_repairs": 1 if revised_failure else 0},
             }
             app = create_session(ResearchBrief(
                 request_text="Study reliable agents; add prize keyword support without changing tests.",
@@ -734,8 +1006,8 @@ class ResearchApplicationTests(unittest.TestCase):
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=root / "session", services=ResearchApplicationServices(
                 max_results=1, max_attempts=32,
-                config={"research_queries": ["reliable agents"], "research_max_iterations": 2 if refine else 1},
-                budget_limits={"process_invocations": 3, "process_wall_seconds": 60},
+                config={"research_queries": ["reliable agents"], "research_max_iterations": 2 if refine or revised_failure else 1},
+                budget_limits={"process_invocations": 4 if revised_failure else 3, "process_wall_seconds": 60},
             ))
             paused = app.advance(max_actions=10)
             self.assertEqual(paused.status, "paused")
@@ -866,11 +1138,24 @@ class ResearchApplicationTests(unittest.TestCase):
                 implemented_revision = app.advance(max_actions=1)
             self.assertEqual(implemented_revision.next_action, "research_candidate:1", implemented_revision.status_reason)
             revised_measurement = app.advance(max_actions=1)
-            self.assertEqual(revised_measurement.next_action, "reanalysis:1", revised_measurement.status_reason)
+            self.assertEqual(
+                revised_measurement.next_action,
+                "repair_candidate:1_1" if revised_failure else "reanalysis:1",
+                revised_measurement.status_reason,
+            )
+            if revised_failure:
+                with patch.object(LLMClient, "for_task", return_value=client):
+                    repaired = app.advance(max_actions=2)
+                self.assertEqual(repaired.next_action, "reanalysis:1", repaired.status_reason)
+                self.assertIn("implementation_r1_repair_1", repaired.state_refs)
+                self.assertIn("experiment_revision_1_repair_1", repaired.state_refs)
+                self.assertEqual(app.controller.store.read_json(
+                    repaired.state_refs["experiment_revision_1"])["execution_status"], "failed")
             revision_ref = revised_measurement.state_refs["experiment_revision_1"]
             revision_step = next(step for step in app._load_task_plan().steps if step.state_name == "experiment_revision_1")
             self.assertTrue(app._step_completed(revision_step), app.controller.store.read_json(revision_ref))
-            self.assertEqual(app.latest_experiment_ref(), revision_ref)
+            self.assertEqual(app.latest_experiment_ref(),
+                             app.view().state_refs["experiment_revision_1_repair_1"] if revised_failure else revision_ref)
             final = app.advance(max_actions=1)
             self.assertEqual(final.status, "completed", final.status_reason)
             if refine:
@@ -878,7 +1163,8 @@ class ResearchApplicationTests(unittest.TestCase):
                 self.assertTrue(any(handle.artifact == refined_ref.path for handle in report_context.source_handles))
             baseline = app.controller.store.read_json(final.state_refs["baseline"])
             first_candidate = app.controller.store.read_json(final.state_refs["experiment"])
-            candidate = app.controller.store.read_json(final.state_refs["experiment_revision_1"])
+            candidate = app.controller.store.read_json(final.state_refs[
+                "experiment_revision_1_repair_1" if revised_failure else "experiment_revision_1"])
             self.assertAlmostEqual(candidate["metrics"]["accuracy"], 1.0)
             self.assertEqual(app.budget_ledger.remaining("process_invocations"), 0)
             self.assertNotIn("'prize'", (project / "spam_model.py").read_text())
@@ -887,11 +1173,13 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIn("prize", decision_context["research_goal"])
             checkpoint = decision_context["analysis_checkpoint"]
             current_candidate = checkpoint["current_candidate"]
-            self.assertEqual(current_candidate["artifact_ref"]["path"], final.state_refs["experiment_revision_1"].path)
-            self.assertEqual(current_candidate["implementation_ref"]["path"], final.state_refs["implementation_r1"].path)
+            current_result_key = "experiment_revision_1_repair_1" if revised_failure else "experiment_revision_1"
+            current_implementation_key = "implementation_r1_repair_1" if revised_failure else "implementation_r1"
+            self.assertEqual(current_candidate["artifact_ref"]["path"], final.state_refs[current_result_key].path)
+            self.assertEqual(current_candidate["implementation_ref"]["path"], final.state_refs[current_implementation_key].path)
             roles = {row["role"]: row for row in checkpoint["measurements"]}
             self.assertEqual(roles["baseline"]["artifact_ref"]["path"], final.state_refs["baseline"].path)
-            self.assertEqual(roles["current_candidate"]["artifact_ref"]["path"], final.state_refs["experiment_revision_1"].path)
+            self.assertEqual(roles["current_candidate"]["artifact_ref"]["path"], final.state_refs[current_result_key].path)
             self.assertEqual(checkpoint["stage"], "post_measurement_decision")
             history = decision_context["research_history"]
             implementation = next(row for row in reversed(history) if row["capability"] == "implement")
@@ -902,7 +1190,8 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertTrue(implementation_output["patch_available"])
             self.assertIn("lottery", implementation_output["patch_excerpt"])
             self.assertFalse(implementation_output["patch_truncated"])
-            self.assertEqual(implementation_output["validation_report"]["status"], "passed")
+            if not revised_failure:
+                self.assertEqual(implementation_output["validation_report"]["status"], "passed")
             history_refs = {
                 output["ref"]["path"]
                 for row in history for output in row.get("outputs", [])
@@ -910,18 +1199,34 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIn(final.state_refs["baseline"].path, history_refs)
             self.assertIn(final.state_refs["experiment"].path, history_refs)
             self.assertIn(final.state_refs["experiment_revision_1"].path, history_refs)
+            if revised_failure:
+                self.assertIn(final.state_refs["experiment_revision_1_repair_1"].path, history_refs)
             measurements = [
                 output["metrics"]
                 for row in history if row["capability"] == "experiment"
                 for output in row.get("outputs", []) if output["kind"] == "experiment_result"
             ]
-            self.assertEqual([row["accuracy"] for row in measurements], [baseline["metrics"]["accuracy"], first_candidate["metrics"]["accuracy"], candidate["metrics"]["accuracy"]])
+            self.assertEqual(
+                [row.get("accuracy") for row in measurements],
+                [baseline["metrics"]["accuracy"], first_candidate["metrics"]["accuracy"],
+                 *([None] if revised_failure else []), candidate["metrics"]["accuracy"]],
+            )
             context, _ = app.report_inputs()
             self.assertIn("implementation", context.results)
             self.assertIn("lottery", str(context.results["implementation"]))
+            if revised_failure:
+                history = context.results["measurement_history"]
+                self.assertEqual(
+                    [row["status"] for row in history[-3:]],
+                    ["passed", "failed", "passed"],
+                )
+                self.assertTrue(any(
+                    row.label == "experiment" and row.name == "accuracy"
+                    for row in context.metric_sources
+                ))
             before = final.state_refs
             attempts_before_preference = len(final.attempts)
-            reloaded = load_session(root / "session")
+            reloaded = load_session(root / "session", services=ResearchApplicationServices(llm_client=client))
             restored = reloaded.advance(max_actions=5)
             self.assertEqual(restored.state_refs, before)
             self.assertEqual(len(restored.attempts), attempts_before_preference)
@@ -934,6 +1239,9 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(len(preference_resume.attempts), attempts_before_preference)
             self.assertEqual(preference_resume.state_refs["implementation_r1"], before["implementation_r1"])
             self.assertEqual(preference_resume.state_refs["experiment_revision_1"], before["experiment_revision_1"])
+            if revised_failure:
+                self.assertEqual(preference_resume.state_refs["implementation_r1_repair_1"], before["implementation_r1_repair_1"])
+                self.assertEqual(preference_resume.state_refs["experiment_revision_1_repair_1"], before["experiment_revision_1_repair_1"])
             self.assertEqual(reloaded.budget_ledger.remaining("process_invocations"), 0)
 
     def test_code_task_supplement_uses_original_baseline_and_current_candidate(self):
@@ -1732,7 +2040,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 self.assertEqual(context.report_mode, "research_only")
                 self.assertEqual(context.results, {})
                 self.assertEqual(context.metric_sources, [])
-                self.assertEqual(kwargs["template"].name, "survey")
+                self.assertEqual(kwargs["template"].name, "source_review")
                 self.assertIn("No experiment", context.evidence_summary)
                 citation = context.papers[0]["id"]
                 return AgentReportResult(report_body="", memory=kwargs["memory"], used_agent=True,
@@ -2210,17 +2518,21 @@ class ResearchApplicationTests(unittest.TestCase):
         import json
         from dataclasses import replace
 
-        for recommend in (True, False):
+        for recommend in (True, False, "provider_error"):
             with self.subTest(recommend=recommend), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 paper = root / "paper.md"
                 paper.write_text("# Results\n\nValidation improves accuracy for reliable agents.\n", encoding="utf-8")
+                execution = {"command": [sys.executable, "evaluate.py"], "cwd": str(root), "timeout_sec": 5,
+                             "protocol": {"protected_assets": [{"path": "heldout.csv"}]}}
+                if recommend is not True:
+                    (root / "model.py").write_text("def predict():\n    return 1\n", encoding="utf-8")
+                    execution["code_task"] = {"code_root": str(root), "allowed_patterns": ["model.py"]}
                 app = create_session(
                     ResearchBrief(request_text="Study validation for agents", requested_outputs=("research_design",),
                                   asset_requests=({"locator": str(paper), "role": "paper"},)),
                     root=root / "session", services=ResearchApplicationServices(max_results=1, config={
-                        "execution": {"command": [sys.executable, "evaluate.py"], "cwd": str(root), "timeout_sec": 5,
-                                      "protocol": {"protected_assets": [{"path": "heldout.csv"}]}}}),
+                        "execution": execution}),
                 )
                 app.advance(max_actions=6)
                 synthesis = app.controller.store.read_json(app.view().state_refs["synthesis"])
@@ -2238,9 +2550,11 @@ class ResearchApplicationTests(unittest.TestCase):
                             return dict(selected_idea_id=self.selected,
                                         rationale="Chosen from shared evidence",
                                         execution_protocol={"comparison_required": False, "baseline_policy": "skip"})
+                        if recommend == "provider_error":
+                            raise LLMError("provider unavailable")
                         payload = json.loads(user)
                         assert "heldout.csv" in payload["constraints"]["research_request"]
-                        self.selected = payload["candidates"][-1]["idea_id"] if recommend else None
+                        self.selected = payload["candidates"][-1]["idea_id"] if recommend is True else None
                         rows = []
                         for candidate in payload["candidates"]:
                             rows.append(dict(
@@ -2267,9 +2581,9 @@ class ResearchApplicationTests(unittest.TestCase):
                     view = app.advance(max_actions=2)
                 assessment = app.controller.store.read_json(view.state_refs["assessment"])
                 self.assertFalse(any("unresolved evidence refs" in item for item in assessment["diagnostics"]))
-                self.assertEqual(client.calls, 2 if recommend else 1)
+                self.assertEqual(client.calls, 2 if recommend is True else 1)
                 self.assertIn("summary", view.state_refs)
-                if recommend:
+                if recommend is True:
                     self.assertEqual(view.status, "completed")
                     design = app.controller.store.read_json(view.state_refs["design"])
                     self.assertEqual(design["selected_idea"]["idea_id"], client.selected)

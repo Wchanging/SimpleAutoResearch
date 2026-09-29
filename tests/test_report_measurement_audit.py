@@ -16,6 +16,51 @@ from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory, R
 
 
 class ReportMeasurementAuditTests(unittest.TestCase):
+    def test_missing_paired_row_does_not_hide_individual_measurements(self):
+        context = ReportContext(
+            topic="Failed candidate", report_mode="experiment",
+            results={
+                "result_schema": {"primary_metric": "rmse", "required_metrics": ["rmse"]},
+                "comparisons": [{"seed": 0, "metrics": []}],
+            },
+            metric_sources=[
+                MetricSource(
+                    metric_id="baseline-rmse", name="rmse", value=0.44,
+                    artifact="attempts/baseline/results.json", label="baseline",
+                ),
+                MetricSource(
+                    metric_id="candidate-rmse", name="rmse", value=0.44,
+                    artifact="attempts/candidate/results.json", label="candidate",
+                ),
+            ],
+        )
+        body = _verified_experiment_evidence(context)
+        self.assertIn("No valid paired comparison row", body)
+        self.assertIn("available individual measurements are listed below", body)
+        self.assertIn("| baseline | `rmse` | 0.44", body)
+        self.assertIn("| candidate | `rmse` | 0.44", body)
+
+    def test_figure_filename_is_not_metric_evidence(self):
+        context = ReportContext(
+            topic="Measured comparison", report_mode="experiment",
+            experiment_plan={"metrics": ["accuracy"]},
+            metric_sources=[MetricSource(
+                metric_id="accuracy-source", name="accuracy", value=1,
+                artifact="attempts/experiment-001/results.json", label="candidate",
+            )],
+        )
+        body = "# Result\n\n![accuracy](figures/paired-1.svg)\n"
+        audit = build_report_audit(
+            report=body, report_body=body, context=context, memory=ReportMemory(),
+        )
+        self.assertIn("accuracy-source", audit.metric_audit.unmatched_metrics)
+        captioned = body + "\nThe measured accuracy was 1.\n"
+        with_caption = build_report_audit(
+            report=captioned, report_body=captioned, context=context,
+            memory=ReportMemory(),
+        )
+        self.assertIn("accuracy-source", with_caption.metric_audit.matched_metrics)
+
     def test_unresolved_minor_factual_review_is_not_a_passed_report(self):
         for mode in ("survey", "experiment"):
             with self.subTest(mode=mode):

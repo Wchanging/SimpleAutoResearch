@@ -4,6 +4,25 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## Unreleased (source-visible preview)
+
+- Let bounded source inspection request exact line ranges, bridge short gaps between excerpts, and prioritize Python constructor call sites when asked where an object is built. Research design can carry specific low-level interface checks into the existing CodeTask handoff without treating missing experimental measurements as design blockers; missing authority or a known source contradiction still blocks. These changes have regression and source-replay evidence, not fresh end-to-end research acceptance.
+- Keep every accepted-plan measurement visible to report writing and the deterministic metric appendix, so a failed latest revision cannot erase an earlier successful candidate. Surface the captured failed-run diagnosis to analysis and reporting without treating missing metrics as zero.
+- Extend explicitly budgeted technical repair/retest to failed single-condition research revisions, preserving the original design handoff, measured implementation lineage, and no-duplicate-work recovery. Paired follow-up repair remains unsupported.
+- Analyze a persisted failed follow-up experiment before report writing, including saved plans created with the older success-only condition. A missing latest analysis now pauses with a diagnostic instead of crashing during report input projection. Technical failures remain distinct from scientific iteration.
+- Escalate a concrete post-apply correctness concern only when three distinct CodeTask review clusters corroborate the same claim; lone, unrelated, and style findings remain advisory. This prevents an obvious unactivated patch from proceeding directly to an expensive candidate run, without treating reviewer agreement as proof that a method works.
+- Persist the initial research-session model mode and reject a model-backed CLI resume without `--model` before it changes saved work. Older sessions use actual request ledger entries for this check; an authorized allowance alone is not a model call.
+- Bind research-design input provenance from inspected attempt inputs instead of model-authored refs. Candidate comparison now respects the configured output allowance, permits one bounded schema correction, and does not promote a failed model comparison into a scientific recommendation. Verification-only instrumentation is not an automatic candidate revision with another identical training run.
+- Accept an unambiguous one-level provider wrapper around a corrected task-plan steps array, while retaining all existing plan and authorization validation.
+- Route evidence-limited literature tasks to a concise single-source review instead of forcing a multi-paper survey outline; explicit report templates still take precedence.
+- Keep supplied local-file paths in provenance artifacts while using opaque citation identifiers and omitting absolute paths from reader-facing references and BibTeX. Flag leaked internal artifact handles in report bodies.
+- Keep bounded bug-validation repair evidence separate from the original edit proposal and final passing run; add a regression that exercises fail-then-repair behavior.
+- Allow an explicitly declared direct measurement task to run measurement and analysis without unrelated literature/design stages.
+- Spread bounded reading excerpts across available documents and sections, keep each paper's excerpts in its own screening prompt, and label omitted material as a coverage limit rather than negative evidence.
+- Let research design and CodeTask request bounded continuation of truncated source without widening edit permissions; record whether an exact source lookup was observed, already supplied, or absent.
+- Preserve generated figures in the citation-key report body used by downstream checks. Figure filenames alone no longer count as visible numeric measurements in the report audit.
+- Add a no-secret CI check workflow and clarify the preview/license status, prepared-server TabM requirements, and contribution boundary. An isolated server wheel install passed; the workflow itself remains unverified on a pushed branch.
+
 ## 2026-09-26
 
 - Task-plan validation now shares one planning-boundary view with the LLM

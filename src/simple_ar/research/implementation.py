@@ -38,6 +38,7 @@ class ImplementationRequest:
     revision_instruction: str = ""
     validation_command: tuple[str, ...] | None = None
     validation_timeout_sec: int | None = None
+    max_repairs: int = 0
     budget_ledger: Any | None = field(default=None, repr=False, compare=False)
     session_id: str = ""
     attempt_id: str = ""
@@ -70,6 +71,8 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     manifest["edit_scope"] = scope
     save_code_task_manifest(request.run_dir, manifest)
     repair_paths = {}
+    validation_repairs: list[dict[str, Any]] = []
+    failed_validation_artifacts: list[tuple[Path, Path]] = []
     steps = []
     validation = None
     if request.failure_ref is None:
@@ -124,12 +127,93 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
             session_id=request.session_id,
             attempt_id=request.attempt_id,
         )
+        for repair_index in range(1, request.max_repairs + 1):
+            if validation.status == "passed":
+                break
+            if validation.status not in {"failed", "timed_out"}:
+                break
+            remaining_processes = (
+                request.budget_ledger.remaining("process_invocations")
+                if request.budget_ledger is not None else None
+            )
+            if remaining_processes is not None and remaining_processes < 1:
+                break
+            if request.message_callback:
+                request.message_callback(
+                    f"Bug validation failed; proposing bounded technical repair {repair_index}/{request.max_repairs}."
+                )
+            failure_text = validation.stderr_path.read_text(encoding="utf-8", errors="replace")[-8000:]
+            if not failure_text.strip():
+                failure_text = validation.stdout_path.read_text(encoding="utf-8", errors="replace")[-8000:]
+            run_report = read_json(validation.report_path)
+            history_ref = run_report.get("history_report") if isinstance(run_report, Mapping) else None
+            if not isinstance(history_ref, str) or not history_ref.startswith("code_task/run/patched/attempts/"):
+                raise ValueError("Bug validation did not record an immutable failed-run report.")
+            archived_report = request.run_dir / history_ref
+            archived_stderr = archived_report.parent / "stderr.txt"
+            if not archived_report.is_file() or not archived_stderr.is_file():
+                raise ValueError("Bug validation failed-run history is incomplete.")
+            failed_validation_artifacts.append((archived_report, archived_stderr))
+            failure = RepairEvidence(
+                source=str(archived_report),
+                execution_report={
+                    "execution_status": validation.status,
+                    "returncode": validation.returncode,
+                    "timed_out": validation.timed_out,
+                    "command": list(request.validation_command),
+                },
+                failure_analysis=failure_text or f"Validation command {validation.status} without captured output.",
+            )
+            repair = propose_repair_edits(
+                request.run_dir, llm_client=request.llm_client,
+                max_files=IMPLEMENTATION_CONTEXT_MAX_FILES,
+                max_source_chars_per_file=IMPLEMENTATION_CONTEXT_MAX_SOURCE_CHARS,
+                message_callback=request.message_callback, failure_evidence=failure,
+            )
+            repair_paths = {
+                "repair_proposal": repair.proposal_path,
+                "failure_evidence": repair.repair_dir / "failure_evidence.json",
+            }
+            record = {
+                "round": repair_index,
+                "failed_validation_report": str(archived_report),
+                "repair_proposal": str(repair.proposal_path),
+                "edit_count": repair.edit_count,
+            }
+            validation_repairs.append(record)
+            if repair.mode != "llm" or not repair.edit_count:
+                record["outcome"] = "no_repair_edits"
+                break
+            apply_patch_edits(request.run_dir, edits_file=repair.proposal_path)
+            validate_repair_patch(
+                request.run_dir, llm_client=request.llm_client,
+                message_callback=request.message_callback,
+            )
+            integrity = reconcile_protocol_assets(before)
+            if integrity["status"] == "changed":
+                record["outcome"] = "protected_asset_changed"
+                break
+            validation = run_code_task_benchmark(
+                request.run_dir,
+                command=command,
+                timeout_sec=request.validation_timeout_sec or 60,
+                skip_validation=True,
+                run_label="patched",
+                budget_ledger=request.budget_ledger,
+                session_id=request.session_id,
+                attempt_id=request.attempt_id,
+            )
+            record["outcome"] = validation.status
         stop_reason = "stop_point" if validation.status == "passed" else "validation_failed"
         next_action = (
             "Review the recorded bug validation artifacts before accepting the patch."
             if validation.status != "passed"
             else "Review the patch and the passed bug validation artifacts."
         )
+    integrity = reconcile_protocol_assets(before)
+    if integrity["status"] == "changed":
+        stop_reason = "asset_integrity_changed"
+        next_action = "Protected execution assets changed; reject the patch and inspect its edit lineage."
     finished = (
         stop_reason == "stop_point"
         and integrity["status"] != "changed"
@@ -143,7 +227,7 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     for name, path in {
         "patch": paths.task_dir / "patch.diff",
         "validation": paths.meta_dir / "validation_report.json",
-        "review": paths.meta_dir / ("review_report_post_repair.json" if request.failure_ref else "review_report.json"),
+        "review": paths.meta_dir / ("review_report_post_repair.json" if request.failure_ref or validation_repairs else "review_report.json"),
         "work_plan": paths.task_dir / "work_plan.json",
         "patch_plan": paths.task_dir / "patch_plan.md",
         "research_handoff": paths.task_dir / "research_handoff.json",
@@ -154,7 +238,15 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     }.items():
         if path.is_file():
             evidence[name] = context.store.write_text(
-                f"code_task/{path.name}", path.read_text(encoding="utf-8"),
+                f"code_task/{'repair_' if name == 'repair_proposal' else ''}{path.name}",
+                path.read_text(encoding="utf-8"),
+                kind=f"implementation_{name}", producer="research.implementation",
+            )
+    for index, (report_path, stderr_path) in enumerate(failed_validation_artifacts, start=1):
+        for name, path in ((f"validation_failure_{index}", report_path),
+                           (f"validation_failure_stderr_{index}", stderr_path)):
+            evidence[name] = context.store.write_text(
+                f"code_task/{name}{path.suffix}", path.read_text(encoding="utf-8"),
                 kind=f"implementation_{name}", producer="research.implementation",
             )
     if validation is not None:
@@ -188,6 +280,7 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
         "failure_ref": request.failure_ref.to_dict() if request.failure_ref else None,
         "asset_integrity": integrity,
         "validation": validation_row,
+        "validation_repairs": validation_repairs,
         "artifact_refs": {name: ref.to_dict() for name, ref in evidence.items()},
         "artifact_base": "attempt",
     }
@@ -293,6 +386,14 @@ def _prepare_research_task(
         )
         if design.implementation_spec:
             task += "\n## Clarified implementation specification\n\n" + design.implementation_spec + "\n"
+        if design.code_task_questions:
+            task += (
+                "\n## Source details to verify before editing\n\n"
+                "These are delegated code questions, not established facts or permission to change the method. "
+                "Inspect the actual implementation and resolve them within the authorized edit scope. "
+                "If a required interface is incompatible, return a design_gap instead of guessing.\n\n"
+                + "\n".join(f"- {question}" for question in design.code_task_questions) + "\n"
+            )
         brief = consumed.get("brief")
         if isinstance(brief, Mapping):
             objective = str(brief.get("objective") or brief.get("request_text") or "").strip()

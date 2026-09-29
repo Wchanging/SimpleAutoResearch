@@ -128,6 +128,7 @@ def read_paper_notes_with_llm(
     *,
     papers: Sequence[Mapping[str, Any]],
     evidence_snippets: str = "",
+    evidence_snippets_by_document: Mapping[str, str] | None = None,
     config: Mapping[str, object] | None = None,
     emit: EmitMessage | None = None,
 ) -> list[dict[str, Any]]:
@@ -143,7 +144,11 @@ def read_paper_notes_with_llm(
                     _paper_screening_record(paper, index),
                     ensure_ascii=False,
                 ),
-                evidence_snippets=evidence_snippets,
+                evidence_snippets=(
+                    evidence_snippets_by_document.get(_paper_id(paper, index), "")
+                    if evidence_snippets_by_document is not None
+                    else evidence_snippets
+                ),
             ),
             label=_paper_id(paper, index),
         )

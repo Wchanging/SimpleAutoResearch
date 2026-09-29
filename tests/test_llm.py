@@ -735,6 +735,40 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(openai_call.call_count, 2)
         sleep.assert_called_once()
 
+    def test_overloaded_provider_retries_without_retrying_permanent_errors(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", retry_attempts=2))
+        response = {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch(
+            "simple_ar.integrations.llm._call_openai_sdk",
+            side_effect=[RuntimeError("Our servers are currently overloaded. Please try again later."), response],
+        ) as call, patch("simple_ar.integrations.llm.time.sleep") as sleep:
+            self.assertEqual(client.ask("system", "user", label="overload-retry"), "ok")
+
+        self.assertEqual(call.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_mid_response_disconnect_retries_and_preserves_unknown_usage(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 3, "total_tokens": 100})
+        client = LLMClient(
+            LLMSettings(api_key="test-key", api_mode="chat", retry_attempts=2,
+                        max_output_tokens=10, retry_base_delay_sec=0.25),
+            budget_ledger=ledger,
+        )
+        response = {"choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}
+        disconnect = RuntimeError(
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        )
+        with patch("simple_ar.integrations.llm._call_openai_sdk",
+                   side_effect=[disconnect, response]) as call, patch(
+                   "simple_ar.integrations.llm.time.sleep") as sleep:
+            self.assertEqual(client.ask("system", "user", label="mid-response-retry"), "ok")
+        self.assertEqual(call.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+        self.assertEqual(ledger.entries[0].status, "unknown")
+        self.assertEqual(ledger.entries[1].status, "settled")
+
     def test_openai_sdk_backend_disables_hidden_retries(self) -> None:
         with patch("openai.OpenAI") as openai_cls:
             openai_cls.return_value.chat.completions.create.return_value = {

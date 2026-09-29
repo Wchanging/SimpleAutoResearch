@@ -32,6 +32,7 @@ papers = ["../../runs/assets/tabm-paper.pdf"]
 code_task_config = "code_task.toml"
 timeout_sec = 420
 seed_flag = "--seed"
+seeds = [0]
 
 [execution.protocol]
 dataset = "California Housing / official TabM split"

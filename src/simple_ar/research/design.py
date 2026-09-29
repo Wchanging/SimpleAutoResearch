@@ -85,6 +85,7 @@ class ResearchDesignResult:
     execution_protocol: dict[str, Any] = field(default_factory=dict)
     diagnostics: tuple[str, ...] = ()
     implementation_spec: str = ""
+    code_task_questions: tuple[str, ...] = ()
 
     def to_handoff_dict(self) -> dict[str, Any]:
         """Return the stable, compact design handoff."""
@@ -106,6 +107,7 @@ class ResearchDesignResult:
             "evidence_refs": list(self.evidence_refs),
             "diagnostics": list(self.diagnostics),
             **({"implementation_spec": self.implementation_spec} if self.implementation_spec else {}),
+            **({"code_task_questions": list(self.code_task_questions)} if self.code_task_questions else {}),
         }
 
     @classmethod
@@ -150,6 +152,7 @@ class ResearchDesignResult:
             ),
             diagnostics=tuple(str(item) for item in data.get("diagnostics", [])),
             implementation_spec=str(data.get("implementation_spec") or ""),
+            code_task_questions=tuple(str(item) for item in data.get("code_task_questions", [])),
         )
 
 
@@ -233,6 +236,7 @@ def build_research_design(request: ResearchDesignRequest, *, trace: list[dict[st
         request,
         contract,
         proposed_protocol,
+        trace=trace,
     )
 
     diagnostics = _contract_diagnostics(
@@ -327,7 +331,12 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
         "delegated experimental choices, and unavailable external evidence or permissions. "
         "For missing code facts request bounded read-only inspection: status=inspect_source, "
         "context_request={files:[workspace-relative paths], symbols:[strings], query:string, "
-        "literal?:exact source substring}. An exact literal takes priority over fuzzy terms. "
+        "literal?:exact source substring}. To fill a visible gap between excerpt line numbers, "
+        "request one file with line_range:{start:int,end:int} (at most 200 lines) and empty "
+        "query/symbols/literal. Broad queries cannot retrieve complete long functions. "
+        "An exact literal takes priority; if the same request "
+        "also names symbols or asks another question, any additional excerpts are separately "
+        "marked as nonliteral evidence. They do not prove that the exact literal exists. "
         "Source excerpts include file and line positions. You have at most three follow-up source reads. "
         "Trace the changed behavior through producers, consumers, training and evaluation as needed; "
         "do not assume a behavior happens in the function that produces its inputs. "
@@ -342,7 +351,13 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
         "If the current candidate is infeasible and the task permits choosing a method, you may reselect "
         "one of the supplied candidates by returning selected_idea_id and selection_rationale with status=ready. "
         "Do not reselect when an explicit fixed idea is supplied. Do not invent a new candidate or alter its hypothesis. "
-        "Explain interfaces/shapes, state lifecycle, exact objective/pseudocode and validation in implementation_spec. "
+        "Explain the source-backed integration point, intended behavior, objective and validation "
+        "in implementation_spec. This design need not fully resolve helper signatures, local tensor "
+        "shapes or exact edit syntax: put such bounded implementation checks in "
+        "code_task_questions:[string] for CodeTask to inspect before editing. CodeTask returns a "
+        "design_gap if these checks invalidate the method; do not guess their answers. Do not "
+        "delegate the chosen research hypothesis, edit permission, available assets, executable "
+        "protocol, or an observed contradiction in the proposed integration. "
         "For a research candidate, name the core behavior that should change and one low-cost, "
         "in-scope observation that would distinguish the intended behavior from a technically runnable "
         "but degenerate implementation. If no such observation can be executed safely, say that it is "
@@ -360,14 +375,20 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
         "Use source_quotes:[{path,quote}] for exact observed code supporting the behavior and "
         "quote at least one existing target when editing existing files. A newly created target "
         "has no source to quote: instead explain how it integrates with observed existing code, "
-        "or why it is a standalone addition, and how it will be validated. When source_config "
-        "is supplied, quote the active config. Target paths must satisfy CodeTask edit scope. "
+        "or why it is a standalone addition, and how it will be validated. The active "
+        "source_config excerpt is supplied separately; interpret its actual values, but do "
+        "not repeat it merely to pass a quote-format check. Target paths must satisfy CodeTask edit scope. "
         "Return JSON {status: ready|blocked|inspect_source, implementation_spec:string, "
-        "unresolved_questions:[string], context_request?:object, target_paths?:[string], "
+        "unresolved_questions:[string], code_task_questions?:[string], context_request?:object, target_paths?:[string], "
         "source_quotes?:[{path:string,quote:string}], selected_idea_id?:string, selection_rationale?:string}. "
-        "Ready requires all questions resolved. This is design only, never permission to execute commands.\n\n"
+        "Ready requires the source-backed integration and a validation plan, not every low-level "
+        "coding detail or a measured "
+        "baseline or candidate result: those are produced after design by the experiment stage. "
+        "A missing authorized experiment command or required input remains a real blocker. "
+        "This is design only, never permission to execute commands.\n\n"
     )
     source_reads = 0
+    source_lookup_status: dict[str, Any] | None = None
     corrections = 0
     for turn in range(5):
         response = request.llm_client.ask_json(
@@ -376,6 +397,7 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
                 "task": request.execution_context, "fixed_idea_id": request.idea_id,
                 "research_materials": synthesis.to_handoff_dict() if synthesis is not None else {},
                 "source_excerpts": excerpts, "source_reads_remaining": 3 - source_reads,
+                "source_lookup_status": source_lookup_status,
                 "code_task_edit_scope": {
                     "allowed_patterns": code_task.get("allowed_patterns", []),
                     "protected_patterns": code_task.get("protected_patterns", []),
@@ -415,22 +437,78 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
                 or not isinstance(query.get("literal", ""), str)
                 or len(query.get("literal", "")) > 200
                 or any(not isinstance(query.get(key, []), list) or any(not isinstance(v, str) for v in query.get(key, []))
-                       for key in ("files", "symbols"))):
+                       for key in ("files", "symbols"))
+                or (query.get("line_range") is not None and (
+                    not isinstance(query["line_range"], dict)
+                    or set(query["line_range"]) != {"start", "end"}
+                    or any(type(query["line_range"][key]) is not int for key in ("start", "end"))
+                    or query["line_range"]["start"] < 1
+                    or query["line_range"]["end"] < query["line_range"]["start"]
+                    or query["line_range"]["end"] - query["line_range"]["start"] >= 200
+                    or len(query.get("files", [])) != 1
+                    or query.get("query") or query.get("symbols") or query.get("literal")))):
             raise LLMError("Invalid design source context request.")
-        found = requested_source_context(request.source_workspace, dict(request.source_index), query,
-            supplied=excerpts, max_files=4, max_chars=4000,
-            max_total_chars=min(8000, max(0, 32000 - sum(len(row["text"]) for row in excerpts))))
+        read_budget = min(8000, max(0, 32000 - sum(len(row["text"]) for row in excerpts)))
+        # Reserve room for the setup immediately before a newly found use
+        # site. Otherwise two bounded windows may leave a decisive short gap.
+        lookup_budget = read_budget - 2000 if read_budget >= 4000 else read_budget
+        window_chars = 3000 if read_budget >= 4000 else 4000
+        literal = query.get("literal", "")
+        already_observed = bool(literal and any(literal in row["text"] for row in excerpts))
+        # A focused behavioral question can span a truncated training or
+        # evaluation function. Only spend a second window when the caller
+        # asks to trace behavior, not for an exact literal or a symbol-only
+        # lookup (which may need a later independent source follow-up).
+        windows_per_file = 2 if (len(query.get("files", [])) == 1
+            and query.get("query", "").strip() and not literal) else 1
+        exact = requested_source_context(request.source_workspace, dict(request.source_index), query,
+            supplied=excerpts, max_files=4, max_chars=window_chars, max_total_chars=lookup_budget,
+            max_windows_per_file=windows_per_file)
+        found = [dict(row, lookup_basis="exact_literal" if literal else "query_or_symbol") for row in exact]
+        # One model request may contain several independent source questions.
+        # Keep an exact lookup exact, then spend only the remaining read budget
+        # on the other named targets. Do not silently present those excerpts as
+        # proof of the literal, especially when it was absent or already read.
+        if literal and (query.get("query") or query.get("symbols")) and len(found) < 4:
+            remaining = lookup_budget - sum(len(row["text"]) for row in found)
+            if remaining > 0:
+                other_query = dict(query, literal="")
+                other = requested_source_context(
+                    request.source_workspace, dict(request.source_index), other_query,
+                    supplied=excerpts + found, max_files=4 - len(found), max_chars=window_chars,
+                    max_total_chars=remaining,
+                )
+                found.extend(dict(row, lookup_basis="query_or_symbol") for row in other)
+        gap_budget = read_budget - sum(len(row["text"]) for row in found)
+        if gap_budget > 0 and len(found) < 4:
+            found.extend(_bridge_adjacent_source_gaps(
+                request.source_workspace, dict(request.source_index), excerpts, found,
+                max_chars=gap_budget, max_files=4 - len(found),
+            ))
+        source_lookup_status = {
+            "literal": ("not_requested" if not literal else "new_excerpt" if exact
+                        else "already_supplied" if already_observed else "not_observed"),
+            "nonliteral_excerpts": sum(row["lookup_basis"] == "query_or_symbol" for row in found),
+            "adjacent_gap_excerpts": sum(row["lookup_basis"] == "adjacent_gap" for row in found),
+        }
+        trace[-1]["source_lookup_status"] = source_lookup_status
         trace[-1]["source_excerpts"] = found
         if not found:
             return replace(previous, status="blocked", generation_mode="llm", diagnostics=(
-                "Design source request produced no new evidence; inspect design_refinement_trace.json.",))
+                f"Design source request produced no new evidence ({source_lookup_status['literal']}); "
+                "inspect design_refinement_trace.json.",))
         excerpts.extend(found)
         source_reads += 1
     if not isinstance(response, Mapping) or response.get("status") not in {"ready", "blocked"}:
         raise LLMError("Design refinement must return ready or blocked.")
     spec = response.get("implementation_spec", "")
     questions = response.get("unresolved_questions", [])
-    if not isinstance(spec, str) or not isinstance(questions, list) or any(not isinstance(q, str) for q in questions):
+    code_questions = response.get("code_task_questions", [])
+    if (not isinstance(spec, str) or not isinstance(questions, list)
+            or any(not isinstance(q, str) for q in questions)
+            or not isinstance(code_questions, list)
+            or any(not isinstance(q, str) or not q.strip() for q in code_questions)
+            or len(code_questions) > 8):
         raise LLMError("Invalid implementation specification or unresolved questions.")
     if response["status"] == "ready" and (not spec.strip() or questions):
         raise LLMError("A ready design refinement needs a specification and no unresolved questions.")
@@ -471,7 +549,46 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
         previous = replace(previous, contract=contract, selected_idea=selected, novelty_check=None,
             selection_rationale=rationale.strip(), evidence_refs=tuple(selected.motivation_refs))
     return replace(previous, status=response["status"], implementation_spec=spec.strip(),
+                   code_task_questions=tuple(q.strip() for q in code_questions) if response["status"] == "ready" else (),
                    generation_mode="llm", diagnostics=diagnostics)
+
+
+def _bridge_adjacent_source_gaps(
+    workspace: Path, index: dict[str, Any], supplied: list[dict[str, Any]],
+    found: list[dict[str, Any]], *, max_chars: int, max_files: int,
+) -> list[dict[str, Any]]:
+    """Use a bounded residual budget for short unseen gaps before new windows."""
+    from simple_ar.code_task.analysis.source_context import requested_source_context
+
+    bridges: list[dict[str, Any]] = []
+    remaining = max_chars
+    for right in reversed(found):
+        if remaining <= 0 or len(bridges) >= max_files:
+            break
+        start = int(right["source_offset"])
+        earlier = [row for row in supplied + found + bridges
+                   if row is not right and row["path"] == right["path"]
+                   and int(row["source_offset"]) + len(row["text"]) <= start]
+        if not earlier:
+            continue
+        left = max(earlier, key=lambda row: int(row["source_offset"]) + len(row["text"]))
+        gap_size = start - int(left["source_offset"]) - len(left["text"])
+        line_start = int(left["end_line"])
+        line_end = int(right["start_line"])
+        if (gap_size <= 0 or gap_size > min(remaining, 2000)
+                or line_end < line_start or line_end - line_start >= 200):
+            continue
+        rows = requested_source_context(
+            workspace, index,
+            {"files": [right["path"]], "line_range": {"start": line_start, "end": line_end}},
+            supplied=supplied + found + bridges, max_files=1, max_chars=remaining,
+            max_total_chars=remaining,
+        )
+        if rows and int(rows[0]["source_offset"]) + len(rows[0]["text"]) == start:
+            bridge = dict(rows[0], lookup_basis="adjacent_gap")
+            bridges.append(bridge)
+            remaining -= len(bridge["text"])
+    return bridges
 
 
 def _initial_feasibility_issues(
@@ -495,15 +612,12 @@ def _initial_feasibility_issues(
             )
             if reason:
                 issues.append(f"Target path {path!r} is not editable: {reason}.")
-    if source_config:
-        quotes = response.get("source_quotes")
-        config_text = "\n".join(row["text"] for row in excerpts if row["path"] == source_config)
-        if not isinstance(quotes, list) or not any(
-            isinstance(row, Mapping) and row.get("path") == source_config
-            and isinstance(row.get("quote"), str) and len(row["quote"].strip()) >= 3
-            and row["quote"] in config_text for row in quotes
-        ):
-            issues.append(f"Ready design needs an exact observed source quote from active config {source_config!r}.")
+    # The declared active config has already been read as a separate source
+    # excerpt before the first feasibility call. Forcing the model to copy the
+    # same text into source_quotes adds no evidence and can overwrite an
+    # otherwise sound implementation design during a format-only correction.
+    if source_config and not any(row["path"] == source_config for row in excerpts):
+        issues.append(f"Active source config {source_config!r} was not supplied for feasibility review.")
     indexed = {str(row["path"]) for row in source_index.get("files", [])}
     existing_targets = (
         [path for path in paths if isinstance(path, str) and path in indexed]
@@ -546,12 +660,20 @@ def _review_initial_feasibility(
         "For a new target file, do not demand a quote from a nonexistent file; check its "
         "specified integration point or standalone purpose and validation instead. "
         "If source evidence is insufficient to establish a behavioral effect, request a specific "
-        "read-only source inspection in the issues. Return JSON "
+        "read-only source inspection in the issues. Judge the proposed change against its "
+        "source consumers; do not demand a new source audit of an unchanged evaluator or "
+        "report adapter merely to prove it will produce measurements. Accept bounded helper/interface "
+        "questions delegated to CodeTask only when an observed in-scope integration point and "
+        "the core candidate behavior are already supported by source; reject a known "
+        "contradiction, missing authority, or a speculative method. The experiment runner "
+        "checks the declared metric artifacts after execution. If the proposal changes the "
+        "prediction/output interface, inspect that impact before accepting. Return JSON "
         "{verdict:accept|revise, issues:[short specific strings]}.\n\n"
         + json.dumps({
             "selected_idea": reviewed_idea.to_row() if reviewed_idea else None,
             "contract": previous.contract.to_row() if previous.contract else None,
             "implementation_spec": response.get("implementation_spec"),
+            "code_task_questions": response.get("code_task_questions", []),
             "target_paths": response.get("target_paths"),
             "source_quotes": response.get("source_quotes"),
             "active_source_config": source_config,
@@ -770,6 +892,8 @@ def _resolve_execution_protocol(
     request: ResearchDesignRequest,
     contract: ResearchExperimentContract,
     proposed: Mapping[str, Any] | None,
+    *,
+    trace: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Ground a design proposal in inspected entry facts and explicit config."""
 
@@ -806,11 +930,20 @@ def _resolve_execution_protocol(
         or protocol.get("baseline_command")
     )
     if proposed:
+        # Input provenance is application-owned. The model may reason about the
+        # inspected inputs, but cannot choose or fabricate the recorded refs.
+        proposed = dict(proposed)
+        model_refs = proposed.pop("input_refs", None)
+        if model_refs is not None and trace is not None:
+            trace.append({
+                "kind": "ignored_model_input_refs",
+                "reason": "Input provenance is bound from inspected entry inputs.",
+            })
         _validate_proposed_protocol(proposed, facts)
         for key in (
             "command", "baseline_command", "pairs", "seeds", "seed_count", "seed_flag",
             "baseline_policy", "result_schema", "comparison_required", "decision_reason",
-            "stopping_criteria", "input_refs",
+            "stopping_criteria",
         ):
             if key in proposed:
                 protocol[key] = proposed[key]
@@ -870,8 +1003,7 @@ def _resolve_execution_protocol(
         default_reason = "The baseline policy was explicitly configured or proposed within the accepted boundary."
     protocol["comparison_required"] = comparison_required
     protocol["decision_reason"] = str(protocol.get("decision_reason") or default_reason).strip()
-    if not protocol.get("input_refs"):
-        protocol["input_refs"] = list(facts.get("input_refs") or contract.motivation_refs)
+    protocol["input_refs"] = list(facts.get("input_refs") or contract.motivation_refs)
     if "stopping_criteria" not in protocol:
         protocol["stopping_criteria"] = []
     return protocol
@@ -886,7 +1018,7 @@ def _validate_proposed_protocol(
     allowed = {
         "command", "baseline_command", "pairs", "seeds", "seed_count", "seed_flag",
         "baseline_policy", "result_schema", "comparison_required", "decision_reason",
-        "stopping_criteria", "input_refs",
+        "stopping_criteria",
     }
     unknown = set(proposed) - allowed
     if unknown:
@@ -916,8 +1048,6 @@ def _validate_proposed_protocol(
             raise LLMError("LLM research design stopping_criteria must be a list of non-empty strings.")
     if "result_schema" in proposed and not isinstance(proposed["result_schema"], Mapping):
         raise LLMError("LLM research design result_schema must be an object.")
-    if "input_refs" in proposed:
-        _validate_input_refs(proposed["input_refs"], entry_facts)
     if "pairs" in proposed and any(key in proposed for key in ("seeds", "seed_count", "seed_flag")):
         raise LLMError("LLM research design must choose pairs or compact seed settings, not both.")
     if "pairs" in proposed:
@@ -961,14 +1091,6 @@ def _validate_argv_within_boundary(
         raise LLMError(
             f"LLM research design {name} is outside the inspected authorized entrypoint boundary."
         )
-
-
-def _validate_input_refs(value: object, entry_facts: Mapping[str, Any]) -> None:
-    if not isinstance(value, list) or not value:
-        raise LLMError("LLM research design input_refs must be a non-empty list.")
-    known = entry_facts.get("input_refs")
-    if not isinstance(known, list) or any(item not in known for item in value):
-        raise LLMError("LLM research design input_refs must refer to inspected entry inputs.")
 
 
 def _synthesis_context(synthesis: SynthesisResult, topic: str = "") -> str:

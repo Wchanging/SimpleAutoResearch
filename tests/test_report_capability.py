@@ -52,6 +52,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             self.assertEqual([c.attrib["cx"] for c in circles], ["460.00", "700.00"])
             self.assertIn("fraction", figure.title)
             self.assertIn(figure.path, result.report_markdown)
+            self.assertIn(figure.path, result.report_body_markdown)
             from dataclasses import replace
             absent = assemble_report_document(replace(request, paired_summaries=()), report_dir=root / "no-data")
             self.assertEqual(absent.figures, ())
@@ -277,6 +278,11 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             self.assertEqual(len(figure_refs), 1)
             self.assertEqual(figure_refs[0].path, "figures/taxonomy-map.svg")
             self.assertEqual(figure_refs[0].status, "available")
+            body = controller.store.read_text("attempts/attempt-001/report_body.md")
+            report = controller.store.read_text("attempts/attempt-001/report.md")
+            self.assertIn("figures/taxonomy-map.svg", body)
+            self.assertIn("figures/taxonomy-map.svg", report)
+            self.assertIn("[@paper-1]", body)
             attempt = controller.store.read_attempt_manifest(
                 "attempts/attempt-001/attempt_manifest.json"
             )

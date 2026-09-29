@@ -59,6 +59,69 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CodeTaskTests(unittest.TestCase):
+    def test_bug_validation_repair_keeps_failed_and_repaired_evidence_distinct(self) -> None:
+        from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
+        from simple_ar.research.implementation import ImplementationRequest, run_implementation_capability
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project, task, run_dir = root / "project", root / "task.md", root / "code-task"
+            _write_toy_project(project)
+            write_text(project / "tests" / "test_prize.py", (
+                "import unittest\n"
+                "from spam_model import predict\n"
+                "class PrizeTest(unittest.TestCase):\n"
+                "    def test_prize(self):\n"
+                "        self.assertEqual(predict('prize for you'), 'spam')\n"
+            ))
+            write_text(task, "Repair prize-message classification without changing tests.")
+            initialize_code_task(run_dir=run_dir, code_root=project, task_file=task)
+            workspace = code_task_paths(run_dir).workspace_dir
+            inputs = ArtifactStore(root / "inputs")
+            brief = inputs.write_json("brief.json", {
+                "request_text": "Fix prize-message classification.",
+                "objective": "The prize test must pass.",
+                "hard_constraints": ["Do not edit tests."],
+            }, kind="research_brief")
+            store = ArtifactStore(root / "attempt")
+            context = CapabilityContext(
+                store=store, attempt=AttemptManifest("implement-001"),
+                inputs=(brief,), input_store=inputs,
+            )
+
+            class Client(_FakeCodeTaskClient):
+                def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                    if label == "code-task-repair":
+                        return {"summary": "Correct the near-miss keyword", "edits": [{
+                            "path": "spam_model.py", "old": "('win', 'prizex')",
+                            "new": "('win', 'prize')", "reason": "The failed test uses prize.",
+                        }], "validation": ["Run the existing tests"], "risks": []}
+                    result = super().ask_json(system, user, label=label)
+                    if label == "code-task-propose-edits":
+                        edit = result["edits"][0]
+                        edit["new"] = edit["new"].replace("('win', 'prize')", "('win', 'prizex')")
+                    return result
+
+            client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat"))
+            with patch.object(LLMClient, "ask_json", side_effect=Client().ask_json):
+                result = run_implementation_capability(context=context, request=ImplementationRequest(
+                    run_dir, workspace, "Authorize isolated bug fix", client,
+                    validation_command=(sys.executable, "-m", "unittest", "discover", "-s", "tests"),
+                    validation_timeout_sec=30, max_repairs=1,
+                ))
+            self.assertEqual(result.status, "completed", result.diagnostics)
+            payload = read_json(root / "attempt" / "implementation.json")
+            self.assertEqual(payload["validation"]["status"], "passed")
+            self.assertEqual([row["outcome"] for row in payload["validation_repairs"]], ["passed"])
+            failed = Path(payload["validation_repairs"][0]["failed_validation_report"])
+            self.assertEqual(read_json(failed)["status"], "failed")
+            self.assertEqual(read_json(run_dir / "code_task" / "run" / "patched" / "execution_report.json")["status"], "passed")
+            refs = payload["artifact_refs"]
+            self.assertNotEqual(refs["edit_proposal"]["path"], refs["repair_proposal"]["path"])
+            self.assertIn("post_repair", refs["review"]["path"])
+            self.assertEqual(read_json(store.root / refs["validation_failure_1"]["path"])["status"], "failed")
+            self.assertIn("prize", (workspace / "spam_model.py").read_text(encoding="utf-8"))
+
     def test_implementation_authorization_preserves_rejections_and_dry_run(self):
         from simple_ar.code_task.orchestration.execute import implement_code_task
         with tempfile.TemporaryDirectory() as tmp:
@@ -3131,6 +3194,106 @@ protected_patterns = ["pyproject.toml"]
             self.assertLessEqual(len(result[0]["text"]), 200)
             self.assertEqual(result[0]["access_role"], "read_only")
             self.assertGreater(result[0]["source_offset"], 0)
+
+    def test_truncated_editable_file_can_be_read_again_without_expanding_scope(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "project"
+            _write_toy_project(code_root)
+            source = read_text(code_root / "spam_model.py")
+            write_text(code_root / "spam_model.py", ("# context padding\n" * 35) + source)
+            write_text(root / "task.md", "Change the spam keyword within the existing model.")
+            run_dir = root / "run"
+            initialize_code_task(
+                run_dir=run_dir, code_root=code_root, task_file=root / "task.md",
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"edits": [], "summary": "The prediction function is beyond the visible prefix.",
+                 "validation": ["Source excerpt is truncated."],
+                 "context_request": {"files": ["spam_model.py:tail"]},
+                 "implementation_feedback": {"kind": "source_gap", "reason": "Need the rest of the file."}},
+                {"edits": [], "context_request": {
+                    "files": ["spam_model.py"], "query": "predict", "symbols": ["predict"]}},
+                {"edits": [{"path": "spam_model.py",
+                            "old": "return 'spam' if 'win' in text.lower() else 'ham'",
+                            "new": "return 'spam' if 'prize' in text.lower() else 'ham'",
+                            "reason": "Change the requested keyword."}]},
+            ]
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task", return_value=client):
+                result = propose_patch_edits(
+                    run_dir, use_llm=True, max_source_chars_per_file=180,
+                )
+            self.assertEqual(result.edit_count, 1)
+            self.assertEqual(client.ask_json.call_count, 3)
+            self.assertIn("partial source", client.ask_json.call_args_list[1].args[1])
+            followup = read_json(run_dir / "code_task/meta/edit_context_followup.json")
+            self.assertEqual(followup["request"]["files"], ["spam_model.py"])
+            self.assertGreater(followup["snippets"][0]["source_offset"], 0)
+            self.assertIn("def predict", client.ask_json.call_args_list[2].args[1])
+            self.assertIn("### spam_model.py (editable", client.ask_json.call_args_list[2].args[1])
+            self.assertIn("'win'", read_text(run_dir / "code_task/workspace/spam_model.py"))
+
+    def test_truncated_editable_file_gets_bounded_fallback_when_model_cannot_request_source(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "project"
+            _write_toy_project(code_root)
+            source = read_text(code_root / "spam_model.py")
+            write_text(code_root / "spam_model.py", ("# context padding\n" * 35) + source)
+            write_text(root / "task.md", "Change the spam keyword within the existing model.")
+            run_dir = root / "run"
+            initialize_code_task(
+                run_dir=run_dir, code_root=code_root, task_file=root / "task.md",
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"edits": [], "summary": "Cannot find the function in the displayed source."},
+                {"edits": [], "context_request": {"files": ["spam_model.py:tail"]}},
+                {"edits": [{"path": "spam_model.py",
+                            "old": "return 'spam' if 'win' in text.lower() else 'ham'",
+                            "new": "return 'spam' if 'prize' in text.lower() else 'ham'",
+                            "reason": "Change the requested keyword."}]},
+            ]
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task", return_value=client):
+                result = propose_patch_edits(run_dir, use_llm=True, max_source_chars_per_file=180)
+            self.assertEqual(result.edit_count, 1)
+            self.assertEqual(client.ask_json.call_count, 3)
+            followup = read_json(run_dir / "code_task/meta/edit_context_followup.json")
+            self.assertEqual(followup["request"]["files"], ["spam_model.py"])
+            self.assertEqual(followup["request"]["query"], "")
+            self.assertTrue(all(item["path"] == "spam_model.py" for item in followup["snippets"]))
+            self.assertLessEqual(len(followup["snippets"]), 2)
+            self.assertTrue(all(item["source_offset"] > 0 for item in followup["snippets"]))
+            self.assertIn("### spam_model.py (editable", client.ask_json.call_args_list[2].args[1])
+            self.assertIn("'win'", read_text(run_dir / "code_task/workspace/spam_model.py"))
+
+    def test_bounded_fallback_reads_two_unseen_windows_within_budget(self) -> None:
+        from simple_ar.code_task.analysis.index import build_codebase_index
+        from simple_ar.code_task.analysis.source_context import requested_source_context
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            source = ("# source padding\n" * 100) + "def target():\n    return 1\n"
+            write_text(root / "model.py", source)
+            index = build_codebase_index(root)
+            initial = {"path": "model.py", "text": source[:180], "source_offset": 0}
+            result = requested_source_context(
+                root, index, {"files": ["model.py"]}, supplied=[initial],
+                max_files=2, max_chars=180, max_total_chars=360, max_windows_per_file=2,
+            )
+            self.assertEqual(len(result), 2)
+            self.assertEqual([item["source_offset"] for item in result], [180, 360])
+            self.assertEqual(sum(len(item["text"]) for item in result), 360)
+            self.assertEqual(read_text(root / "model.py"), source)
 
     def test_missing_context_is_read_once_without_expanding_edit_scope(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

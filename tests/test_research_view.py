@@ -94,5 +94,5 @@ class ResearchConsoleTests(unittest.TestCase):
         self.assertIn("analysis (initial)", output)
         self.assertIn("analysis (latest: analysis_r1)", output)
         self.assertIn("decision (latest)", output)
-        self.assertIn("session\\attempts\\implementation.json", output)
-        self.assertIn("session\\attempts\\implementation_r1.json", output)
+        self.assertIn(str(Path("session") / "attempts" / "implementation.json"), output)
+        self.assertIn(str(Path("session") / "attempts" / "implementation_r1.json"), output)

@@ -87,8 +87,8 @@ def build_parser(
         required=not (allow_resume_without_topic or bool(research_defaults and research_defaults.get("topic"))),
     )
     session_parser.add_argument(
-        "--task-kind", choices=("auto", "survey", "bug_fix"), default="auto",
-        help="Task-driven path: survey reuses evidence/report; bug_fix reuses isolated CodeTask patching and short validation.",
+        "--task-kind", choices=("auto", "survey", "bug_fix", "measurement"), default="auto",
+        help="Task-driven path: survey reads evidence; bug_fix patches a project; measurement runs and analyzes an explicit command without research discovery.",
     )
     session_parser.add_argument("--outputs", nargs="+", choices=("summary", "report", "experiments", "bug_fix"))
     session_parser.add_argument("--total-tokens", type=int, default=None, help="Optional session API token budget; omitted means unlimited.")

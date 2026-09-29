@@ -28,6 +28,13 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Retrieved Evidence Snippets", synth_prompt)
         self.assertIn("trace", synth_prompt)
 
+    def test_synthesis_does_not_request_cross_paper_conclusions_from_one_source(self) -> None:
+        single = synthesize_user_prompt("one note", "{}", source_count=1)
+        multiple = synthesize_user_prompt("several notes", "{}", source_count=3)
+        self.assertIn("do not invent cross-paper consensus", single)
+        self.assertNotIn("Group multiple papers", single)
+        self.assertIn("Group multiple papers", multiple)
+
     def test_research_planner_prompt_requests_short_source_queries(self) -> None:
         prompt = research_planner_user_prompt(
             topic="multi-agent coding",

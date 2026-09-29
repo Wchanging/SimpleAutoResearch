@@ -16,7 +16,7 @@ from simple_ar.report.schema import ReportDocumentPlan, ReportFigureConfig
 
 @runtime_checkable
 class FigureRenderer(Protocol):
-    """Render optional report figures from a report and structured plan."""
+    """Render optional figures into the citation-key body, before references."""
 
     name: str
 
@@ -30,7 +30,7 @@ class FigureRenderer(Protocol):
         document_plan: ReportDocumentPlan | None = None,
         emit: Callable[[str], None] | None = None,
     ) -> ReportFigureResult:
-        """Return the report with any supported figure artifacts inserted."""
+        """Return that body with any supported figure artifacts inserted."""
 
 
 class DeterministicFigureRenderer:

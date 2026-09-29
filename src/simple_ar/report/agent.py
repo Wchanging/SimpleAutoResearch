@@ -33,6 +33,11 @@ _EXPERIMENT_EVIDENCE_RULES = """
 Distinguish changes shown by the frozen patch from reused existing code and
 unimplemented proposals. Do not describe an invoked utility as modified unless
 its implementation appears in the patch.
+Separate code that was written from behavior that was observed. A failed run
+may not have reached or completed the intended operation: describe that code
+as configured or attempted, not as a computation that actually occurred.
+Treat claims that a failed run executed past its recorded error as factual
+conflicts, even when the patch contains the intended code path.
 An unchanged protocol isolates the implemented candidate as a whole, not a
 unique causal mechanism. Without a relevant ablation or direct mechanism
 measurement, do not assign all differences to one component. Do not invent
@@ -74,8 +79,10 @@ Keep paragraphs short and focused. Use as many paragraphs as the requested
 section target needs; only when no substantive length target is provided,
 prefer 2-4 compact paragraphs or a short comparison list instead of one dense
 block.
-For survey reports, synthesize across papers: build taxonomies, contrast
-assumptions, compare evaluation settings, and state boundary conditions.
+For multi-source survey reports, synthesize across papers: build taxonomies,
+contrast assumptions, compare evaluation settings, and state boundary conditions.
+For a single-source review, assess that source directly; do not manufacture a
+method family, baseline comparison, or cross-paper consensus.
 When many sources are available, use them to improve coverage and confidence;
 do not make the report grow linearly by writing one paragraph per paper.
 Never write prompt-planning language such as "Hint:", "Use this paper as", or
@@ -94,9 +101,10 @@ Flag operational/provenance sections in research-only reports when they make
 the report read like a pipeline log instead of an academic survey.
 Flag any section that is one huge paragraph or mixes many unrelated claims
 without paragraph breaks or comparison bullets.
-Flag paper-by-paper note dumps, prompt/planning residue, missing taxonomy,
-missing cross-paper comparison, and performance claims without boundary
-conditions.
+Flag paper-by-paper note dumps, prompt/planning residue, and performance claims
+without boundary conditions. Require a taxonomy or cross-paper comparison only
+when multiple independent sources support one; for a single-source review,
+check that the report does not invent a comparison or consensus.
 Flag conclusive language, claims that seed noise has been ruled out, or claims
 of stable general improvement when the supplied evidence has only a small seed
 set and descriptive statistics. Ask the Writer to bound those statements to
@@ -1618,6 +1626,13 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
             compact[key] = results[key]
     if "metrics" in results:
         compact["metrics"] = _metrics(results.get("metrics"))
+    diagnosis = _mapping(results.get("failure_diagnosis"))
+    if diagnosis is not None:
+        compact["failure_diagnosis"] = {
+            key: diagnosis[key]
+            for key in ("status", "summary", "deficiencies", "stderr_tail")
+            if key in diagnosis
+        }
 
     for label in ("baseline", "patched", "candidate"):
         run = _mapping(results.get(label))
@@ -1629,6 +1644,32 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
             if key in run
         }
         compact[label]["metrics"] = _metrics(run.get("metrics"))
+
+    history = results.get("measurement_history")
+    if isinstance(history, list):
+        rows = [item for item in history if isinstance(item, Mapping)]
+        selected = rows if len(rows) <= 24 else [*rows[:8], *rows[-16:]]
+        compact["measurement_history_total"] = len(rows)
+        compact["measurement_history_omitted"] = len(rows) - len(selected)
+        compact["passed_candidate_measurements"] = sum(
+            1 for item in rows
+            if str(item.get("status") or "").lower() == "passed"
+            and not str(item.get("action") or "").startswith((
+                "baseline", "matrix_baseline", "supplement_baseline",
+            ))
+        )
+        compact["measurement_history"] = [
+            {
+                "action": str(item.get("action") or ""),
+                "status": str(item.get("status") or "unknown"),
+                "metrics": _metrics(item.get("metrics")),
+                "artifact": str(item.get("artifact") or ""),
+                "implementation_artifact": str(
+                    item.get("implementation_ref", {}).get("path") or ""
+                ) if isinstance(item.get("implementation_ref"), Mapping) else "",
+            }
+            for item in selected
+        ]
 
     comparisons = results.get("comparisons")
     if isinstance(comparisons, list):

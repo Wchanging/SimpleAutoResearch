@@ -40,8 +40,9 @@ class ResearchDesignTests(unittest.TestCase):
                  "execution_protocol": {}},
                 {"status": "ready", "implementation_spec":
                     "Observe a changed forward output on a small input; keep the accepted evaluator.",
-                 "unresolved_questions": [], "target_paths": ["model.py"],
-                 "source_quotes": [{"path": "model.py", "quote": "return x"}]},
+                  "unresolved_questions": [], "target_paths": ["model.py"],
+                  "code_task_questions": ["Check the input shape at the forward call site."],
+                  "source_quotes": [{"path": "model.py", "quote": "return x"}]},
                 {"verdict": "accept", "issues": []},
             ]
             result = build_research_design(ResearchDesignRequest(
@@ -52,7 +53,36 @@ class ResearchDesignTests(unittest.TestCase):
             ))
             self.assertEqual(result.status, "ready")
             self.assertIn("changed forward output", result.implementation_spec)
+            self.assertEqual(result.code_task_questions,
+                             ("Check the input shape at the forward call site.",))
+            self.assertEqual(ResearchDesignResult.from_handoff_dict(result.to_handoff_dict()).code_task_questions,
+                             result.code_task_questions)
             self.assertIn("def forward", client.ask_json.call_args.args[1])
+
+    def test_delegated_code_questions_reach_existing_code_task_handoff(self):
+        from simple_ar.research.implementation import ImplementationRequest, _prepare_research_task
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_dir = root / "code_task" / "task"
+            task_dir.mkdir(parents=True)
+            (task_dir / "task.md").write_text("# Original task\n", encoding="utf-8")
+            store = ArtifactStore(root / "attempt")
+            design = replace(
+                build_research_design(ResearchDesignRequest(synthesis=self._synthesis())),
+                implementation_spec="Change the observed forward path; validate its output.",
+                code_task_questions=("Check helper keyword arguments before editing.",),
+            )
+            ref = store.write_json("inputs/design.json", design.to_handoff_dict(),
+                                   kind="research_design", schema="research_design.v1", producer="test")
+            context = CapabilityContext(store=store,
+                attempt=AttemptManifest(attempt_id="implement-1", capability="implement"),
+                inputs=(ref,))
+            request = ImplementationRequest(root, root, "Authorized isolated edits", object())
+            _prepare_research_task(context, request, task_dir)
+            task = (task_dir / "task.md").read_text(encoding="utf-8")
+            self.assertIn("Check helper keyword arguments before editing.", task)
+            self.assertIn("return a design_gap instead of guessing", task)
 
     def test_initial_design_reads_active_config_and_rejects_protected_targets(self):
         from unittest.mock import Mock
@@ -87,6 +117,42 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertEqual(client.ask_json.call_count, 4)
             self.assertIn("k = 32", client.ask_json.call_args.args[1])
             self.assertIn("not editable", client.ask_json.call_args_list[2].args[1])
+
+    def test_active_config_excerpt_does_not_force_a_format_only_design_rewrite(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text(
+                "def build(config):\n    return Model(**config['model'])\n", encoding="utf-8",
+            )
+            (workspace / "experiment.toml").write_text(
+                "[model]\nshare_training_batches = false\n", encoding="utf-8",
+            )
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Try a bounded change."},
+                {"status": "ready", "implementation_spec":
+                    "Use one effective shared-batch value for model construction and training; "
+                    "leave the accepted evaluator unchanged.",
+                 "unresolved_questions": [], "target_paths": ["model.py"],
+                 "source_quotes": [{"path": "model.py", "quote": "Model(**config['model'])"}]},
+                {"verdict": "accept", "issues": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {
+                    "code_root": str(workspace), "allowed_patterns": ["model.py"],
+                    "protected_patterns": ["experiment.toml"]},
+                    "protocol": {"comparison_conditions": {"source_config": "experiment.toml"}}},
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertEqual(client.ask_json.call_count, 3)
+            self.assertIn("share_training_batches = false", client.ask_json.call_args_list[1].args[1])
+            self.assertIn("unchanged evaluator", client.ask_json.call_args_list[2].args[1])
 
     def test_initial_design_revises_when_review_finds_dormant_edit(self):
         from unittest.mock import Mock
@@ -171,6 +237,27 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertEqual(requested_source_context(workspace, index, request,
                 supplied=first + second, max_files=2, max_chars=1000), [])
 
+    def test_focused_source_read_includes_adjacent_unseen_behavior(self):
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            source = (
+                "def train_batch():\n" + "    # setup\n" * 125
+                + "    optimizer.step()\n" + "    # trailing\n" * 80
+            )
+            (workspace / "model.py").write_text(source, encoding="utf-8")
+            index = source_file_inventory(workspace)
+            found = requested_source_context(
+                workspace, index, {"files": ["model.py"], "symbols": ["train_batch"], "query": ""},
+                supplied=[], max_files=2, max_chars=1000, max_total_chars=2000,
+                max_windows_per_file=2,
+            )
+            self.assertEqual(len(found), 2)
+            self.assertEqual(found[1]["source_offset"], found[0]["source_offset"] + 1000)
+            self.assertIn("optimizer.step()", found[1]["text"])
+            self.assertLessEqual(sum(len(row["text"]) for row in found), 2000)
+
     def test_source_followup_uses_query_after_symbol_window_is_exhausted(self):
         from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
 
@@ -234,6 +321,190 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertGreaterEqual(found[0]["end_line"], found[0]["start_line"])
             self.assertEqual(requested_source_context(workspace, index, request,
                 supplied=found, max_files=2, max_chars=500), [])
+
+    def test_exact_source_lookup_keeps_preceding_call_setup(self):
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            source = ("a" * 1200 + "setup_bins = compute_bins(data)\n" + "b" * 1300
+                      + "model = Model(bins=setup_bins)\n" + "c" * 5000)
+            (workspace / "model.py").write_text(source, encoding="utf-8")
+            found = requested_source_context(
+                workspace, source_file_inventory(workspace),
+                {"files": ["model.py"], "literal": "model = Model(bins=setup_bins)"},
+                supplied=[], max_files=1, max_chars=4000,
+            )
+            self.assertEqual(len(found), 1)
+            self.assertIn("setup_bins = compute_bins(data)", found[0]["text"])
+            self.assertIn("model = Model(bins=setup_bins)", found[0]["text"])
+
+    def test_construction_question_prefers_python_call_site_over_definition(self):
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            source = ("class Predictor:\n    def __init__(self, width):\n        self.width = width\n"
+                      + "# unrelated\n" * 400
+                      + "width = config['width']\nmodel = Predictor(width=width)\n"
+                      + "# tail\n" * 200)
+            (workspace / "model.py").write_text(source, encoding="utf-8")
+            found = requested_source_context(
+                workspace, source_file_inventory(workspace),
+                {"files": ["model.py"], "symbols": ["Predictor.__init__"],
+                 "query": "Where is the Predictor constructed from config?"},
+                supplied=[], max_files=1, max_chars=1000,
+            )
+            self.assertEqual(len(found), 1)
+            self.assertIn("width = config['width']", found[0]["text"])
+            self.assertIn("model = Predictor(width=width)", found[0]["text"])
+
+    def test_bounded_line_range_fills_only_unseen_gap(self):
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            source = "".join(f"line {i:03d}\n" for i in range(1, 61))
+            (workspace / "model.py").write_text(source, encoding="utf-8")
+            index = source_file_inventory(workspace)
+            supplied = [{"path": "model.py", "text": "".join(source.splitlines(keepends=True)[:30]),
+                         "source_offset": 0}]
+            found = requested_source_context(
+                workspace, index,
+                {"files": ["model.py"], "line_range": {"start": 27, "end": 35}},
+                supplied=supplied, max_files=1, max_chars=100,
+            )
+            self.assertEqual(found[0]["start_line"], 31)
+            self.assertIn("line 035", found[0]["text"])
+            self.assertNotIn("line 030", found[0]["text"])
+            self.assertEqual(requested_source_context(
+                workspace, index,
+                {"files": ["model.py"], "line_range": {"start": 27, "end": 35}},
+                supplied=supplied + found, max_files=1, max_chars=100), [])
+            self.assertEqual(requested_source_context(workspace, index,
+                {"files": ["../outside.py"], "line_range": {"start": 1, "end": 2}},
+                supplied=[], max_files=1, max_chars=100), [])
+
+    def test_design_source_read_bridges_short_gap_before_new_use_site(self):
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+        from simple_ar.research.design import _bridge_adjacent_source_gaps
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            source = ("# before\n" * 400 + "bin_edges = compute_bins(data)\n"
+                      + "# setup\n" * 30 + "model = Model(bins=bin_edges)\n"
+                      + "# after\n" * 400)
+            (workspace / "model.py").write_text(source, encoding="utf-8")
+            gap_start = source.index("bin_edges =")
+            gap_end = source.index("model = Model")
+            left = {"path": "model.py", "text": source[:gap_start], "source_offset": 0,
+                    "start_line": 1, "end_line": source.count("\n", 0, gap_start) + 1}
+            right = {"path": "model.py", "text": source[gap_end:gap_end + 1000],
+                     "source_offset": gap_end,
+                     "start_line": source.count("\n", 0, gap_end) + 1,
+                     "end_line": source.count("\n", 0, gap_end + 999) + 1}
+            bridged = _bridge_adjacent_source_gaps(
+                workspace, source_file_inventory(workspace), [left], [right],
+                max_chars=2000, max_files=1,
+            )
+            self.assertEqual(len(bridged), 1)
+            self.assertEqual(bridged[0]["lookup_basis"], "adjacent_gap")
+            self.assertIn("bin_edges = compute_bins(data)", bridged[0]["text"])
+            self.assertEqual(bridged[0]["source_offset"] + len(bridged[0]["text"]), gap_end)
+
+    def test_refinement_accepts_precise_line_range_without_requiring_baseline_measurement(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text(
+                "".join(f"# line {i}\n" for i in range(1, 45))
+                + "model = Model(bins=bin_edges)\n", encoding="utf-8")
+            original = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"status": "inspect_source", "context_request": {
+                    "files": ["model.py"], "line_range": {"start": 43, "end": 45},
+                    "query": "", "symbols": []}},
+                {"status": "ready", "implementation_spec":
+                    "Use observed model construction and let the experiment stage measure the baseline.",
+                 "unresolved_questions": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), previous_design=original.to_handoff_dict(),
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertIn("model = Model(bins=bin_edges)", client.ask_json.call_args.args[1])
+            self.assertIn("or a measured baseline", client.ask_json.call_args.args[1])
+
+    def test_refinement_reads_other_target_after_exact_literal_was_supplied(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            literal = "loss = loss_fn(apply_model('train', batch), targets)"
+            (workspace / "train.py").write_text(
+                "def train(batch, targets):\n    " + literal + "\n", encoding="utf-8")
+            (workspace / "evaluate.py").write_text(
+                "# padding\n" * 500
+                + "def evaluate(predictions):\n    return predictions.mean(1)\n",
+                encoding="utf-8",
+            )
+            original = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"status": "inspect_source", "context_request": {
+                    "files": ["train.py"], "symbols": [], "query": "", "literal": literal}},
+                {"status": "inspect_source", "context_request": {
+                    "files": ["train.py", "evaluate.py"], "symbols": ["evaluate"],
+                    "query": "where are predictions aggregated?", "literal": literal}},
+                {"status": "ready", "implementation_spec": "Preserve paired training and evaluation.",
+                 "unresolved_questions": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), previous_design=original.to_handoff_dict(),
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            next_prompt = client.ask_json.call_args_list[2].args[1]
+            self.assertIn('"literal": "already_supplied"', next_prompt)
+            self.assertIn('"lookup_basis": "query_or_symbol"', next_prompt)
+            self.assertIn("predictions.mean(1)", next_prompt)
+
+    def test_refinement_marks_nonliteral_evidence_when_exact_is_absent(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "invoice.ts").write_text(
+                "export function invoiceTotal(lines) { return lines.reduce(sumLine, 0); }\n",
+                encoding="utf-8",
+            )
+            original = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"status": "inspect_source", "context_request": {
+                    "files": ["invoice.ts"], "symbols": ["invoiceTotal"],
+                    "query": "where is invoiceTotal implemented?", "literal": "missingFunction("}},
+                {"status": "blocked", "implementation_spec": "", "unresolved_questions": [
+                    "The exact requested call was not observed in the supplied code."]},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), previous_design=original.to_handoff_dict(),
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "blocked")
+            next_prompt = client.ask_json.call_args_list[1].args[1]
+            self.assertIn('"literal": "not_observed"', next_prompt)
+            self.assertIn('"lookup_basis": "query_or_symbol"', next_prompt)
+            self.assertIn("invoiceTotal", next_prompt)
 
     def test_initial_feasibility_requires_code_evidence_not_just_config(self):
         from unittest.mock import Mock
@@ -608,6 +879,35 @@ class ResearchDesignTests(unittest.TestCase):
             execution["pairs"][0]["candidate_command"],
         )
         self.assertEqual(result.execution_protocol["input_refs"], ["preparation:entry-facts"])
+
+    def test_model_cannot_choose_provenance_refs_but_command_boundary_still_applies(self) -> None:
+        class FakeClient:
+            model = "fake-protocol-model"
+
+            def ask_json(self, _system: str, _user: str, *, label: str = "", **kwargs: object):
+                return {
+                    "selected_idea_id": "idea-002",
+                    "rationale": "Use the inspected benchmark.",
+                    "execution_protocol": {
+                        "input_refs": ["invented:uninspected-input"],
+                        "baseline_policy": "skip",
+                    },
+                }
+
+        trace: list[dict[str, object]] = []
+        result = build_research_design(ResearchDesignRequest(
+            synthesis=self._synthesis(), use_llm=True, llm_client=FakeClient(),
+            execution_boundary={"command": [sys.executable, "benchmark.py"]},
+            entry_facts={
+                "authorized_argv_prefixes": [[sys.executable, "benchmark.py"]],
+                "input_refs": [{"path": "inputs/brief.json", "kind": "research_brief"}],
+            },
+        ), trace=trace)
+        self.assertEqual(
+            result.execution_protocol["input_refs"],
+            [{"path": "inputs/brief.json", "kind": "research_brief"}],
+        )
+        self.assertEqual(trace[0]["kind"], "ignored_model_input_refs")
 
     def test_llm_mode_selects_only_an_existing_candidate(self) -> None:
         class FakeClient:

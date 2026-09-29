@@ -54,6 +54,11 @@ class ResearchBriefApplicationTests(unittest.TestCase):
 
             def ask_json(self, system: str, user: str, *, label: str = "", **kwargs: object) -> dict[str, object]:
                 del kwargs
+                if label == "task-plan":
+                    return {"steps": [
+                        {"action": action}
+                        for action in ("search", "document_ingest", "read", "synthesize", "summarize")
+                    ]}
                 if label == "research-planner":
                     return {
                         "questions": [
@@ -148,10 +153,10 @@ class ResearchBriefApplicationTests(unittest.TestCase):
             self.assertIn("reliability validation", result.plan.query_plan.queries)
             self.assertEqual(result.plan.source_plan.sources, ["local_files"])
             self.assertTrue(result.brief_path.is_file())
-            self.assertEqual(len(result.attempts), 5)
+            self.assertEqual(len(result.attempts), 6)
             self.assertEqual(
                 [attempt.capability for attempt in result.attempts],
-                ["document_ingest", "plan", "read", "search", "synthesize"],
+                ["document_ingest", "plan", "read", "search", "summary", "synthesize"],
             )
             manifest = json.loads(
                 (root / "session" / "session_manifest.json").read_text(encoding="utf-8")

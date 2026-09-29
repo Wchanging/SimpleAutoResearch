@@ -11,6 +11,7 @@ Confidence = Literal["high", "medium", "low"]
 AnalysisStatus = Literal["passed", "failed", "incomplete", "blocked", "metric_below_target"]
 RecommendationAction = Literal["supplement", "revise_candidate", "stop", "request_input"]
 RevisionBase = Literal["candidate", "baseline"]
+RevisionPurpose = Literal["method_change", "verification_only", "unspecified"]
 TaskDisposition = Literal["continue", "stop", "undecided"]
 
 
@@ -56,6 +57,7 @@ class AnalysisRecommendation(_Model):
     alternatives_considered: list[str] = Field(default_factory=list)
     continuation_conditions: list[str] = Field(default_factory=list)
     revision_intent: str = ""
+    revision_purpose: RevisionPurpose = "unspecified"
     revision_constraints: list[str] = Field(default_factory=list)
     revision_base: RevisionBase = "candidate"
     supplement: dict[str, Any] = Field(default_factory=dict)

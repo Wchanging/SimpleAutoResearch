@@ -304,6 +304,11 @@ def _add_llm_synthesis(
         )
 
     pack = dict(request.evidence_pack)
+    counts = pack.get("counts")
+    source_count = (
+        int(counts["documents"])
+        if isinstance(counts, Mapping) and counts.get("documents") is not None else None
+    )
     prompt = synthesize_user_prompt(
             _evidence_notes_markdown(pack),
             _bounded_pack_json(pack),
@@ -317,6 +322,7 @@ def _add_llm_synthesis(
                 },
                 ensure_ascii=False,
             ),
+            source_count=source_count,
     )
     response = client.ask_json(SYNTHESIZE_SYSTEM, prompt, label="research-synthesis")
     for round_index in range(2):

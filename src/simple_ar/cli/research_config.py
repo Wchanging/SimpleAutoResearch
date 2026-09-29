@@ -120,10 +120,12 @@ def research_defaults(
             raise ValueError("continuation.remaining must map resource names to numeric amounts")
     if "outputs" in defaults and (not defaults["outputs"] or set(defaults["outputs"]) - {"summary", "report", "experiments", "bug_fix"}):
         raise ValueError("task.outputs must contain summary, report, experiments and/or bug_fix")
-    if defaults.get("task_kind", "auto") not in {"auto", "survey", "bug_fix"}:
-        raise ValueError("task.kind must be auto, survey or bug_fix")
+    if defaults.get("task_kind", "auto") not in {"auto", "survey", "bug_fix", "measurement"}:
+        raise ValueError("task.kind must be auto, survey, bug_fix or measurement")
     if defaults.get("task_kind") == "bug_fix" and "outputs" in defaults and set(defaults["outputs"]) != {"bug_fix"}:
         raise ValueError("task.kind=bug_fix requires task.outputs = [\"bug_fix\"] or an omitted outputs field")
+    if defaults.get("task_kind") == "measurement" and defaults.get("outputs") != ["experiments"]:
+        raise ValueError("task.kind=measurement requires task.outputs = [\"experiments\"]")
     if defaults.get("report_reviewer", "llm") not in {"llm", "disabled"}:
         raise ValueError("report.reviewer must be llm or disabled")
     for dest, flag in LIST_FLAGS.items():

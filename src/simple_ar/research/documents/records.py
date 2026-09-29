@@ -83,7 +83,10 @@ def _record_from_paper(paper: Paper) -> DocumentRecord:
 
 def _record_from_local_path(path: Path) -> DocumentRecord:
     suffix = path.suffix.lower()
-    document_id = normalize_paper_id(f"local-{path.resolve() if path.exists() else path}")
+    # Keep the path in the provenance record, but never embed it in a citation
+    # identifier: those identifiers can appear in exported BibTeX and reports.
+    path_digest = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:20]
+    document_id = f"local-{path_digest}"
     base = {
         "document_id": document_id,
         "title": path.stem.replace("_", " ").replace("-", " ").strip() or path.name,

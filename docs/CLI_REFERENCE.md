@@ -95,11 +95,17 @@ independent files in [Usage And Configuration](USAGE.md#choose-a-task-and-its-sm
 Explicit CLI options override the file. `--outputs` selects `summary`, `report`,
 and/or `experiments`; `--total-tokens`, `--llm-requests`, `--max-output-tokens`,
 `--process-invocations`, and `--process-wall-seconds` expose the corresponding limits.
+For an already prepared command that only needs one measurement and analysis,
+select `--task-kind measurement --outputs experiments`; this path does not search
+papers or design a new research candidate. The ordinary `auto` path still does.
 Add `--session-root PATH` to continue the saved accepted plan. Omitted goal/outputs remain
 unchanged; a supplied new goal, output set, local document, or execution configuration is an
 explicit revision. The application keeps attempt history and reuses only measurements whose
 command, result schema, protocol, preparation lineage, and protected assets still match; other
 dependent steps are replanned. Changing task kind still requires a new session.
+For a model-backed session, pass `--model env` (using the configured
+`SIMPLE_AR_MODEL`) or `--model NAME` on every resume. An omitted model fails
+before state changes instead of silently replacing model work with deterministic work.
 On resume, saved report settings remain in force unless a report option is
 explicitly supplied; on a session that already requests a report, an explicit
 report change rebuilds only report outputs. Use `research-report` to add the

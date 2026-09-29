@@ -19,6 +19,7 @@ from simple_ar.research.contracts import (
     EvidenceRef,
     MethodCard,
     PaperCard,
+    TextChunk,
 )
 from simple_ar.research.documents.ingest import DocumentBundle
 from simple_ar.research.evidence.cards import (
@@ -294,7 +295,12 @@ def read_documents(request: ReadRequest) -> ReadResult:
             notes = read_paper_notes_with_llm(
                 client,
                 papers=[record.to_row() for record in bundle.records],
-                evidence_snippets=format_bundle_evidence_snippets(bundle),
+                evidence_snippets_by_document={
+                    record.document_id: format_bundle_evidence_snippets(
+                        bundle, document_id=record.document_id,
+                    )
+                    for record in bundle.records
+                },
                 emit=request.emit,
                 config=request.config,
             )
@@ -549,16 +555,101 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def select_representative_chunks(
+    chunks: tuple[TextChunk, ...] | list[TextChunk], *, max_chunks: int,
+    required_chunk_ids: tuple[str, ...] = (),
+) -> tuple[TextChunk, ...]:
+    """Bound a reading overview while covering documents and observed sections.
+
+    This is a sampling policy, not a claim that the selected text represents
+    unseen parts of a paper. Bibliography chunks are excluded when the same
+    document has substantive text; section-less extraction is spread across
+    the document instead of taking only its opening pages.
+    """
+    if max_chunks < 1:
+        return ()
+    required = set(required_chunk_ids)
+    pinned = [chunk for chunk in chunks
+              if chunk.chunk_id in required and chunk.metadata.get("section") != "references"][:max_chunks]
+    pinned_ids = {chunk.chunk_id for chunk in pinned}
+    max_chunks -= len(pinned)
+    documents: dict[str, list[TextChunk]] = {}
+    for chunk in chunks:
+        if chunk.chunk_id in pinned_ids:
+            continue
+        documents.setdefault(chunk.document_id, []).append(chunk)
+    candidates = {
+        document_id: [row for row in rows if row.metadata.get("section") != "references"] or rows
+        for document_id, rows in documents.items()
+    }
+    quotas = {document_id: 0 for document_id in candidates}
+    remaining = max_chunks
+    while remaining:
+        advanced = False
+        for document_id, rows in candidates.items():
+            if remaining == 0:
+                break
+            if quotas[document_id] < len(rows):
+                quotas[document_id] += 1
+                remaining -= 1
+                advanced = True
+        if not advanced:
+            break
+
+    selected_ids: set[str] = set(pinned_ids)
+    for document_id, rows in candidates.items():
+        quota = quotas[document_id]
+        if not quota:
+            continue
+        sections: dict[str, list[int]] = {}
+        for index, row in enumerate(rows):
+            section_id = str(row.metadata.get("section_id") or document_id)
+            sections.setdefault(section_id, []).append(index)
+        anchors = [positions[len(positions) // 2] for positions in sections.values()]
+        if len(anchors) > quota:
+            # Section type is useful for an overview, but never substitutes
+            # for the actual text. Reserve a few distinct kinds before
+            # spreading the remaining windows across the document.
+            by_kind: dict[str, list[int]] = {}
+            for index in anchors:
+                by_kind.setdefault(str(rows[index].metadata.get("section") or "body"), []).append(index)
+            chosen: set[int] = set()
+            for kind in ("abstract", "method", "experiments", "results", "limitations",
+                         "discussion", "conclusion", "related_work", "introduction"):
+                if len(chosen) == quota:
+                    break
+                options = by_kind.get(kind, [])
+                if options:
+                    chosen.add(options[len(options) // 2])
+        else:
+            chosen = set(anchors)
+        while len(chosen) < quota:
+            pool = anchors if len(chosen) < len(anchors) else list(range(len(rows)))
+            next_index = max(
+                (index for index in pool if index not in chosen),
+                key=lambda index: (min(abs(index - prior) for prior in chosen) if chosen else 0, -index),
+            )
+            chosen.add(next_index)
+        selected_ids.update(rows[index].chunk_id for index in chosen)
+    return tuple(chunk for chunk in chunks if chunk.chunk_id in selected_ids)
+
+
 def format_bundle_evidence_snippets(
     bundle: DocumentBundle,
     *,
     max_chunks: int = 12,
     max_chars: int = 900,
+    document_id: str | None = None,
 ) -> str:
     """Render bounded, source-labelled text for model reading prompts."""
 
     lines: list[str] = []
-    for chunk in bundle.chunks[:max_chunks]:
+    available = tuple(
+        chunk for chunk in bundle.chunks
+        if document_id is None or chunk.document_id == document_id
+    )
+    selected = select_representative_chunks(available, max_chunks=max_chunks)
+    for chunk in selected:
         text = " ".join(chunk.text.split())
         if len(text) > max_chars:
             text = text[: max_chars - 3].rstrip() + "..."
@@ -569,7 +660,14 @@ def format_bundle_evidence_snippets(
             location += f":{chunk.line_start}"
             if chunk.line_end is not None and chunk.line_end != chunk.line_start:
                 location += f"-{chunk.line_end}"
-        lines.append(f"[{chunk.chunk_id}] {location}: {text}")
+        heading = str(chunk.metadata.get("heading") or chunk.metadata.get("section") or "").strip()
+        label = f" ({heading})" if heading else ""
+        lines.append(f"[{chunk.chunk_id}] {location}{label}: {text}")
+    if len(selected) < len(available):
+        lines.append(
+            f"[coverage] Bounded overview sampled {len(selected)} of {len(available)} chunks; "
+            "unseen details require a targeted source read."
+        )
     return "\n".join(lines)
 
 
@@ -650,6 +748,7 @@ __all__ = [
     "ReadResult",
     "ReadStatus",
     "format_bundle_evidence_snippets",
+    "select_representative_chunks",
     "read_documents",
     "run_read_capability",
     "validate_read_evidence",

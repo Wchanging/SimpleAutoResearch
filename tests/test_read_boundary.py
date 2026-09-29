@@ -7,12 +7,75 @@ from simple_ar.research.documents.ingest import DocumentBundle
 from simple_ar.research.evidence.reader import (
     ReadRequest,
     ReadResult,
+    format_bundle_evidence_snippets,
     query_evidence,
     read_documents,
+    select_representative_chunks,
 )
 
 
 class ReadBoundaryTests(unittest.TestCase):
+    def test_bounded_reading_covers_late_sections_and_multiple_documents(self) -> None:
+        bundle = self._bundle(with_chunks=False)
+        bundle.chunks.extend(TextChunk(
+            chunk_id=f"p1-{index}", document_id="openalex-p1", text=f"Body {index}",
+            metadata={"section": "body", "section_id": "p1-body", "heading": "Main text"},
+        ) for index in range(30))
+        bundle.chunks.extend(TextChunk(
+            chunk_id=f"p1-ref-{index}", document_id="openalex-p1", text=f"Citation {index}",
+            metadata={"section": "references", "section_id": "p1-references"},
+        ) for index in range(20))
+        bundle.chunks.extend(TextChunk(
+            chunk_id=f"p2-{index}", document_id="openalex-p2", text=f"Other {index}",
+            metadata={"section": "method", "section_id": "p2-method"},
+        ) for index in range(3))
+        selected = select_representative_chunks(bundle.chunks, max_chunks=6)
+        ids = {row.chunk_id for row in selected}
+        self.assertEqual(len(selected), 6)
+        self.assertTrue(any(row.document_id == "openalex-p2" for row in selected))
+        self.assertIn("p1-0", ids)
+        self.assertIn("p1-29", ids)
+        self.assertFalse(any("ref" in row.chunk_id for row in selected))
+        snippets = format_bundle_evidence_snippets(bundle, max_chunks=6)
+        self.assertIn("p1-29", snippets)
+        self.assertIn("6 of 53 chunks", snippets)
+
+    def test_section_overview_preserves_method_experiment_and_result_evidence(self) -> None:
+        kinds = ["abstract"] + ["body"] * 8 + ["method"] + ["body"] * 7
+        kinds += ["experiments", "body", "results", "references"]
+        chunks = [TextChunk(
+            chunk_id=f"section-{index}", document_id="paper", text=f"Section {kind} {index}",
+            metadata={"section": kind, "section_id": f"paper-{index}"},
+        ) for index, kind in enumerate(kinds)]
+        selected = select_representative_chunks(chunks, max_chunks=4)
+        self.assertEqual({chunk.metadata["section"] for chunk in selected},
+                         {"abstract", "method", "experiments", "results"})
+
+    def test_paper_notes_receive_only_their_own_source_excerpts(self) -> None:
+        class NoteClient:
+            def ask_json_many(self, requests, *, max_workers):
+                self.prompts = [request.user for request in requests]
+                return [
+                    {"paper_id": paper_id, "title": f"Paper {index}"}
+                    for index, paper_id in enumerate(("openalex-p1", "openalex-p2"), start=1)
+                ]
+
+        bundle = self._bundle()
+        bundle.chunks.append(TextChunk(
+            chunk_id="openalex-p2#chunk-001", document_id="openalex-p2",
+            text="A distinct second-paper method.",
+        ))
+        client = NoteClient()
+        result = read_documents(ReadRequest(
+            bundle=bundle, use_llm=True, llm_client=client,
+            config={"read_screening": "deterministic"},
+        ))
+        self.assertEqual(len(result.paper_notes), 2)
+        self.assertIn("openalex-p1#chunk-001", client.prompts[0])
+        self.assertNotIn("openalex-p2#chunk-001", client.prompts[0])
+        self.assertIn("openalex-p2#chunk-001", client.prompts[1])
+        self.assertNotIn("openalex-p1#chunk-001", client.prompts[1])
+
     def test_document_query_filters_other_documents(self) -> None:
         bundle = self._bundle()
         bundle.chunks.append(TextChunk(chunk_id="p2-c1", document_id="openalex-p2", text="Other paper"))

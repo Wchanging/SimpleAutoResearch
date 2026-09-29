@@ -10,7 +10,23 @@ class ReportTemplateError(RuntimeError):
     """Raised when a report template or criteria file cannot be loaded."""
 
 
-BUILTIN_TEMPLATE_NAMES = {"survey", "survey_long", "experiment", "reproduction", "analysis_report"}
+BUILTIN_TEMPLATE_NAMES = {"source_review", "survey", "survey_long", "experiment", "reproduction", "analysis_report"}
+
+
+def resolve_research_only_delivery(config, *, source_count: int):
+    """Choose a report shape that the available source set can support.
+
+    A single source can support a critical source review, not a cross-paper
+    taxonomy. An explicit template remains authoritative and is never changed.
+    """
+    if config.template not in {"", "auto"}:
+        return config, {"template": config.template, "reason": "Use the explicitly requested research-only template."}
+    if source_count <= 1:
+        return config.model_copy(update={"template": "source_review"}), {
+            "template": "source_review",
+            "reason": "At most one citable source is available; do not imply a multi-source survey or method taxonomy.",
+        }
+    return config, {"template": "survey", "reason": "Multiple citable sources are available for a survey."}
 
 
 def resolve_experiment_delivery(config, analysis, decision):

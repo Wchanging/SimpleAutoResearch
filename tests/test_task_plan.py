@@ -31,6 +31,51 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class TaskPlanTests(unittest.TestCase):
+    def test_single_corrected_response_wrapper_keeps_all_plan_checks(self) -> None:
+        request = TaskPlanRequest(task_kind="survey", goal="Review evidence", request_text="Review evidence")
+        valid = default_task_steps(request)
+        invalid = [dict(row) for row in valid]
+        invalid[-1]["condition"] = "run regardless of evidence"
+
+        class Client:
+            model = "wrapped-json-fixture"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def ask_json(self, *_args, **_kwargs):
+                self.calls += 1
+                return {"steps": invalid} if self.calls == 1 else {"response": {"steps": valid}}
+
+        client = Client()
+        trace: list[dict] = []
+        result = build_task_plan(replace(request, use_llm=True, llm_client=client), trace=trace)
+        self.assertEqual([step.action for step in result.steps], [row["action"] for row in valid])
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(trace[1]["normalized_from_wrapper"], "response")
+
+        class AmbiguousClient:
+            def ask_json(self, *_args, **_kwargs):
+                return {"response": {"steps": valid}, "unrelated": True}
+
+        with self.assertRaisesRegex(ValueError, "non-empty steps list"):
+            build_task_plan(replace(request, use_llm=True, llm_client=AmbiguousClient()))
+
+    def test_direct_measurement_uses_only_the_supplied_command(self) -> None:
+        request = TaskPlanRequest(
+            task_kind="measurement", goal="Measure an existing benchmark",
+            request_text="Measure an existing benchmark", requested_outputs=("experiments",),
+            execution={"command": [sys.executable, "-V"], "cwd": str(Path.cwd()), "timeout_sec": 5},
+        )
+        result = build_task_plan(request)
+        self.assertEqual([step.action for step in result.steps], ["experiment", "analysis"])
+        self.assertEqual(TaskPlanResult.from_handoff_dict(result.to_handoff_dict()).task_kind, "measurement")
+        class Client:
+            def ask_json(self, *_args, **_kwargs):
+                return {"steps": [{"action": "search"}, {"action": "experiment"}, {"action": "analysis"}]}
+        with self.assertRaisesRegex(ValueError, "Direct measurement requires exactly"):
+            build_task_plan(replace(request, use_llm=True, llm_client=Client()))
+
     def test_execution_extension_keeps_model_chosen_provided_materials_route(self) -> None:
         request = TaskPlanRequest(
             task_kind="research", goal="Improve the supplied method.",
@@ -761,6 +806,42 @@ class TaskPlanTests(unittest.TestCase):
             rows["research_candidate:1_0"].condition,
             "after_success:implementation_r1",
         )
+        self.assertEqual(
+            rows["reanalysis:1"].condition,
+            "after_observation:experiment_revision_1_0",
+        )
+
+    def test_revision_followup_can_route_bounded_technical_repairs(self) -> None:
+        plan = TaskPlanResult(
+            status="accepted", mode="deterministic", task_kind="research",
+            goal="Continue a failed candidate measurement.",
+            steps=(TaskPlanStep(
+                step_id="design", action="research_design", capability="research_design",
+                state_name="design", problem_solved="", observation="",
+            ),),
+        )
+        extended = append_research_followup(
+            plan, 1, action="revise_candidate", repair_count=2,
+        )
+        rows = {step.action: step for step in extended.steps}
+        self.assertEqual(rows["repair_candidate:1_1"].condition,
+                         "on_failure:experiment_revision_1")
+        self.assertEqual(rows["retest_candidate:1_1"].condition,
+                         "after_success:implementation_r1_repair_1")
+        self.assertEqual(rows["repair_candidate:1_2"].condition,
+                         "on_failure:experiment_revision_1_repair_1")
+        self.assertEqual(rows["retest_candidate:1_2"].condition,
+                         "after_success:implementation_r1_repair_2")
+        self.assertEqual(rows["reanalysis:1"].condition,
+                         "after_observation:experiment_revision_1")
+        self.assertEqual(
+            TaskPlanResult.from_handoff_dict(extended.to_handoff_dict()).steps,
+            extended.steps,
+        )
+        with self.assertRaisesRegex(ValueError, "not supported"):
+            append_research_followup(
+                plan, 1, action="revise_candidate", pair_count=1, repair_count=1,
+            )
 
     def test_followup_persists_design_gate_and_multiple_supplement_pairs(self) -> None:
         plan = TaskPlanResult(
@@ -781,6 +862,14 @@ class TaskPlanTests(unittest.TestCase):
             "supplement_candidate:2_0", "supplement_candidate:2_1",
         ])
         self.assertEqual(actions[-1], "reanalysis:2")
+        self.assertEqual(
+            supplemented.steps[-1].condition,
+            "after_observation:baseline_supplement_2_0",
+        )
+        invalid = supplemented.to_handoff_dict()
+        invalid["steps"][-1]["condition"] = "after_observation:missing_experiment"
+        with self.assertRaisesRegex(ValueError, "earlier experiment step"):
+            TaskPlanResult.from_handoff_dict(invalid)
 
 
 if __name__ == "__main__":

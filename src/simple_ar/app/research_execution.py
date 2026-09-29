@@ -434,6 +434,7 @@ def implementation_request(
         execution.normalized_experiment_contract(),
         validation_command=tuple(execution.run.command) if validate else None,
         validation_timeout_sec=execution.run.timeout_sec if validate else None,
+        max_repairs=repair_limit(config) if validate else 0,
         revision_instruction=revision_instruction.strip(),
         budget_profile=budget_profile,
         allow_large_edits=allow_large_edits,

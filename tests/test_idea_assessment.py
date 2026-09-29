@@ -23,6 +23,7 @@ class IdeaAssessmentTests(unittest.TestCase):
         class Client:
             def ask_json(self, system, user, **kwargs):
                 self.payload = json.loads(user)
+                self.call_kwargs = kwargs
                 return dict(assessments=[dict(
                     idea_id="a", relevance="Relevant", differentiation="Unknown",
                     feasibility="Small", cost="One run", falsifiability="No gain",
@@ -38,19 +39,20 @@ class IdeaAssessmentTests(unittest.TestCase):
                                       evidence_refs=["chunk-a"]),), llm_client=client)
         result = assess_ideas(request)
         self.assertEqual(result.recommended_idea_id, "a")
+        self.assertNotIn("max_output_tokens", client.call_kwargs)
         self.assertIn("Scoped finding", client.payload["evidence"][-1]["text"])
         self.assertEqual(result.model_context[-1]["source_chunk_ids"], ["chunk-a"])
         invalid = assess_ideas(replace(request, evidence_cards=(
             replace(request.evidence_cards[0], evidence_refs=["missing"]),)))
-        self.assertEqual(invalid.recommended_idea_id, "a")
-        self.assertIn("deterministic readiness", invalid.recommendation_reason)
+        self.assertIsNone(invalid.recommended_idea_id)
+        self.assertIn("no research candidate was recommended", invalid.recommendation_reason)
         self.assertIn("outside the supplied context", invalid.diagnostics[-1])
 
     def test_model_comparison_uses_shared_sources_without_upgrading_readiness(self):
         candidate = IdeaCandidate(
             idea_id="a", title="Candidate", hypothesis="A testable effect",
             proposed_change="Change training", expected_outcome="Less error",
-            motivation_refs=["a1"],  # Deliberately no metric: model cannot approve readiness.
+            motivation_refs=["a1", "a29"],  # No metric: model cannot approve readiness.
         )
         chunks = tuple(TextChunk(chunk_id=f"a{i}", document_id="paper-a", text="First paper.") for i in range(30))
         chunks += (TextChunk(chunk_id="b1", document_id="paper-b", text="Counter evidence."),)
@@ -67,17 +69,20 @@ class IdeaAssessmentTests(unittest.TestCase):
                 return dict(assessments=[row], recommended_idea_id="a", recommendation_reason="Smallest informative experiment")
 
         client = Client()
-        request = IdeaAssessmentRequest(candidates=(candidate,), available_evidence_refs=("a1", "b1"), evidence_chunks=chunks, llm_client=client)
+        request = IdeaAssessmentRequest(candidates=(candidate,), available_evidence_refs=("a1", "a29", "b1"), evidence_chunks=chunks, llm_client=client)
         result = assess_ideas(request)
         self.assertEqual(result.generation_mode, "llm")
         self.assertEqual(result.assessments[0].status, "needs_evidence")
         self.assertEqual(result.assessments[0].counter_evidence_refs, ("b1",))
         self.assertEqual(result.recommended_idea_id, "a")
         self.assertIn("b1", [chunk["chunk_id"] for chunk in client.payload["evidence"]])
+        self.assertIn("a29", [chunk["chunk_id"] for chunk in client.payload["evidence"]])
         self.assertEqual(list(result.model_context), client.payload["evidence"])
 
-        # a29 is present in storage but excluded from the actual model context.
-        row["supporting_evidence_refs"] = ["a29"]
+        # An omitted chunk remains in storage but is not model-visible evidence.
+        visible = {entry["chunk_id"] for entry in client.payload["evidence"]}
+        omitted = next(chunk.chunk_id for chunk in chunks if chunk.chunk_id not in visible)
+        row["supporting_evidence_refs"] = [omitted]
         invalid = assess_ideas(request)
         self.assertEqual(invalid.generation_mode, "deterministic_fallback")
         self.assertIsNone(invalid.recommended_idea_id)
@@ -98,9 +103,40 @@ class IdeaAssessmentTests(unittest.TestCase):
         ))
         self.assertEqual(result.status, "partial")
         self.assertEqual(result.assessments[0].source_kind, "deterministic_readiness")
-        self.assertEqual(result.recommended_idea_id, "a")
-        self.assertIn("deterministic readiness", result.recommendation_reason)
+        self.assertIsNone(result.recommended_idea_id)
+        self.assertIn("no research candidate was recommended", result.recommendation_reason)
         self.assertIn("provider timeout", result.diagnostics[-1])
+
+    def test_model_comparison_repairs_one_structural_response(self):
+        class Client:
+            calls = 0
+
+            def ask_json(self, _system, _user, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"idea_id": "a", "relevance": "Relevant"}
+                self.asserted_label = kwargs["label"]
+                return {"assessments": [{
+                    "idea_id": "a", "relevance": "Relevant", "differentiation": "Uncertain",
+                    "feasibility": "Small", "cost": "One run", "falsifiability": "No gain",
+                    "recommendation": "Check effect", "supporting_evidence_refs": ["c"],
+                    "counter_evidence_refs": [], "unknowns": [],
+                }], "recommended_idea_id": "a", "recommendation_reason": "Bounded test"}
+
+        client = Client()
+        candidate = IdeaCandidate(
+            idea_id="a", title="Candidate", hypothesis="Effect", proposed_change="Change",
+            expected_outcome="Improvement", motivation_refs=["c"], metrics=["accuracy"],
+        )
+        result = assess_ideas(IdeaAssessmentRequest(
+            candidates=(candidate,), available_evidence_refs=("c",),
+            evidence_chunks=(TextChunk(chunk_id="c", document_id="d", text="Evidence"),),
+            llm_client=client,
+        ))
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(client.asserted_label, "research-idea-assessment-correction")
+        self.assertEqual(result.generation_mode, "llm")
+        self.assertEqual(result.recommended_idea_id, "a")
 
     def test_assessment_keeps_readiness_and_unknowns_explicit(self) -> None:
         strong = IdeaCandidate(

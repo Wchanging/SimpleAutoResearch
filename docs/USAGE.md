@@ -75,7 +75,8 @@ Notes:
 
 - `OPENAI_API_KEY` is required for LLM mode.
 - `OPENAI_BASE_URL` can point to OpenAI or a third-party OpenAI-compatible `/v1` endpoint.
-- `SIMPLE_AR_MODEL` is the default model when `--model` is not supplied.
+- `SIMPLE_AR_MODEL` supplies the model name for `research-session --model env`;
+  omitting `--model` when starting a session explicitly selects deterministic mode.
 - `SIMPLE_AR_LLM_BACKEND` controls the transport implementation. The default
   `openai` uses the OpenAI Python SDK directly; `litellm` keeps the older
   LiteLLM compatibility layer.
@@ -121,9 +122,12 @@ Notes:
   not label its output as model-generated analysis. `--no-llm` is a CodeTask
   primitive option, not a research-session flag.
 - To resume unchanged saved inputs after a configuration file has been edited,
-  use `simple-ar research-session --session-root PATH --model MODEL` without
+  use `simple-ar research-session --session-root PATH --model env` (or
+  `--model MODEL`) without
   `--config` or `--topic`. The saved goal, evidence, execution, and budget are
   restored; explicit changes remain subject to the normal resume checks.
+  A model-backed session cannot resume without `--model`: the CLI fails before
+  changing saved state, rather than silently switching to deterministic work.
 - If the prior process was interrupted while an attempt was running and no
   capability result was saved, first confirm that worker has stopped. Then use
   `simple-ar research-session --session-root PATH --recover-interrupted --model MODEL`.
@@ -238,6 +242,7 @@ a baseline or write the original fixture.
 ```toml
 [task]
 goal = "Measure the checked-in digits benchmark without changing its source."
+kind = "measurement"
 outputs = ["experiments"]
 
 [model]
@@ -260,6 +265,9 @@ already excludes a report; do not combine it with `--no-report`. Direct argv
 uses the process `PATH` and has no CodeTask interpreter policy; use an absolute
 interpreter in `command` if `python` is not the intended environment. The
 benchmark is a small CPU fixture, not evidence of a scientific improvement.
+The `measurement` task kind executes the supplied command and analyzes its
+result without literature search, idea generation, or research design. Use the
+ordinary research task kind for a new candidate or an evidence-driven comparison.
 
 For all four files, inspect the printed session path with
 `simple-ar status RUN_DIR`. Resume or inspect a paused decision using

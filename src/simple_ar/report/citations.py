@@ -25,7 +25,11 @@ def references_markdown(
         attribution = f"{authors} ({year}). " if authors and year else (
             f"{authors}. " if authors else (f"({year}) " if year else "")
         )
-        url = f" {paper.url}" if paper.url else ""
+        # A supplied file path is provenance for the run, not a reader-facing
+        # URL. Keep its full location in source artifacts, not the reference list.
+        url = " (supplied local document)" if paper.source == "local_files" else (
+            f" {paper.url}" if paper.url else ""
+        )
         lines.append(f"- {label} {attribution}{paper.title}.{url}")
     return "\n".join(lines)
 

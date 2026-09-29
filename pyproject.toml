@@ -1,7 +1,7 @@
 [project]
 name = "simple-autoresearch"
 version = "0.1.0"
-description = "A teaching-first lightweight auto-research pipeline inspired by AutoResearchClaw."
+description = "A task-driven research framework for inspectable evidence, code changes, experiments, and reports."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

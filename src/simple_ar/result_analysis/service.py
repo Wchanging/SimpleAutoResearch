@@ -110,6 +110,20 @@ def _recommendation_error(response: Mapping[str, Any], context: AnalysisContext)
             return "Choose a supported recommendation action: supplement, revise_candidate, stop, or request_input."
         if action in {"supplement", "revise_candidate"} and disposition != "continue":
             return "A bounded research follow-up must declare task_disposition=continue."
+        if action == "revise_candidate":
+            purpose = str(recommendation.get("revision_purpose") or "").strip().lower()
+            if purpose == "verification_only":
+                return (
+                    "Verification-only instrumentation is not a scientific candidate revision and "
+                    "cannot justify another identical training run. Use existing evidence, choose a "
+                    "distinct method change if supported, or stop/request_input with the limitation."
+                )
+            if purpose != "method_change":
+                return (
+                    "Classify the intended candidate revision as revision_purpose=method_change "
+                    "only when the tested behavior or hypothesis changes; otherwise do not use "
+                    "revise_candidate."
+                )
         if action == "request_input" and disposition != "undecided":
             return "A request for missing input must declare task_disposition=undecided."
         if action == "stop":
@@ -573,7 +587,7 @@ def build_prompt(
         "- rubric_coverage: list of objects with category, verdict, evidence, limitations. Use categories from rubric_categories.\n"
         "- claims: list of claim objects. Each needs claim_id, claim, verdict, evidence, metric_refs, limitations, confidence.\n"
         "- analysis_audit: object with missing_required_metrics, weak_metric_signals, unsupported_claims, limitations, notes.\n"
-        "- recommendation: object with action, task_disposition, reason, evidence_refs, alternatives_considered, continuation_conditions, revision_intent, revision_constraints, revision_base, supplement.\n\n"
+        "- recommendation: object with action, task_disposition, reason, evidence_refs, alternatives_considered, continuation_conditions, revision_intent, revision_purpose, revision_constraints, revision_base, supplement.\n\n"
         "- goal_assessment: object with task_type (improvement/reproduction/evaluation/unknown), "
         "status (met/not_met/inconclusive), reason, evidence_refs, requested_delivery (auto/paper/analysis_report). "
         "Only set requested_delivery=paper when the user explicitly asks for a paper even with negative results; "
@@ -620,10 +634,16 @@ def build_prompt(
         "rounds, then recommend one justified bounded action or stop. Request input only for an actual "
         "missing external condition, permission, or user decision; do not request a future result that an "
         "already-authorized action can produce. Do not force a revision when evidence does not justify one.\n"
-        "- revise_candidate must state the intended change and constraints; it is a proposal for the "
+        "- revise_candidate must state the intended change and constraints, with revision_purpose=method_change; "
+        "it is a proposal for the "
         "existing CodeTask boundary, not an assertion that a patch was applied. Set revision_base to "
         "candidate when continuing the current candidate; set it to baseline only when the evidence "
         "requires a fresh direction from the original baseline.\n"
+        "- Adding logs, assertions, or other verification-only instrumentation does not revise the "
+        "scientific candidate. Mark revision_purpose=verification_only and do not request "
+        "revise_candidate or an identical training rerun solely to obtain that evidence. "
+        "Use already saved logs/artifacts where possible; otherwise preserve method_validation as "
+        "unverified and stop with a concrete limitation or request an authorized low-cost check.\n"
         "- A technically validated patch and validation_hints do not prove the candidate method. "
         "Use only candidate-specific execution evidence to describe mechanism fidelity; when its "
         "method_validation is 未检查, retain that limitation separately from measured metric deltas.\n"
@@ -786,6 +806,11 @@ def parse_recommendation(
         alternatives_considered=alternatives,
         continuation_conditions=continuation_conditions,
         revision_intent=str(value.get("revision_intent") or "").strip(),
+        revision_purpose=(
+            str(value.get("revision_purpose") or "unspecified").strip().lower()
+            if str(value.get("revision_purpose") or "unspecified").strip().lower()
+            in {"method_change", "verification_only"} else "unspecified"
+        ),
         revision_constraints=normalize_string_list(value.get("revision_constraints"))[:12],
         revision_base=(
             str(value.get("revision_base") or "candidate").strip().lower()
@@ -1640,6 +1665,9 @@ def compact_project_results_for_prompt(data: Any, metric_summary: dict[str, Any]
         value = data.get(key)
         if value is not None:
             compact[key] = value
+    failure_diagnosis = data.get("failure_diagnosis")
+    if isinstance(failure_diagnosis, dict):
+        compact["failure_diagnosis"] = failure_diagnosis
     execution = data.get("execution_result")
     if isinstance(execution, dict):
         # Keep canonical measurements and their meaning, not process logs.

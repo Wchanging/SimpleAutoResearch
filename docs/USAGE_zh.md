@@ -71,7 +71,8 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 
 - `OPENAI_API_KEY` 是 LLM 模式必需项。
 - `OPENAI_BASE_URL` 可以指向 OpenAI，也可以指向第三方 OpenAI 兼容 `/v1` 接口。
-- `SIMPLE_AR_MODEL` 是没有传入 `--model` 时的默认模型。
+- `SIMPLE_AR_MODEL` 为 `research-session --model env` 提供模型名称；新会话省略
+  `--model` 表示明确使用确定性模式。
 - `SIMPLE_AR_LLM_BACKEND` 控制传输实现。默认 `openai` 使用 OpenAI Python SDK 直连；`litellm` 保留旧的 LiteLLM 兼容层。
 - `SIMPLE_AR_LLM_API` 控制请求形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`，临时错误只在同一接口内有限重试；`chat` 会直接发送 Chat Completions 风格的 `messages`。已有的 `auto` 模式才会在 Responses 重试后再尝试 Chat，用于兼容只暴露其中一种接口的网关。
 - `SIMPLE_AR_LLM_STREAM=true` 在 `SIMPLE_AR_LLM_API=chat` 时启用 Chat Completions
@@ -88,8 +89,10 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
   `[llm].allow_fallback` 开关；要离线运行请设置 `[model].name = ""`，不能把确定性输出描述成
   模型生成的分析。`--no-llm` 只属于 CodeTask 原语命令，不是 research-session 参数。
 - 若配置文件后来已修改，而本次只想按保存的输入原样续跑，可使用
-  `simple-ar research-session --session-root PATH --model MODEL`，无需再次传入
-  `--config` 或 `--topic`。会话会恢复原目标、证据、执行条件与预算；显式修改仍须通过续跑检查。
+  `simple-ar research-session --session-root PATH --model env`（或 `--model MODEL`），
+  无需再次传入 `--config` 或 `--topic`。会话会恢复原目标、证据、执行条件与预算；
+  显式修改仍须通过续跑检查。模型会话若省略 `--model`，CLI 会在改动保存状态前报错，
+  不会静默切换到确定性模式。
 - 若进程在 attempt 运行中中断且尚未保存能力结果，先确认原工作进程已经停止，再使用
   `simple-ar research-session --session-root PATH --recover-interrupted --model MODEL`。
   它会按原预算记录一次失败并沿保存的计划继续，不删除已完成证据。原进程仍可能运行时不要使用；
@@ -193,6 +196,7 @@ code_task_config = "examples/code_task_medium_review/configs/code_task.toml"
 ```toml
 [task]
 goal = "Measure the checked-in digits benchmark without changing its source."
+kind = "measurement"
 outputs = ["experiments"]
 
 [model]
@@ -214,6 +218,8 @@ process_wall_seconds = 60
 不要再同时传入 `--no-report`。直接 argv 使用进程
 `PATH`，不应用 CodeTask 解释器策略；若 `python` 不是目标环境，请在 `command` 中写绝对解释器。
 该 benchmark 是小型 CPU fixture，不是科研改进证据。
+`measurement` 路径只运行已给命令并分析结果，不做文献检索、想法生成或研究设计；
+需要提出候选或做有依据的比较时，应使用通常的科研路径。
 
 四种文件都可用 `simple-ar status RUN_DIR` 查看输出路径；暂停后用
 `simple-ar research-session --session-root RUN_DIR`，按文档的 decision/continuation 参数恢复。

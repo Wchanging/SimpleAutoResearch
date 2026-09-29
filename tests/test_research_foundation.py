@@ -46,6 +46,17 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class ResearchFoundationTests(unittest.TestCase):
+    def test_local_document_id_does_not_embed_workspace_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "private_notes.md"
+            local.write_text("A bounded source note.", encoding="utf-8")
+            plan = SourcePlan(queries=[], local_documents=[str(local)])
+            record = build_document_records(papers=[], source_plan=plan)[0]
+            self.assertTrue(record.document_id.startswith("local-"))
+            self.assertNotIn("private_notes", record.document_id)
+            self.assertNotIn(str(local.parent), record.document_id)
+            self.assertEqual(record.local_path, str(local))
+
     def test_research_experiment_contract_has_explicit_name_with_compat_alias(self) -> None:
         self.assertIs(ExperimentContract, ResearchExperimentContract)
 
@@ -623,6 +634,35 @@ class ResearchFoundationTests(unittest.TestCase):
             self.assertEqual([section.section for section in sections], ["abstract", "method", "experiments", "limitations"])
             self.assertTrue(any(chunk.metadata.get("section") == "method" for chunk in chunks))
             self.assertTrue(any("#section-" in chunk.chunk_id for chunk in chunks))
+
+    def test_numbered_pdf_headings_split_body_and_appendix_without_table_rows(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            note = Path(tmp) / "extracted.txt"
+            note.write_text(
+                "ABSTRACT\nA short summary.\n"
+                "1 I NTRODUCTION\nThe research question.\n"
+                "3.3 A RCHITECTURE\nThe architecture changes model training.\n"
+                "46 1.8K 12K 76K 723K 3 220 108\n"
+                "4 E VALUATING THE MODEL\nValidation reports accuracy.\n"
+                "REFERENCES\nA bibliography entry.\n"
+                "A A DDITIONAL DISCUSSION\nAn appendix limitation.\n",
+                encoding="utf-8",
+            )
+            record = DocumentRecord(
+                document_id="doc-extracted", title="Extracted paper", source="local_files",
+                local_path=str(note), extraction_status="parsed", parser="plain_text",
+            )
+            sections = build_document_sections([record])
+            self.assertEqual([section.section for section in sections], [
+                "abstract", "introduction", "method", "experiments", "references", "discussion",
+            ])
+            self.assertIn("46 1.8K", sections[2].text)
+            self.assertNotIn("appendix limitation", sections[4].text)
+            chunks = build_text_chunks([record], sections=sections, chunk_chars=120)
+            methods = build_method_cards(documents=[record], chunks=chunks)
+            self.assertTrue(methods)
+            self.assertTrue(any("#section-003-method" in ref for ref in methods[0].evidence_refs))
 
     def test_section_aware_cards_prefer_method_and_evaluation_sections(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

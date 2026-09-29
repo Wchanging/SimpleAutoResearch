@@ -300,6 +300,7 @@ def synthesize_user_prompt(
     paper_notes_json: str,
     evidence_snippets: str = "",
     structured_context_json: str = "",
+    source_count: int | None = None,
 ) -> str:
     """Build the synthesis prompt from free-form and structured notes.
 
@@ -322,6 +323,13 @@ def synthesize_user_prompt(
         if structured_context_json.strip()
         else ""
     )
+    source_scope_guidance = (
+        "- With at most one source, summarize its actual claims and available observations; "
+        "do not invent cross-paper consensus, disagreement, or method families.\n"
+        if source_count is not None and source_count <= 1 else
+        "- Group multiple papers into 2-4 evidence-supported themes or approach patterns.\n"
+        "- Separate observed agreement, disagreement, and missing evidence.\n"
+    )
     return (
         "Given literature notes, write JSON with the required string fields "
         "`synthesis_markdown` and `hypothesis_markdown`. You may also return "
@@ -332,9 +340,8 @@ def synthesize_user_prompt(
         "snippets when they are provided, and do not make claims that cannot "
         "be traced to notes, briefs, or snippets.\n\n"
         "Synthesis requirements:\n"
-        "- Group papers into 2-4 themes or approach patterns.\n"
-        "- Separate consensus, disagreement, and missing evidence.\n"
-        "- Identify concrete gaps that could become bounded experiments.\n"
+        + source_scope_guidance
+        + "- Identify concrete gaps that could become bounded experiments.\n"
         "- Propose the next experiment, not the whole eventual sequence. For an iterative task, "
         "distinguish the supplied original baseline, the first proposed candidate, and later alternatives "
         "that must be chosen after measurement. Do not list an uncreated future candidate as an existing "
@@ -409,7 +416,7 @@ def research_design_user_prompt(
         "- `execution_protocol` may contain only these fields: `command`, "
         "`baseline_command`, `pairs`, `seeds`, `seed_count`, `seed_flag`, "
         "`baseline_policy`, `result_schema`, `comparison_required`, "
-        "`decision_reason`, `stopping_criteria`, and `input_refs`.\n"
+        "`decision_reason`, and `stopping_criteria`.\n"
         "- Omit unused optional fields entirely (no null or empty placeholders). "
         "Use either explicit `pairs` OR compact `seeds`/`seed_count` with "
         "`seed_flag`, never both. For one fixed benchmark invocation, omit all "
@@ -422,7 +429,7 @@ def research_design_user_prompt(
         "seeds is an array of distinct integers; seed_count is a positive integer "
         "(choose seeds or seed_count); seed_flag is a non-empty string. Each pairs "
         "item has exactly seed (integer), baseline_command and candidate_command "
-        "(argv arrays). input_refs is an array copied from supplied references.\n"
+        "(argv arrays).\n"
         '- Minimal execution_protocol example for a single comparison using the '
         'configured evaluator: {"baseline_policy":"run","comparison_required":true,'
         '"decision_reason":"Compare the candidate with the original under the same evaluation",'
@@ -431,8 +438,8 @@ def research_design_user_prompt(
         "- Commands must be literal argv lists derived from the inspected authorized "
         "entrypoint. Do not return shell text, cwd, timeout, budget, installers, "
         "network actions, or arbitrary file paths.\n"
-        "- If `input_refs` is returned, copy only references present in the inspected "
-        "entry facts; the application binds the actual attempt inputs.\n"
+        "- Do not return `input_refs`: the application binds provenance from the "
+        "actual inspected attempt inputs.\n"
         "- Explicit execution settings win over this proposal. Never invent a metric "
         "or result; use the configured result schema when present.\n\n"
         "- Decide comparison_required and baseline_policy from the actual task: "

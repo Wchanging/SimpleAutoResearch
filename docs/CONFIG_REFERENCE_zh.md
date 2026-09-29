@@ -15,7 +15,7 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 
 ## 研究 TOML：分区与默认值
 
-研究入口的 `report.template` 默认 `auto`：仅调研沿用综述；实验任务依据分析中的目标判断选择实验论文、复现报告或简短实验分析报告。执行 `passed` 不等于科研目标达成；目标不明、未达成或因轮次限制停止时，默认不写成成功论文。显式 `experiment`、`reproduction`、`analysis_report` 或自定义模板优先，但不能覆盖测量事实。旧会话保存的显式模板不会被新默认值更换；需要时通过现有报告配置续接改为 `auto`。结构自动选择不代表论文语义质量已验收。
+研究入口的 `report.template` 默认 `auto`：仅调研且最多只有一份可引用来源时，使用简短的单来源证据审阅；多来源才使用综述结构，不凭单篇材料虚构方法谱系或跨论文结论。实验任务依据分析中的目标判断选择实验论文、复现报告或简短实验分析报告。执行 `passed` 不等于科研目标达成；目标不明、未达成或因轮次限制停止时，默认不写成成功论文。显式 `source_review`、`survey`、`experiment`、`reproduction`、`analysis_report` 或自定义模板优先，但不能覆盖测量事实。旧会话保存的显式模板不会被新默认值更换；需要时通过现有报告配置续接改为 `auto`。结构自动选择不代表论文语义质量已验收。
 
 新研究会话不设置 `budget.total_tokens`、`budget.llm_requests` 时，框架不限制 API 总 token 和请求次数；
 需要限制时设置正整数。无限额仍记录用量，不等于免费调用或无限重试。
@@ -29,7 +29,7 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
-| `[task]` | `goal`、`kind`、`outputs`、`output_root`、`selected_idea_id` | 新 session 必须有 `goal`。`kind` 默认 `auto`，可为 `auto`、`survey`、`bug_fix`。`outputs` 可省略，由任务/报告/执行形态推导；显式值只能使用 `summary`、`report`、`experiments`、`bug_fix`。`output_root` 默认 `runs/research-session`；`selected_idea_id` 可选，必须指向已有且有依据的候选。 |
+| `[task]` | `goal`、`kind`、`outputs`、`output_root`、`selected_idea_id` | 新 session 必须有 `goal`。`kind` 默认 `auto`，可为 `auto`、`survey`、`bug_fix`、`measurement`；`measurement` 必须写 `outputs = ["experiments"]`。其他任务的 `outputs` 可省略，显式值使用 `summary`、`report`、`experiments`、`bug_fix`。`output_root` 默认 `runs/research-session`；`selected_idea_id` 可选，必须指向已有且有依据的候选。 |
 | `[model]` | `name`、`max_output_tokens` | 文件配置默认 `name = "env"`，读取 `.env` 的 `SIMPLE_AR_MODEL`；`name = ""` 选择不调用 LLM 的确定性处理。`max_output_tokens` 可省略；凭据始终留在环境中。 |
 | `[budget]` | `total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds` | 新 session 的 token/request 上限可省略（该维度不设框架上限）；进程值按任务形态在入口推导，要求执行时应显式设置。恢复沿用已存账本，不清零用量。 |
 
@@ -57,9 +57,16 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 | `[execution]` | `baseline_policy`、`baseline_ref`、`protocol` | policy 为 `run`、`skip` 或 `reuse`；`reuse` 要求当前 session 中通过且命令、schema、协议条件、保护资产和准备 lineage 都匹配的产物。`protocol` 复用已有实验合同，但不证明数据内容。 |
 | `[report]` | `template`、`reviewer`、`max_review_iterations`、`document_review`、`max_section_tokens`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，review iteration 默认 `1`。可选 `document_review = true` 增加一次有界整稿审查和最多两处定向修订；在真实长文验证前默认关闭。`max_section_tokens = 0` 取消单次输出上限；图表默认使用确定性图表，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
 
+单条固定命令只写 `seed_flag` 会记录当前 seed，但不授权增加新 seed。若希望先只运行 seed 0、以后允许按证据决定是否补测，可同时写 `seeds = [0]` 和 `seed_flag = "--seed"`；这不会默认多跑种子。补测仍须分析提出理由、运行同种子的 baseline/candidate 配对、通过剩余进程预算检查并由既定交互模式接受。
+
 显式 `outputs` 不能与 `--with-report`/`--no-report` 同时使用。报告结构选择不能覆盖
 测量事实或证明科研成功；恢复时变更搜索/摄取设置若与存档不符会被拒绝，显式报告变更只
 失效 writer/report/audit 产物，不重跑研究或测量。已有前缀可用 `research-report` 补齐报告。
+
+`task.kind = "measurement"` 仅用于原样运行并分析一条已提供的命令，不做文献检索、
+候选设计、CodeTask 改码或 baseline 对照。它要求 `outputs = ["experiments"]`、
+显式 `execution.command` 和有限进程额度。需要依据证据提出新候选或做对比实验时，
+使用 `auto`/科研路径；单次测量不证明科研改进。
 
 - code-task init --config PATH 读取初始化配置。
 - code-task execute --config PATH 读取执行、模型与预算配置。
@@ -187,7 +194,7 @@ CodeTask TOML 旧有的相对路径仍以运行时 cwd 为基准，不会被静�
 | `[execute].planning_mode` | Greenfield 规划：`tool_agent` 分需求、架构、接口、文件计划及有限审阅，正常至少五次调用；`compact` 在重试前仅一次架构调用。两者共用文件生成和执行，调用数不代表研究质量。 |
 | `[execute].planning_review_rounds` | standalone code-task 中 greenfield planning reviewer 可触发的最大回修轮数。默认 `2`；轻量 smoke example 可设为 `1`，大型服务器任务可按需调大。 |
 | `[execute].llm_retry_attempts` | work-plan、patch-plan、greenfield 架构规划和 greenfield 文件生成的 LLM 尝试次数；全部失败后才停止或显式 fallback。 |
-| `[execute].repair_rounds` | validation/benchmark 失败后最多生成几轮 bounded repair proposal；repair 仍需审核。 |
+| `[execute].repair_rounds` | 技术性验证/运行失败后的有限修复次数（非负整数，默认 `0`）。带 CodeTask 项目的 `research-session` 也用它限制单条件科研修订失败后的修复/复测；复测沿用既定协议与进程预算，不授权科研方法变更、增种子或配对修订的自动修复。修复仍需审核。 |
 | `[execute].max_files` | plan/proposal/repair 步骤纳入 LLM 上下文的最大文件数。 |
 | `[execute].max_source_chars_per_file` | LLM 上下文中单个文件的 source snippet 字符预算。 |
 | `[execute].max_generated_lines` | greenfield 生成行数预算。省略时会回退到 `[resource].max_generated_lines`，再回退到保守默认值。 |
