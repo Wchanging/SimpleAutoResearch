@@ -24,6 +24,91 @@ from simple_ar.research.implementation import ImplementationRequest
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_writing_uses_frozen_material_and_resumes_without_research_or_processes(self):
+        from simple_ar.report.schema import AgentReportResult, ReportSectionDraft, ReportToolCall
+        from simple_ar.report.agent import _prompt_handle_view
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            material = root / "external results.markdown"
+            material.write_text("# Results\nA single external observation suggests a difference.\n", encoding="utf-8")
+            app = create_session(ResearchBrief(request_text="Write an honest summary", requested_outputs=("report",),
+                asset_requests=({"locator": str(material), "role": "material"},)), root=root / "session",
+                services=ResearchApplicationServices(config={"research_task_kind": "writing"},
+                    budget_limits={"process_invocations": 0}))
+            view = app.advance(max_actions=2)
+            self.assertEqual(view.next_action, "report_write", view.status_reason)
+            documents_ref = view.state_refs["documents"]
+            self.assertNotIn("synthesis", view.state_refs)
+            material.write_text("Changed input that must not replace extracted evidence.", encoding="utf-8")
+            app = load_session(root / "session", services=ResearchApplicationServices(
+                llm_client=LLMClient(LLMSettings(api_key="fixture"))))
+
+            def writer(**kwargs):
+                context, memory = kwargs["context"], kwargs["memory"]
+                self.assertEqual(context.report_mode, "supplied_materials")
+                self.assertEqual(context.papers, [])
+                self.assertEqual(context.metric_sources, [])
+                self.assertEqual(context.synthesis_markdown, "")
+                self.assertEqual(kwargs["template"].name, "analysis_report")
+                handle = memory.source_handles[0]
+                self.assertEqual(_prompt_handle_view(handle)["metadata"]["evidence_role"], "user_supplied_unverified")
+                result = kwargs["gateway"].call(ReportToolCall(tool_name="get_neighbor_chunks", arguments={"handle": handle.handle}))
+                self.assertIn("single external observation", result.content["chunks"][0]["text"])
+                self.assertNotIn("Changed input", json.dumps(result.content))
+                return AgentReportResult(report_body="", memory=memory, used_agent=True,
+                    sections=[ReportSectionDraft(section_id="results", heading="Results and Limitations",
+                        draft_markdown="The supplied notes describe one external observation. No experiment was conducted in this task; the result is not independently verified.",
+                        used_sources=[handle.handle])])
+
+            with patch("simple_ar.report.writing.run_report_agent", side_effect=LLMError("Temporary outage")):
+                view = app.advance(max_actions=1)
+            self.assertEqual(view.status, "paused")
+            app = load_session(root / "session", services=ResearchApplicationServices(
+                llm_client=LLMClient(LLMSettings(api_key="fixture"))))
+            app.continue_session()
+            with patch("simple_ar.report.writing.run_report_agent", side_effect=writer):
+                view = app.advance(max_actions=3)
+            self.assertEqual(view.status, "completed", view.status_reason)
+            self.assertEqual(view.state_refs["documents"], documents_ref)
+            self.assertCountEqual([row["capability"] for row in view.attempts],
+                             ["plan", "document_ingest", "report_write", "report_write", "report", "report_audit"])
+            self.assertNotIn("experiment", view.state_refs)
+            self.assertNotIn("synthesis", view.state_refs)
+            self.assertEqual(app.budget_ledger.remaining("process_invocations"), 0)
+
+    def test_writing_preserves_paper_material_roles_and_missing_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = [("paper.md", "paper", "# Prior work\nA published-source claim is not a local measurement."),
+                      ("notes.md", "material", "# Notes\nUser-provided observations."),
+                      ("empty.md", "material", "")]
+            for name, _, body in inputs:
+                (root / name).write_text(body, encoding="utf-8")
+            app = create_session(ResearchBrief(request_text="Use the supplied inputs", requested_outputs=("report",),
+                asset_requests=tuple({"locator": str(root / name), "role": role} for name, role, _ in inputs)),
+                root=root / "session", services=ResearchApplicationServices(config={"research_task_kind": "writing"}))
+            view = app.advance(max_actions=2)
+            self.assertEqual(view.next_action, "report_write", view.status_reason)
+            context, memory = app.report_inputs()
+            self.assertEqual(len(context.papers), 1)
+            self.assertEqual([handle.kind for handle in context.source_handles], ["paper", "material", "material"])
+            self.assertFalse(context.metric_sources)
+            self.assertIn("Unavailable material text: empty", " ".join(memory.limitations))
+            self.assertNotIn("synthesis", view.state_refs)
+
+    def test_writing_empty_material_stops_before_writer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            material = root / "empty.md"
+            material.write_text("", encoding="utf-8")
+            app = create_session(ResearchBrief(request_text="Write from missing evidence", requested_outputs=("report",),
+                asset_requests=({"locator": str(material), "role": "material"},)), root=root / "session",
+                services=ResearchApplicationServices(config={"research_task_kind": "writing"}))
+            view = app.advance(max_actions=3)
+            self.assertEqual(view.status, "paused")
+            self.assertFalse(any(row["capability"] == "report_write" for row in view.attempts))
+
     def test_experiment_inputs_share_provenance_without_requiring_fake_design(self):
         from simple_ar.core.capabilities import ArtifactRef
 

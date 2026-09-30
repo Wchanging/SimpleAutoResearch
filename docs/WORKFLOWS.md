@@ -11,6 +11,70 @@ duplicating the full artifact manual; for concrete commands and file trees, see
 
 ## Task-Driven Execution And Recovery
 
+### Describe and plot existing data (no model required)
+
+```bash
+uv run simple-ar start --kind data_analysis --goal "Describe my measurements" \
+  --data-file ./observations.csv --value-column score --group-column method \
+  --observation-unit "one run" --interaction autonomous --yes
+```
+
+Explicit columns and row semantics are required; IDs and metrics are not guessed.
+`observations` (default) calculates count, mean and sample standard deviation per group/column.
+For existing means or other summaries use `--data-mode values`: labels must be unique,
+values are not averaged again and error bars are not inferred. `--data-missing omit`
+explicitly allows per-column omission with counts; otherwise missing values fail, not become zero.
+Nonfinite/nonnumeric values, duplicate columns, malformed/empty input and nested JSON fail explicitly.
+
+The same session/controller freezes the UTF-8 CSV/TSV or homogeneous JSON records and settings,
+then emits `analysis.json`, `analysis.md`, copied data and editable SVGs. No search, model,
+training or invented experiment status is involved. A completed calculation does not verify
+collection, units, independence, significance or causality. Outputs contain copied data: review
+sensitivity before sharing. Physical limits default to 20 MiB input and 100 SVG pages
+(`--data-max-mb`, `--data-max-figures` override); excess pages fail rather than drop data.
+Separate metrics have separate axes; categories are paginated without dropping data.
+`--figure-width column|wide` uses generic 3.5/7-inch targets, not venue-specific dimensions.
+Visual checks are initially `not_performed`, separate from numeric computation.
+
+Resume with `research-session --session-root PATH` even if the original data changes/disappears;
+completed input snapshots are reused. Copy the completed analysis directory, then rebuild figures
+there with `python -m simple_ar.result_analysis.table analysis.json` using an installed package.
+The rebuilder refuses changed computed records; it is not a full file-integrity certification.
+Feed `analysis.md` into a later writing task to explain results; automated cross-session
+figure attachment and complex statistics are not yet offered.
+
+Server numerical acceptance: `python scripts/validate_table_nist.py --output-root runs/nist-NEW`.
+It compares two official NIST StRD datasets with certified mean/sample-standard-deviation values
+and an independent Decimal calculation. This tests arithmetic and CLI delivery, not an agent,
+paper-reproduction or complete NIST benchmark score. Official data is fetched once and retained;
+if server download is blocked, put the unmodified public `.dat` files in that output's `inputs/`.
+
+### Write from existing material
+
+```bash
+uv run simple-ar start --kind writing --goal "Explain my results and limitations" \
+  --material ./notes.md --interaction autonomous --yes
+```
+
+Repeat `--material` for drafts, notes or result descriptions; `--document` identifies
+a separate bibliographic paper. Writing extracts and persists the supplied text, then
+uses the shared Writer, Reviewer, assembly and audit capabilities. It does not search,
+create innovation candidates, execute experiments or manufacture an empty synthesis.
+Inputs are Markdown/text/PDF, not raw numerical tables. Supplied results remain
+external assertions, not independent measurements by this session.
+
+The default is a concise analysis report. Add `--template experiment` for a
+paper-style draft with explicit evidence gaps. It does not authorize experiments or
+guarantee scientific quality. Local source metadata can be incomplete; do not rely on
+generated bibliographies without checking them. Template/review files are checked at setup.
+Expert custom templates must include the corresponding review criteria; use the
+research TOML report settings for explicit criteria paths.
+
+Resume the printed session with `research-session --session-root PATH --model env`.
+Persisted extraction is reused, including after a writer failure; editing an original
+file does not silently replace the saved evidence. This is task-scoped input reuse,
+not a general cross-session memory service.
+
 `start` saves regular task inputs and delegates to `research-session`; it is
 not another planner or lifecycle. Preparation alone makes no model/process calls.
 Reading-to-synthesis preserves limitations, open questions, confidence and refs,
@@ -22,6 +86,10 @@ candidate assessment/design still uses research synthesis. Reading notes remain
 model interpretations; report Writer, section Reviewer and document Reviewer receive
 the same bounded, identified source passages and source-access status. Truncation
 is explicit, and absence from an excerpt is not absence from the paper.
+Reading notes receive the user task focus separately from source evidence. Default excerpts
+retain an ingest-sized chunk; smaller windows mark further clipping. Note identities and
+declared references are checked against their owning document. This prevents misattribution,
+not semantic errors, and does not turn a bounded overview into full-text verification.
 Report inputs also retain the original task and the recorded source-access mix
 (parsed text versus metadata/abstract only). An explicit report citation cap
 does not truncate search or reading candidates; it is checked on the final body. Unresolved major
@@ -229,6 +297,12 @@ the canonical citation-key body and bibliography become an editable ACM
 manuscript. Export reuses the saved text and figures; it does not repeat reading,
 writing or measurements. Rendering/compilation status is separate from report
 audit status. See the [command reference](CLI_REFERENCE.md#simple-ar-report-export).
+
+The pdfLaTeX demonstration handles common scientific Greek/math Unicode glyphs
+through fixed export-owned declarations, without changing the original Markdown.
+This is not general multilingual font support. Unsupported characters or missing
+TeX packages retain the editable project and compilation diagnostics rather than
+silently changing the content or claiming PDF delivery.
 
 Historical sessions remain inspectable, but no second Writer/report/audit executor
 resumes them. `build_research_session_report_inputs()` and

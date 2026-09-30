@@ -23,6 +23,17 @@ def _ast(image: str | None = None, citation: str = "p1") -> dict:
 
 
 class ReportExportTests(unittest.TestCase):
+    def test_scientific_unicode_support_is_fixed_and_only_for_present_symbols(self):
+        from simple_ar.report.export import _scientific_unicode_preamble
+
+        preamble = _scientific_unicode_preamble("α ≤ β, Γ ≠ ∞; µm", r"\input{secret}")
+        for code in ("03B1", "03B2", "0393", "2264", "2260", "221E", "00B5"):
+            self.assertIn("\\DeclareUnicodeCharacter{" + code + "}", preamble)
+        self.assertNotIn("03B3", preamble)
+        self.assertIn(r"\ensuremath{\alpha}", preamble)
+        self.assertNotIn(r"\input", preamble)
+        self.assertEqual(_scientific_unicode_preamble("Plain ASCII and unknown 中文"), "")
+
     def test_breakable_code_escapes_commands_and_keeps_separators(self):
         from simple_ar.report.export import _breakable_code
         rendered = _breakable_code(r"weighted_mc_error\input{secret}%")

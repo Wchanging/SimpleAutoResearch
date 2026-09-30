@@ -44,7 +44,7 @@ SECTION_ALIASES = {
     "bibliography": "references",
 }
 
-TEXT_SUFFIXES = {".md", ".txt"}
+TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 
 
 def build_document_sections(records: Iterable[DocumentRecord]) -> list[DocumentSection]:

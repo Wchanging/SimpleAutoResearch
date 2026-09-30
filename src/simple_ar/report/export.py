@@ -87,6 +87,29 @@ def _breakable_code(text: str) -> str:
     return r"\texttt{" + content + "}"
 
 
+def _scientific_unicode_preamble(*fragments: str) -> str:
+    """Declare scientific glyphs for pdfLaTeX without rewriting source prose.
+
+    Pandoc preserves bare Greek letters and many mathematical symbols. Their
+    fixed TeX equivalents work in prose, math and escaped code alike; this is
+    not a general multilingual font system or permission to inject a preamble.
+    """
+    greek = dict(zip("αβγδεζηθικλμνξοπρστυφχψω", (
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi o pi rho sigma tau upsilon phi chi psi omega"
+    ).split(), strict=True))
+    greek.update(dict(zip("ΓΔΘΛΞΠΣΥΦΨΩ", "Gamma Delta Theta Lambda Xi Pi Sigma Upsilon Phi Psi Omega".split(), strict=True)))
+    symbols = {char: "\\" + name if name != "o" else "o" for char, name in greek.items()}
+    symbols.update({"ς": r"\varsigma", "ϑ": r"\vartheta", "ϕ": r"\varphi", "ϵ": r"\varepsilon",
+                    "∞": r"\infty", "≤": r"\leq", "≥": r"\geq", "≠": r"\neq",
+                    "≈": r"\approx", "±": r"\pm", "∓": r"\mp", "×": r"\times",
+                    "÷": r"\div", "∈": r"\in", "∉": r"\notin", "∂": r"\partial",
+                    "∇": r"\nabla", "∑": r"\sum", "∏": r"\prod", "∫": r"\int",
+                    "√": r"\surd", "µ": r"\mu", "−": "-"})
+    present = set("".join(fragments)) & symbols.keys()
+    return "".join(f"\\DeclareUnicodeCharacter{{{ord(char):04X}}}{{\\ensuremath{{{symbols[char]}}}}}\n"
+                   for char in sorted(present))
+
+
 def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None = None,
                       compile_pdf: bool = False) -> dict[str, Any]:
     """Create a new editable acmart manuscript from the canonical citation body.
@@ -172,7 +195,8 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
                         cwd=output, text=json.dumps(document)).strip()
 
         heading = latex([{"t": "Plain", "c": title_inlines}])
-        (output / "body.tex").write_text(latex(blocks) + "\n", encoding="utf-8")
+        body_tex = latex(blocks)
+        (output / "body.tex").write_text(body_tex + "\n", encoding="utf-8")
         abstract_tex = latex(abstract) if abstract else ""
         (output / "references.bib").write_text(bibliography, encoding="utf-8")
         markdown = _run([pandoc, "--from=json", "--to=markdown", "--wrap=none"],
@@ -182,6 +206,8 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
             "% acmart manuscript demonstration; no conference submission metadata is inferred.\n"
             "\\documentclass[manuscript,screen,nonacm]{acmart}\n"
             "\\usepackage{longtable,booktabs,array,calc}\n"
+            + _scientific_unicode_preamble(heading, body_tex, abstract_tex, bibliography)
+            +
             "\\providecommand{\\tightlist}{\\setlength{\\itemsep}{0pt}\\setlength{\\parskip}{0pt}}\n"
             "\\providecommand{\\passthrough}[1]{#1}\n"
             "\\providecommand{\\pandocbounded}[1]{#1}\n"

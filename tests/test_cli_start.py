@@ -15,6 +15,48 @@ from simple_ar.code_task.runtime.config import load_code_task_init_options, load
 
 
 class StartTests(unittest.TestCase):
+    def test_writing_roundtrips_material_role_template_and_no_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            material = root / "results with spaces.markdown"
+            material.write_text("# Results\nExternal result, not independently verified.\n", encoding="utf-8")
+            config = self.prepare("--kind", "writing", "--goal", "Write an honest paper draft",
+                                  "--material", str(material), "--template", "experiment",
+                                  "--output-root", str(root / "runs"), "--prepare-only")
+            defaults = research_defaults(["research-session", "--config", str(config)])
+            self.assertEqual(defaults["task_kind"], "writing")
+            self.assertEqual(defaults["material"], [str(material.resolve())])
+            self.assertEqual(defaults["report_template"], "experiment")
+            self.assertTrue(defaults["report_document_review"])
+            self.assertEqual(defaults["outputs"], ["report"])
+            self.assertNotIn("command_argv", defaults)
+            self.assertNotIn("total_tokens", defaults)
+
+    def test_writing_invalid_scope_does_not_save_a_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            material = root / "notes.md"
+            material.write_text("Notes", encoding="utf-8")
+            for extra in (["--sources", "search"], ["--document", str(material)], ["--fulltext"],
+                          ["--command", "python", "run.py"]):
+                with self.subTest(extra=extra), self.assertRaises(ValueError):
+                    self.prepare("--kind", "writing", "--goal", "Write from material", "--material", str(material),
+                                 "--output-root", str(root / "runs"), "--prepare-only", *extra)
+            self.assertFalse((root / "runs").exists())
+
+    def test_writing_checks_template_before_saving_or_calling_a_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            material = root / "notes.md"
+            material.write_text("Notes", encoding="utf-8")
+            empty_template = root / "empty.md"
+            empty_template.write_text("", encoding="utf-8")
+            for template in ("experimnt", str(root / "missing.md"), str(empty_template)):
+                with self.subTest(template=template), self.assertRaisesRegex(ValueError, "Invalid writing template"):
+                    self.prepare("--kind", "writing", "--goal", "Draft", "--material", str(material),
+                                 "--template", template, "--output-root", str(root / "runs"), "--prepare-only")
+            self.assertFalse((root / "runs").exists())
+
     def prepare(self, *arguments):
         args = build_parser().parse_args(["start", *arguments])
         with patch("sys.stdin.isatty", return_value=False), contextlib.redirect_stdout(io.StringIO()):

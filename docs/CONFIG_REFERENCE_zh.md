@@ -2,13 +2,26 @@
 
 [English version](CONFIG_REFERENCE.md)
 
+## 已有材料写作
+
+`start --kind writing --goal "说明已有结果和局限" --material notes.md --prepare-only`
+自动保存普通配置，不必先写 TOML。高级配置使用 `task.kind = "writing"`、
+`task.outputs = ["report"]`、`assets.materials = ["notes.md"]`、`model.name = "env"`。
+`assets.papers` 可另提供论文；不要把同一文件重复标成论文和笔记。
+材料路径相对配置文件解析，支持 Markdown、文本和 PDF。
+
+默认 `report.template = "analysis_report"`；`"experiment"` 请求论文体草稿，而不授权实验。
+引导写作默认开启 `report.document_review = true`。执行配置、在线搜索及研究创新不属于此任务。
+提取后的文本随会话保存，恢复不重新读取修改过的原文件；更换材料应明确修订或新建任务。
+提供的结果仍是外部陈述，不能称为本次独立测量；缺证据和缺书目信息必须保留，审阅通过不保证论文正确。
+
 引导入口在线调研默认读取摘要和已提供的本地材料。加入 `--fulltext --sources search`
 才允许远程全文抓取/PDF 下载；仍沿用现有材料流水线，获取失败会记录，不能当成读过全文。
 本地材料模式不通过此选项开启网络。
 
 ## 引导设置
 
-`simple-ar start` 支持 `survey`、`bug_fix` 和准备好的 `reproduction`，生成普通研究 TOML；代码任务额外生成
+`simple-ar start` 支持 `survey`、`bug_fix`、准备好的 `reproduction` 和已有材料 `writing`，生成普通研究 TOML；代码任务额外生成
 CodeTask TOML 和任务说明。沿用默认值、TOML、显式 CLI 的覆盖关系，不新增配置体系。
 
 ```bash
@@ -51,6 +64,30 @@ API 总额仍默认无限制。
 CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 旧八阶段外层配置解析器及别名转换已经退出，历史快照仍可读取，但不是可执行工作流。
 
+## 已有数据的描述分析
+
+```toml
+[task]
+goal = "描述已有测量"
+kind = "data_analysis"
+outputs = ["data_analysis"]
+
+[analysis]
+file = "observations.csv"
+value_columns = ["score"]
+group_column = "method"
+observation_unit = "一次运行"
+value_unit = "秒"
+```
+
+`file` 相对 TOML 解析；`value_columns` 与非空 `observation_unit` 必填。
+`group_column`、`value_unit` 默认空（不分组、单位未知）。可选：`mode = "observations"`
+计算 count/mean/sample std，或 `"values"` 保留汇总值并要求唯一标签；`missing = "reject"`
+或明确 `"omit"`；`width = "wide"` 或 `"column"`；物理限制 `max_mb = 20`、`max_figures = 100`
+为可调整正整数。缺失不填零，非有限/非数值报错；不自动造误差条，不作显著性/因果结论。
+任务只接受 `data_analysis` 输出，不接受执行或文献选项，不需要或使用模型配置。
+摄入时固化原始字节与设置，续跑复用；更改列/聚合设置需新任务。产物与重建见[工作流](WORKFLOWS_zh.md)。
+
 ## 全局 `.env`
 
 `.env` 由 LLM 集成读取，用于凭据、endpoint、模型和传输设置；它被 Git
@@ -73,7 +110,7 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
-| `[task]` | `goal`、`kind`、`outputs`、`output_root`、`selected_idea_id` | 新 session 必须有 `goal`。`kind` 默认 `auto`，可为 `auto`、`survey`、`bug_fix`、`measurement`、`reproduction`；`measurement` 必须写 `["experiments"]`，`reproduction` 必须写 `["experiments"]` 或 `["experiments", "report"]`。其他任务的 `outputs` 可省略，显式值使用 `summary`、`report`、`experiments`、`bug_fix`。`output_root` 默认 `runs/research-session`；`selected_idea_id` 可选，必须指向已有且有依据的候选。 |
+| `[task]` | `goal`、`kind`、`outputs`、`output_root`、`selected_idea_id` | 新 session 必须有 `goal`。kind：默认 `auto`，或 `survey`、`bug_fix`、`measurement`、`reproduction`、`writing`、`data_analysis`。`measurement` 只输出 experiments；`reproduction` 含 experiments，可加 report；`writing` 只接受 report；`data_analysis` 只接受同名输出。其他输出：summary/report/experiments/bug_fix。`output_root` 默认 runs/research-session；可选 `selected_idea_id` 必须选已有、具有依据的候选。 |
 | `[model]` | `name`、`feasibility_review_model`、`max_output_tokens` | 文件配置默认 `name = "env"`，读取 `.env` 的 `SIMPLE_AR_MODEL`；`name = ""` 选择不调用 LLM 的确定性处理。可选 `feasibility_review_model` 仅让另一模型审核源码支持的实现可行性，仍使用同一服务商与会话预算；选择会随会话保存，恢复时不可更改。`max_output_tokens` 可省略；凭据始终留在环境中。 |
 
 独立可行性审查可在 CodeTask 或训练前质疑方案机制；它仍是模型判断，不能替代可执行的机制验证或改进证据。省略时由主模型审查；续接时可省略该字段以沿用存档选择。
@@ -84,9 +121,9 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
 | `[research]` | `providers`、`queries`、`max_results`、`max_chunks`、`max_pdf_pages`、`read_max_shortlist`、`idea_limit`、`cache_dir` | 列表可省略；CLI 默认 `max_results = 10`、`max_chunks = 300`、`idea_limit = 3`。`max_pdf_pages` 是正整数，限制本地 PDF 最多提取页数（默认 `20`）；更改后应创建新会话，不能把已冻结的阅读证据当成新版本。`read_max_shortlist` 可选，显式提供的论文优先保留；若数量超过上限则显式报错。`cache_dir` 可选，未持久化，不能作为安全的恢复变更。 |
-| `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`max_fulltext_documents`、`max_pdf_mb`、`materials_only` | 开关默认 false，可选上限默认不设。`materials_only = true` 要求/使用 `[assets].papers` 并禁用 search，但仍允许模型阅读。引导入口的 `--fulltext --sources search` 会允许缓存 PDF，默认最多 4 份、每份 20 MiB；专家可在 TOML 中调整正整数上限。远程 PDF 需要下载许可与缓存许可；获取失败仍明确标注只读摘要或不可用。 |
+| `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`max_fulltext_documents`、`max_pdf_mb`、`materials_only` | 开关默认 false，可选上限默认不设。`materials_only = true` 使用本地输入（`assets.papers`，或写作的 `assets.materials`）并禁用 search，仍允许模型阅读；writing 始终仅用本地输入。引导入口的 `--fulltext --sources search` 会允许缓存 PDF，默认最多 4 份、每份 20 MiB；专家可在 TOML 中调整正整数上限。远程 PDF 需要下载许可与缓存许可；获取失败仍明确标注只读摘要或不可用。 |
 | `[research]` | `max_iterations`、`interaction` | `max_iterations` 默认 `1`，`0` 表示首轮分析后停止。`interaction` 新 CLI 默认 `checkpoints`，可选 `assisted`、`checkpoints`、`autonomous`；硬事实和权限缺口在任何模式下都是阻塞。 |
-| `[assets]` | `papers` | 可选的本地 Markdown/text/PDF 路径列表；相对路径以 TOML 所在目录解析，作为只读输入。 |
+| `[assets]` | `papers`、`materials` | 只读本地 Markdown/text/PDF 路径，相对 TOML 所在目录解析。`papers` 表示书目来源；`materials` 用于 `writing` 的草稿、笔记和外部结果说明，不当成本次实测指标。写作至少需要一份输入，不接受重复文件或同一文件兼任两种角色。 |
 
 未知分区/字段和类型错误会显式拒绝。accepted plan 是短顺序计划，动作唯一且输入由
 能力适配函数绑定，不是任意模型调度器。只调研不会创建实验进程；`bug_fix` 必须提供

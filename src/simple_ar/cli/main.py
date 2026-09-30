@@ -317,11 +317,15 @@ def _print_research_session(args: argparse.Namespace) -> None:
     from simple_ar.app.session_roots import new_research_session_root
     from simple_ar.research.workflow_contracts import ResearchBrief
 
-    if getattr(args, "session_root", None) is not None and not getattr(args, "topic", None):
+    if getattr(args, "session_root", None) is not None:
         from simple_ar.app.research_application import load_session
 
         try:
-            args.topic = load_session(args.session_root).brief.objective
+            saved_app = load_session(args.session_root)
+            if not getattr(args, "topic", None):
+                args.topic = saved_app.brief.objective
+            if getattr(args, "task_kind", "auto") == "auto" and saved_app._task_kind() == "data_analysis":
+                args.task_kind = "data_analysis"
         except (OSError, RuntimeError, ValueError) as exc:
             raise SystemExit(f"Could not restore the saved session goal: {exc}") from exc
 
@@ -346,13 +350,43 @@ def _print_research_session(args: argparse.Namespace) -> None:
     if args.max_research_iterations < 0:
         raise SystemExit("--max-research-iterations cannot be negative.")
     task_kind = str(getattr(args, "task_kind", "auto") or "auto").strip().lower()
-    if task_kind not in {"auto", "survey", "bug_fix", "measurement", "reproduction"}:
-        raise SystemExit("--task-kind must be auto, survey, bug_fix, measurement or reproduction.")
+    if task_kind not in {"auto", "survey", "bug_fix", "measurement", "reproduction", "writing", "data_analysis"}:
+        raise SystemExit("--task-kind must be auto, survey, bug_fix, measurement, reproduction, writing or data_analysis.")
     command = tuple(args.command_argv or ())
     execution_details = getattr(args, "execution_details", {})
     if command and execution_details.get("pairs"):
         raise SystemExit("Use execution.pairs or a single command, not both; paired argv must be explicit.")
     outputs = getattr(args, "outputs", None)
+    materials = getattr(args, "material", [])
+    if outputs and "data_analysis" in outputs and task_kind != "data_analysis":
+        raise SystemExit("data_analysis output requires an explicit data_analysis task.")
+    data_analysis = None
+    if task_kind == "data_analysis":
+        if command or execution_details or args.code_task_config or args.local_document or materials or args.queries or args.providers or args.with_report or outputs not in (None, ["data_analysis"]):
+            raise SystemExit("Data analysis accepts only a supplied table and descriptive settings, without research, CodeTask or experiment execution.")
+        if not getattr(args, "session_root", None):
+            from simple_ar.cli.start import data_settings
+            try:
+                data_analysis = data_settings(args)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+    elif any((args.data_file, args.value_column, args.group_column, args.observation_unit, args.value_unit,
+              args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100)):
+        raise SystemExit("Data options require --task-kind data_analysis.")
+    if materials and task_kind != "writing":
+        raise SystemExit("--material/assets.materials currently requires task.kind=writing.")
+    if task_kind == "writing":
+        if command or execution_details or getattr(args, "code_task_config", None) or args.no_report or outputs not in (None, ["report"]):
+            raise SystemExit("Writing requests only a report without execution or CodeTask configuration.")
+        if not getattr(args, "session_root", None) and not (materials or args.local_document):
+            raise SystemExit("Writing requires --material and/or --local-document.")
+        if args.queries or args.providers or getattr(args, "research_materials_only", None) is False or getattr(args, "research_allow_pdf_download", None):
+            raise SystemExit("Writing uses supplied local material only; online research is a survey task.")
+        supplied = [Path(path).expanduser().resolve() for path in [*materials, *args.local_document]]
+        if len(supplied) != len(set(supplied)):
+            raise SystemExit("Writing material must have one unambiguous role per file; do not repeat a paper as material.")
+        if any(not path.is_file() or path.suffix.lower() not in {".md", ".markdown", ".txt", ".pdf"} for path in supplied):
+            raise SystemExit("Writing requires existing Markdown, text or PDF files. Use result descriptions, not raw tables, as writing material.")
     if outputs and task_kind != "bug_fix" and "experiments" not in outputs and (command or execution_details or getattr(args, "code_task_config", None)):
         raise SystemExit("Execution configuration requires experiments in --outputs/task.outputs.")
     if task_kind == "bug_fix" and outputs and set(outputs) != {"bug_fix"}:
@@ -431,16 +465,16 @@ def _print_research_session(args: argparse.Namespace) -> None:
         timeout_sec = args.timeout_sec if args.timeout_sec is not None else 300
     if args.with_report and args.no_report:
         raise SystemExit("Use either --with-report or --no-report for research-session, not both.")
-    llm_client = _optional_research_llm_client(args.model, "research session", max_output_tokens=getattr(args, "max_output_tokens", None))
+    llm_client = None if task_kind == "data_analysis" else _optional_research_llm_client(args.model, "research session", max_output_tokens=getattr(args, "max_output_tokens", None))
     review_model = (getattr(args, "feasibility_review_model", None) or "").strip()
     if review_model and llm_client is None:
         raise SystemExit("--feasibility-review-model requires --model for research design.")
-    feasibility_client = _optional_research_llm_client(
+    feasibility_client = None if task_kind == "data_analysis" else _optional_research_llm_client(
         review_model or None, "feasibility review", max_output_tokens=getattr(args, "max_output_tokens", None),
     )
     if task_kind == "bug_fix" and (args.with_report or (outputs and "report" in outputs)):
         raise SystemExit("Bug-fix tasks produce a patch and validation evidence, not an academic report.")
-    report_requested = False if task_kind == "bug_fix" else bool(args.with_report or (llm_client is not None and not args.no_report))
+    report_requested = False if task_kind in {"bug_fix", "data_analysis"} else bool(task_kind == "writing" or args.with_report or (llm_client is not None and not args.no_report))
     if outputs is not None:
         report_requested = "report" in outputs
     if report_requested and llm_client is None:
@@ -517,10 +551,11 @@ def _print_research_session(args: argparse.Namespace) -> None:
     experiment_requested = task_kind != "bug_fix" and (execution is not None or bool(outputs and "experiments" in outputs))
     if task_text.strip():
         request_text += "\n\n## Implementation task\n\n" + task_text.strip()
+    writing_template = args.report_template if "report_template" in getattr(args, "_explicit_resume_destinations", set()) else "analysis_report"
     report_config: dict[str, object] = {
         "mode": "experiment" if experiment_requested else "research_only",
         "template": ("reproduction" if task_kind == "reproduction" and args.report_template == "experiment" else args.report_template) if experiment_requested else (
-            "survey" if args.report_template == "experiment" else args.report_template
+            writing_template if task_kind == "writing" else "survey" if args.report_template == "experiment" else args.report_template
         ),
         "reviewer": args.report_reviewer,
         "max_review_iterations": args.max_review_iterations,
@@ -554,6 +589,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         config["interaction"] = getattr(args, "interaction", None) or "checkpoints"
     if task_kind != "auto":
         config["research_task_kind"] = task_kind
+    if data_analysis is not None:
+        config["data_analysis"] = data_analysis
     selected_idea_id = str(getattr(args, "selected_idea_id", "") or "").strip()
     if selected_idea_id:
         config["research_selected_idea_id"] = selected_idea_id
@@ -577,6 +614,12 @@ def _print_research_session(args: argparse.Namespace) -> None:
         }
         for path in args.local_document
     ]
+    asset_requests.extend({"locator": str(Path(path)), "kind": "file", "role": "material",
+                           "mutability": "read_only", "allowed_uses": ["read", "reference"]}
+                          for path in materials)
+    if data_analysis is not None:
+        asset_requests.append({"locator": data_analysis["file"], "kind": "file", "role": "dataset",
+                               "mutability": "read_only", "allowed_uses": ["read"]})
     if task_kind == "bug_fix" and code_task_spec is not None:
         asset_requests.append({
             "asset_id": "code_project",
@@ -610,10 +653,12 @@ def _print_research_session(args: argparse.Namespace) -> None:
         ("bug_fix",) if task_kind == "bug_fix"
         else ("survey",) if task_kind == "survey"
         else ("measurement",) if task_kind == "measurement"
+        else ("data_analysis",) if task_kind == "data_analysis"
         else ("research", "experiment") if experiment_requested else ("research",)
     )
     requested_outputs = (
         tuple(outputs) if outputs is not None
+        else ("data_analysis",) if task_kind == "data_analysis"
         else ("bug_fix",) if task_kind == "bug_fix"
         else ("experiments", "report") if execution is not None and report_requested
         else ("experiments",) if execution is not None
@@ -805,6 +850,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
            else "existing Code-Task backend" if isinstance(display_execution, dict) and isinstance(display_execution.get("code_task"), dict)
            else "explicit command" if display_execution is not None
            else "preparation required" if "experiments" in display_outputs
+           else "not requested (supplied-material writing)" if display_task_kind == "writing"
+           else "not requested (descriptive data analysis)" if display_task_kind == "data_analysis"
            else "not requested (literature-only)")
     )
     display.finish(view)
@@ -1091,7 +1138,8 @@ def _report_config_overrides(args: argparse.Namespace, app: Any) -> dict[str, ob
             continue
         value = getattr(args, destination, None)
         if key == "template" and args.command == "research-session":
-            if value == "experiment" and not app.services.config.get("execution"):
+            if (value == "experiment" and not app.services.config.get("execution")
+                    and app.services.config.get("research_task_kind") != "writing"):
                 value = "survey"
         if value is not None:
             supplied[key] = value

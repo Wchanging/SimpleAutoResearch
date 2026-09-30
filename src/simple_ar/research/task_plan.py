@@ -20,6 +20,8 @@ SCHEMA_VERSION = "research_task_plan.v1"
 _ACTION_CAPABILITIES = {
     "search": "search",
     "document_ingest": "document_ingest",
+    "data_ingest": "data_ingest",
+    "data_analysis": "data_analysis",
     "read": "read",
     "synthesize": "synthesize",
     "summarize": "summary",
@@ -38,6 +40,8 @@ _ACTION_CAPABILITIES = {
 _STEP_TEXT = {
     "search": ("Collect candidate sources from the accepted source plan.", "Selected papers and source diagnostics."),
     "document_ingest": ("Make selected source text available to the evidence reader.", "Records, chunks, and extraction limitations."),
+    "data_ingest": ("Freeze supplied data and explicit column semantics.", "Validated input snapshot and descriptive settings."),
+    "data_analysis": ("Describe selected numeric columns without inferring a scientific verdict.", "Descriptive statistics, editable figures and copied rebuilding inputs."),
     "read": ("Extract claims, methods, and limitations from available source text.", "Evidence cards and unresolved source claims."),
     "synthesize": ("Combine the evidence into an evidence-backed direction or summary.", "Synthesis status, candidate direction, and limitations."),
     "summarize": ("Persist the requested evidence-backed research summary.", "Summary artifact and its immutable source refs."),
@@ -144,7 +148,7 @@ class TaskPlanRequest:
     llm_client: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.task_kind not in {"survey", "bug_fix", "measurement", "reproduction", "research"}:
+        if self.task_kind not in {"survey", "bug_fix", "measurement", "reproduction", "writing", "data_analysis", "research"}:
             raise ValueError(f"Unsupported task kind: {self.task_kind!r}")
         if not self.goal.strip() or not self.request_text.strip():
             raise ValueError("Task plan goal and request_text cannot be empty.")
@@ -194,7 +198,7 @@ class TaskPlanResult:
             raise ValueError("Only accepted task plans can be dispatched.")
         task_kind = str(data.get("task_kind") or "research")
         goal = str(data.get("goal") or "").strip()
-        if task_kind not in {"survey", "bug_fix", "measurement", "reproduction", "research"} or not goal:
+        if task_kind not in {"survey", "bug_fix", "measurement", "reproduction", "writing", "data_analysis", "research"} or not goal:
             raise ValueError("Accepted task plan has an invalid task kind or goal.")
         return cls(
             task_kind=task_kind,
@@ -212,7 +216,7 @@ def build_task_plan(request: TaskPlanRequest, *, trace: list[dict[str, Any]] | N
 
     if request.execution_protocol_accepted and request.prior_plan is not None:
         return _extend_accepted_research_plan(request)
-    if request.task_kind != "bug_fix" and _provided_materials_only(request) and not request.config.get("research_local_documents"):
+    if request.task_kind not in {"bug_fix", "data_analysis"} and _provided_materials_only(request) and not request.config.get("research_local_documents"):
         raise ValueError("Provided-materials planning requires supplied local documents before model planning.")
     defaults = default_task_steps(request)
     mode = "deterministic"
@@ -314,12 +318,17 @@ def _extend_accepted_research_plan(request: TaskPlanRequest) -> TaskPlanResult:
 
 def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:
     """Return explicit offline defaults; these are a planning seed, not dispatch."""
+    if request.task_kind == "data_analysis":
+        return [_row("data_ingest"), _row("data_analysis")]
 
     if request.task_kind == "bug_fix":
         return _bug_fix_steps(request.execution or {})
 
     if request.task_kind == "measurement":
         return [_row("experiment"), _row("analysis")]
+
+    if request.task_kind == "writing":
+        return [_row(action) for action in ("document_ingest", "report_write", "report", "report_audit")]
 
     if request.task_kind == "reproduction":
         steps = [_row(action) for action in ("document_ingest", "read", "synthesize", "experiment", "analysis")]
@@ -563,9 +572,9 @@ def _planning_boundary(request: TaskPlanRequest) -> dict[str, Any]:
         allowed_rows = [_row("experiment")] if configured else []
         checkpoint = request.task_kind
         unauthorized_reason = "Direct measurement authorizes only its supplied execution command."
-    elif request.task_kind == "survey":
+    elif request.task_kind in {"survey", "writing", "data_analysis"}:
         checkpoint = "evidence"
-        unauthorized_reason = "Survey routing does not authorize process actions."
+        unauthorized_reason = "Survey/writing routing does not authorize process actions."
     elif not configured:
         checkpoint = "evidence"
         unauthorized_reason = "No execution boundary was supplied for this research task."
@@ -708,7 +717,7 @@ def _complete_required_steps(
     proposal and the inserted actions remain visible in the attempt trace.
     """
 
-    if request.task_kind in {"bug_fix", "measurement", "reproduction"}:
+    if request.task_kind in {"bug_fix", "measurement", "reproduction", "writing", "data_analysis"}:
         return proposed, ()
     steps = list(proposed)
     explicit = {step.action for step in steps}
@@ -752,6 +761,29 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
     if any(action.startswith(("refine_implementation:", "prepare_implementation:")) for action in actions):
         raise ValueError("Implementation refinement requires recorded executor feedback; it cannot be preplanned.")
     errors = _validate_authorized_boundaries(request, steps)
+    if request.task_kind == "data_analysis":
+        if actions != ["data_ingest", "data_analysis"] or any(step.condition for step in steps):
+            errors.append("Data analysis freezes supplied data then describes/plots it; no research or experiment prerequisites.")
+        if request.execution or set(request.requested_outputs) != {"data_analysis"}:
+            errors.append("Data analysis requests only its descriptive package without process execution.")
+        from simple_ar.result_analysis.table import TableSpec
+        table = request.config.get("data_analysis") or {}
+        TableSpec.from_config(table)
+        if not table.get("file"):
+            errors.append("Data analysis requires a supplied data file.")
+        if errors:
+            raise ValueError("\n".join(errors))
+        return
+    if request.task_kind == "writing":
+        if actions != [row["action"] for row in default_task_steps(request)] or any(step.condition for step in steps):
+            errors.append("Writing consumes supplied material then writes, assembles and audits; it does not require research discovery or synthesis.")
+        if not request.config.get("research_local_documents") or not _provided_materials_only(request):
+            errors.append("Writing requires supplied local materials and materials-only scope.")
+        if request.execution or set(request.requested_outputs) != {"report"}:
+            errors.append("Writing requests only a report, without execution configuration.")
+        if errors:
+            raise ValueError("\n".join(errors))
+        return
     if request.task_kind == "bug_fix":
         if any(step.capability not in {"prepare_execution", "implement"} for step in steps) or "implement" not in actions:
             errors.append("Bug-fix plans may contain only preparation and implementation.")
@@ -878,6 +910,8 @@ def _validate_authorized_boundaries(
                     f"expected condition={permitted[step.action] or 'none'}; "
                     f"received condition={step.condition or 'none'}."
                 )
+        if step.action in {"data_ingest", "data_analysis"} and request.task_kind != "data_analysis":
+            errors.append("Data actions require an explicit data_analysis task and its supplied table settings.")
         if _provided_materials_only(request) and step.action == "search":
             errors.append("Provided-materials plans cannot authorize search.")
         if step.capability not in _PROCESS_CAPABILITIES and step.condition:
@@ -934,6 +968,7 @@ def _state_name(action: str) -> str:
         "prepare_execution": "preparation",
         "implement": "implementation",
         "report_write": "writer",
+        "data_ingest": "data_input",
         "matrix_analysis": "analysis",
     }
     if action in aliases:

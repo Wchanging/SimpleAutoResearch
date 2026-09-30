@@ -22,6 +22,7 @@ from simple_ar.research.contracts import (
     TextChunk,
 )
 from simple_ar.research.documents.ingest import DocumentBundle
+from simple_ar.research.store.chunking import DEFAULT_CHUNK_CHARS
 from simple_ar.research.evidence.cards import (
     build_code_links,
     build_dataset_cards,
@@ -301,6 +302,8 @@ def read_documents(request: ReadRequest) -> ReadResult:
                     )
                     for record in bundle.records
                 },
+                topic=request.topic,
+                problem_markdown=request.problem_markdown,
                 emit=request.emit,
                 config=request.config,
             )
@@ -649,12 +652,15 @@ def format_bundle_evidence_snippets(
     bundle: DocumentBundle,
     *,
     max_chunks: int = 12,
-    max_chars: int = 900,
+    max_chars: int = DEFAULT_CHUNK_CHARS,
     document_id: str | None = None,
 ) -> str:
     """Render bounded, source-labelled text for model reading prompts."""
 
+    if max_chars < 4:
+        raise ValueError("Evidence excerpt max_chars must be at least 4.")
     lines: list[str] = []
+    shortened = 0
     available = tuple(
         chunk for chunk in bundle.chunks
         if document_id is None or chunk.document_id == document_id
@@ -663,6 +669,7 @@ def format_bundle_evidence_snippets(
     for chunk in selected:
         text = " ".join(chunk.text.split())
         if len(text) > max_chars:
+            shortened += 1
             text = text[: max_chars - 3].rstrip() + "..."
         if not text:
             continue
@@ -679,6 +686,9 @@ def format_bundle_evidence_snippets(
             f"[coverage] Bounded overview sampled {len(selected)} of {len(available)} chunks; "
             "unseen details require a targeted source read."
         )
+    if shortened:
+        lines.append(f"[coverage] {shortened} chunk excerpt(s) shortened to {max_chars} characters; "
+                     "a missing detail here is not evidence of absence from the retained source.")
     return "\n".join(lines)
 
 
@@ -707,7 +717,13 @@ def validate_read_evidence(result: ReadResult) -> tuple[str, ...]:
     semantic correctness from prose.
     """
 
-    chunk_ids = {chunk.chunk_id for chunk in result.bundle.chunks}
+    chunks = {chunk.chunk_id: chunk.document_id for chunk in result.bundle.chunks}
+    records = {record.document_id: record for record in result.bundle.records}
+    aliases = {}
+    for record in result.bundle.records:
+        for alias in (record.document_id, record.source_id, record.metadata.get("paper_id")):
+            if alias:
+                aliases.setdefault(str(alias), set()).add(record.document_id)
     references: list[str] = []
     for cards in (
         result.paper_cards,
@@ -721,14 +737,27 @@ def validate_read_evidence(result: ReadResult) -> tuple[str, ...]:
                 reference = str(reference).strip()
                 if reference:
                     references.append(reference)
-    missing = sorted({reference for reference in references if reference not in chunk_ids})
-    if not missing:
-        return ()
-    return (
-        f"{len(missing)} read evidence reference(s) do not resolve to the document bundle: "
-        + ", ".join(missing[:8])
-        + (" ..." if len(missing) > 8 else ""),
-    )
+    missing = sorted({reference for reference in references if reference not in chunks})
+    diagnostics = []
+    if missing:
+        diagnostics.append(
+            f"{len(missing)} read evidence reference(s) do not resolve to the document bundle: "
+            + ", ".join(missing[:8]) + (" ..." if len(missing) > 8 else "")
+        )
+    # Notes are model interpretations too. A reference to a real chunk in a
+    # different paper is not valid support for this paper; document-level refs
+    # remain allowed for historical notes, but are not passage-level evidence.
+    for note in result.paper_notes:
+        owner = str(note.get("paper_id") or "")
+        if owner not in records:
+            diagnostics.append(f"Reading note has an unknown document identity: {owner!r}.")
+            continue
+        invalid = [str(ref) for ref in note.get("evidence_refs", [])
+                   if chunks.get(str(ref)) != owner and aliases.get(str(ref)) != {owner}]
+        if invalid:
+            diagnostics.append(f"Reading note {owner!r} has unresolved or cross-document references: "
+                               + ", ".join(invalid[:8]))
+    return tuple(diagnostics)
 
 
 def _with_evidence_validation(result: ReadResult) -> ReadResult:

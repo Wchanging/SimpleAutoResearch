@@ -417,7 +417,7 @@ def _edit_whole_document(
             execution_evidence=report_execution_evidence(context),
             supplementary_evidence=all_tool_results,
             metric_summary=_prompt_metrics(memory, detail="summary"),
-            source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind == "paper"],
+            source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind in {"paper", "material"}],
         )
     except (LLMError, ValidationError, ValueError) as exc:
         finding = ReviewerFinding(
@@ -511,7 +511,7 @@ def _edit_whole_document(
                 execution_evidence=report_execution_evidence(context),
                 supplementary_evidence=all_tool_results,
                 metric_summary=_prompt_metrics(memory, detail="summary"),
-                source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind == "paper"],
+                source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind in {"paper", "material"}],
                 label="report-document-verifier",
             )
             for review in verification_reviews:
@@ -861,7 +861,7 @@ def _outline_is_overly_template_like(sections: list[dict[str, Any]]) -> bool:
 def _outline_source_brief(context: ReportContext) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for handle in context.source_handles:
-        if handle.kind not in {"paper", "paper_brief"}:
+        if handle.kind not in {"paper", "paper_brief", "material"}:
             continue
         rows.append(
             {
@@ -1045,7 +1045,7 @@ def _fallback_section_handles(memory: ReportMemory, *, limit: int) -> list[str]:
     return [
         handle.handle
         for handle in memory.source_handles
-        if handle.kind in {"paper", "paper_brief"}
+        if handle.kind in {"paper", "paper_brief", "material"}
     ][:limit]
 
 
@@ -2235,7 +2235,7 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
     # Writer and Reviewer must see the same evidence, not just an abstract.
     # Keep source excerpts distinct from model-derived reading notes.
     source_metadata = handle.metadata
-    for key in ("document_id", "extraction_status", "reading_artifact", "reading_notes_kind"):
+    for key in ("document_id", "extraction_status", "reading_artifact", "reading_notes_kind", "evidence_role"):
         if source_metadata.get(key):
             data["metadata"][key] = str(source_metadata[key])[:240]
     notes = source_metadata.get("reading_notes")

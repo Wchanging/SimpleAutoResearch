@@ -4,7 +4,7 @@
 
 ## Guided entry
 
-`simple-ar start` asks for an implemented function (`survey` / `bug_fix` / prepared `reproduction`) and
+`simple-ar start` asks for an implemented function (`survey` / `bug_fix` / prepared `reproduction` / `writing` / `data_analysis`) and
 task inputs, saves normal TOML, and delegates to `research-session`.
 Options: `--kind`, `--goal`, `--document` (repeatable), `--sources materials|search`, `--fulltext`, `--max-cited-sources N` (optional report source bound),
 `--project`, `--validate`, `--allow` (repeatable), `--model`, `--interaction`,
@@ -15,6 +15,14 @@ Prepared reproduction additionally accepts `--hypothesis`, `--dataset`, `--expec
 repeatable `--metric`, `--cwd`, `--timeout-sec` and `--command ARGV...` (last).
 Local documents and an already prepared execution environment are required; it does not
 discover implementations or install dependencies. Other kinds reject these execution options.
+
+Material-based writing accepts repeatable `--material` for drafts, notes or result descriptions,
+optional `--document` for bibliographic sources, and `--template` (default `analysis_report`;
+`experiment` requests a paper-style draft). Inputs must be local Markdown/text/PDF.
+It extracts these inputs then writes, reviews, assembles and audits; it does not search,
+synthesize a research direction or execute an experiment. Supplied results are not independently
+verified measurements. Use `research-session --task-kind writing --topic "Explain my results" --material PATH --model env`
+for the same path without the setup wizard; its template option is `--report-template`.
 
 This page is a command lookup for SimpleAutoResearch. It intentionally focuses
 on command syntax, options, outputs, and short operational notes.
@@ -34,11 +42,23 @@ not silently translated to the canonical application.
 - Workflow concepts and artifacts: [Workflows And Artifacts](WORKFLOWS.md)
 - TOML schema and examples: [Configuration Reference](CONFIG_REFERENCE.md)
 
+### Existing data (no API)
+
+`start --kind data_analysis --goal "Describe results" --data-file results.csv --value-column score --observation-unit "one run" --yes`
+selects values explicitly. Optional `--group-column method` groups observations; repeat `--value-column`
+for separate metrics. `--data-mode values` keeps precomputed summaries unchanged and requires unique labels.
+`--data-missing reject|omit` defaults to reject; `--value-unit` records declared units;
+`--figure-width column|wide` defaults wide. Physical caps: `--data-max-mb 20`, `--data-max-figures 100`;
+overflow fails rather than silently dropping data. These options also work in `research-session`
+with `--task-kind data_analysis` and output `data_analysis`. UTF-8 CSV/TSV and homogeneous JSON records are supported.
+No model is used, including when global model settings exist. Resume with the printed session-root;
+to change frozen column/aggregation settings, create a new task. See [workflow](WORKFLOWS.md#describe-and-plot-existing-data-no-model-required).
+
 ## Command Overview
 
 | Command | Purpose |
 | --- | --- |
-| `simple-ar start` | Guided survey/code-fix/prepared-reproduction setup; saves editable configuration and enters the same research session. |
+| `simple-ar start` | Guided survey/code-fix/prepared-reproduction/material-writing/descriptive-data setup; saves editable configuration and enters the same research session. |
 | `simple-ar research-session` | Canonical entry for a bounded task-driven session; the accepted plan selects applicable research and execution steps. |
 | `simple-ar research-session-continue` | Retry one failed canonical explicit experiment. |
 | `simple-ar research-session-migrate` | Create a canonical successor from a read-only `session_manifest.v1`. |

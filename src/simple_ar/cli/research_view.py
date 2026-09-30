@@ -20,6 +20,8 @@ DESCRIPTIONS = {
     "plan": "Plan the next steps from the task, assets and constraints",
     "search": "Search literature providers and select sources",
     "document_ingest": "Fetch and extract available documents",
+    "data_ingest": "Freeze supplied data and explicit column settings",
+    "data_analysis": "Compute descriptive statistics and editable figures (no API calls)",
     "read": "Read documents and collect traceable evidence",
     "synthesize": "Synthesize source evidence; propose candidates only when requested",
     "summarize": "Save the research summary",
@@ -161,6 +163,10 @@ class ResearchConsole:
         table = Table("Artifact", "Location", header_style="bold cyan")
         for name, ref_name in _artifact_rows(view):
             table.add_row(name, Text(str(view.session_root / view.state_refs[ref_name].path)))
+        if "data_analysis" in view.state_refs:
+            directory = (view.session_root / view.state_refs["data_analysis"].path).parent
+            table.add_row("analysis report", Text(str(directory / "analysis.md")))
+            table.add_row("editable figures", Text(str(directory / "figures")))
         if table.row_count:
             self.console.print(table)
         else:
@@ -252,6 +258,8 @@ def method_validation_line(view) -> str | None:
 def _artifact_rows(view):
     refs = view.state_refs
     rows = [("summary", "summary")] if "summary" in refs else []
+    if "data_analysis" in refs:
+        rows.append(("data_analysis", "data_analysis"))
     work_plan = getattr(view, "work_plan", {})
     accepted = work_plan.get("accepted_plan") if isinstance(work_plan, dict) else None
     steps = accepted.get("steps", []) if isinstance(accepted, dict) else []

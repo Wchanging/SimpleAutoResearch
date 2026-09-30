@@ -258,6 +258,67 @@ def build_research_report_inputs(
     return context, memory
 
 
+def build_material_report_inputs(
+    *, topic: str, documents: DocumentBundle, documents_ref: ArtifactRef,
+    assets: Sequence[Any],
+) -> tuple[ReportContext, ReportMemory]:
+    """Use extracted user material directly, without invented research state.
+
+    Source roles come from the intake, not filenames or document contents.
+    External results remain assertions from their author; ingest is not an
+    independent experiment or a semantic verification of those assertions.
+    """
+    from simple_ar.research.sources.capability import provided_materials_result
+
+    roles = {str(Path(asset.locator).resolve()): asset.role for asset in assets}
+    paper_records = [record for record in documents.records
+                     if roles.get(str(Path(record.source_id).resolve())) in {"paper", "reference"}]
+    search = provided_materials_result(paper_records)
+    paper_handles = {handle.paper_id: handle for handle in _paper_source_handles(search)}
+    chunks_by_document: dict[str, list[Any]] = {}
+    for chunk in documents.chunks:
+        chunks_by_document.setdefault(chunk.document_id, []).append(chunk)
+    handles = []
+    for record in documents.records:
+        chunks = chunks_by_document.get(record.document_id, [])
+        # Spread bounded excerpts across the retained text rather than showing
+        # only the beginning. Full retained chunks stay available through tools.
+        count = min(6, len(chunks))
+        indices = [round(index * (len(chunks) - 1) / max(1, count - 1)) for index in range(count)]
+        handle = paper_handles.get(record.document_id) or SourceHandle(
+            handle=f"material:{record.document_id}", kind="material", title=record.title,
+            paper_id=record.document_id,
+        )
+        metadata = {**handle.metadata, "document_id": record.document_id,
+                    "extraction_status": record.extraction_status,
+                    "evidence_role": "bibliographic_source_not_independently_verified" if record.document_id in paper_handles else "user_supplied_unverified",
+                    "document_chunk_count": len(chunks),
+                    "evidence_passages": [{"chunk_id": chunks[index].chunk_id,
+                        "text": chunks[index].text[:1200], "truncated": len(chunks[index].text) > 1200}
+                        for index in indices],
+                    "evidence_passages_truncated": len(chunks) > count}
+        handles.append(handle.model_copy(update={"artifact": documents_ref.path,
+            "chunk_id": chunks[0].chunk_id if chunks else "", "summary": record.abstract,
+            "metadata": metadata}))
+    if not any(handle.metadata["document_chunk_count"] for handle in handles):
+        raise ReportProjectionError("Supplied writing material contains no readable text; inspect extraction diagnostics.")
+    limitations = ["No experiment, code verification, research synthesis or online search was performed in this writing task. "
+                    "Results and methods in user material are externally supplied assertions, not independently verified session measurements.",
+                    "Excerpts are bounded; use retained source chunks to check disputed claims. Extraction and review do not certify a paper's scientific correctness."]
+    unavailable = [record.title for record in documents.records if not chunks_by_document.get(record.document_id)]
+    if unavailable:
+        limitations.append("Unavailable material text: " + ", ".join(unavailable))
+    if paper_records:
+        limitations.append("Local source bibliographic metadata may be incomplete; do not invent authors, dates or publication venues.")
+    context = ReportContext(topic=topic, report_mode="supplied_materials", source_handles=handles,
+        papers=[paper.to_row() for paper in search.selected_papers],
+        citation_key_map=_citation_key_map(search.selected_papers),
+        evidence_summary=" ".join(limitations),
+        results={"evidence_origin": "user_supplied_unverified", "session_execution": "not_requested"})
+    return context, ReportMemory(objective=topic, report_mode=context.report_mode,
+                                 source_handles=handles, limitations=limitations)
+
+
 def build_literature_report_inputs(
     *,
     topic: str,

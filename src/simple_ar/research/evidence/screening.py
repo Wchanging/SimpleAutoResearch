@@ -129,6 +129,8 @@ def read_paper_notes_with_llm(
     papers: Sequence[Mapping[str, Any]],
     evidence_snippets: str = "",
     evidence_snippets_by_document: Mapping[str, str] | None = None,
+    topic: str = "",
+    problem_markdown: str = "",
     config: Mapping[str, object] | None = None,
     emit: EmitMessage | None = None,
 ) -> list[dict[str, Any]]:
@@ -149,6 +151,8 @@ def read_paper_notes_with_llm(
                     if evidence_snippets_by_document is not None
                     else evidence_snippets
                 ),
+                topic=topic,
+                problem_markdown=problem_markdown,
             ),
             label=_paper_id(paper, index),
         )
@@ -162,6 +166,8 @@ def read_paper_notes_with_llm(
         f"Calling LLM for {len(requests)} paper note(s) with {workers} worker(s).",
     )
     responses = client.ask_json_many(requests, max_workers=workers)
+    if len(responses) != len(requests):
+        raise ValueError("Paper note batch returned an incomplete response set; refusing to pair truncated results with sources.")
     return [
         _normalize_paper_note(paper, response, index)
         for index, (paper, response) in enumerate(
@@ -779,13 +785,17 @@ def _normalize_paper_note(
     index: int,
 ) -> dict[str, Any]:
     row = response if isinstance(response, Mapping) else {}
+    expected_id = _paper_id(paper, index)
+    returned_id = _text_field(row, "paper_id")
+    if returned_id and returned_id != expected_id:
+        raise ValueError(f"Paper note identity mismatch: expected {expected_id!r}, received {returned_id!r}.")
     limitation_text = _text_field(row, "limitation")
     limitations = _string_list_field(row, "limitations")
     if limitation_text and limitation_text not in limitations:
         limitations.append(limitation_text)
     relation = _text_field(row, "relation_to_topic") or _text_field(row, "relevance")
     return {
-        "paper_id": _text_field(row, "paper_id") or _paper_id(paper, index),
+        "paper_id": expected_id,
         "title": _text_field(row, "title") or str(paper.get("title") or ""),
         "evidence_role": _text_field(row, "evidence_role") or "other",
         "one_sentence_summary": _text_field(row, "one_sentence_summary")

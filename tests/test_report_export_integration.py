@@ -25,8 +25,8 @@ class PortableExportIntegrationTests(unittest.TestCase):
                 '<text x="20" y="50" font-size="20">Portability fixture, not research data</text>'
                 '<path d="M20 130 L360 70" stroke="blue" fill="none"/></svg>', encoding="utf-8")
             (original / "report_body.md").write_text(
-                '# Portable export check\n\n## Abstract\n\nRenderer integration fixture.\n\n'
-                '## Result\n\nFixture citation [@p0]. Inline math \\(1-\\alpha\\).\n\n'
+                '# Portable export α check\n\n## Abstract\n\nRenderer integration fixture, β ≤ Γ.\n\n'
+                '## Result\n\nFixture citation [@p0]. Inline math \\(1-\\alpha\\). Bare α, ∞ and 3 µm; `δ_parameter`.\n\n'
                 '![Fixture plot](plot.svg)\n\n[External evidence](../measurements.json).\n', encoding="utf-8")
             bibliography = '@misc{p0, title={Explicitly incomplete metadata fixture}}\n'
             (original / "references.bib").write_text(bibliography, encoding="utf-8")

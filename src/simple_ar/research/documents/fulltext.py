@@ -14,7 +14,7 @@ from simple_ar.research.contracts import DocumentRecord, FulltextHint, SourcePla
 
 
 PDF_SUFFIX = ".pdf"
-TEXT_SUFFIXES = {".md", ".txt"}
+TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 HTML_SUFFIXES = {".html", ".htm"}
 _FETCH_TIMEOUT_SEC = 20
 

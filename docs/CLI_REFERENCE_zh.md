@@ -2,11 +2,32 @@
 
 [English version](CLI_REFERENCE.md)
 
+## 已有材料直接写作
+
+`simple-ar start --kind writing --goal "写一份诚实的分析报告" --material notes.md`
+使用已有草稿、笔记或结果说明；可重复 `--material`，论文来源另用 `--document`。
+输入支持本地 Markdown、文本及 PDF；默认 `analysis_report`，用 `--template experiment`
+请求论文体草稿。材料提取后直接写作、审阅、装配和审计，不搜索、不造研究综合、不执行实验。
+用户提供的数字与方法不等于本会话独立验证；审计状态也不等于发表质量。
+高级入口为 `research-session --task-kind writing --topic "说明已有结果" --material PATH --model env`，模板选项为
+`--report-template`。恢复仍使用已打印的 session-root，不重新启动引导。
+
 `start --fulltext --sources search` 明确允许远程全文抓取与 PDF 下载；不加时使用摘要和已提供的本地材料，启动前会显示该范围。全文获取失败不会冒充全文阅读。
+
+## 已有数据分析（无需 API）
+
+`start --kind data_analysis --goal "描述结果" --data-file results.csv --value-column score --observation-unit "一次运行" --yes`
+明确选数值列。`--group-column method` 可选分组；`--value-column` 可重复，指标分别绘图。
+`--data-mode values` 保留已有汇总值，不再次平均，且要求唯一标签；默认 `observations` 做描述统计。
+`--data-missing reject|omit` 默认 reject；`--value-unit` 记录单位；`--figure-width column|wide` 默认 wide。
+物理上限 `--data-max-mb 20`、`--data-max-figures 100`，超出报错而非丢数据，可明确调整。
+高级入口同样支持这些参数及 `--task-kind data_analysis`、输出 `data_analysis`。
+支持 UTF-8 CSV/TSV、同构 JSON records；即便配置了全局模型也不调用 API。
+按打印的 session-root 恢复；改变已固化的列/聚合设置需要新任务。更多见[工作流](WORKFLOWS_zh.md#已有数据分析与绘图无需模型)。
 
 ## 引导入口
 
-`simple-ar start` 询问已实现功能（`survey` / `bug_fix` / 准备好的 `reproduction`）及任务输入，保存普通 TOML，
+`simple-ar start` 询问已实现功能（`survey` / `bug_fix` / 准备好的 `reproduction` / `writing` / `data_analysis`）及任务输入，保存普通 TOML，
 再交给 `research-session`。选项：`--kind`、`--goal`、可重复的 `--document`、
 `--sources materials|search`、`--fulltext`、调研可选 `--max-cited-sources N`（最终引用来源上限）、`--project`、`--validate`、可重复的 `--allow`、
 `--model`、`--interaction`、`--output-root`、`--prepare-only`、`--yes`。
@@ -34,7 +55,7 @@ session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使
 
 | 命令 | 用途 |
 | --- | --- |
-| `simple-ar start` | 引导设置调研/代码修复/固定协议复现，保存可编辑配置并进入同一 research-session。 |
+| `simple-ar start` | 引导设置调研/代码修复/固定协议复现/材料写作/描述数据分析，保存可编辑配置并进入同一 research-session。 |
 | `simple-ar research-session` | 有界任务驱动 session 的正式入口；accepted plan 选择适用的研究与执行步骤。 |
 | `simple-ar research-session-continue` | 重试 canonical 显式实验中的技术失败。 |
 | `simple-ar research-session-migrate` | 从只读的 `session_manifest.v1` 创建 canonical 后继 session。 |

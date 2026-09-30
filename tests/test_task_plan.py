@@ -32,6 +32,17 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class TaskPlanTests(unittest.TestCase):
+    def test_material_writing_plan_requires_no_fake_synthesis_or_execution(self):
+        request = TaskPlanRequest(task_kind="writing", goal="Write from existing results", request_text="Write from existing results",
+            requested_outputs=("report",), config={"research_materials_only": True, "research_local_documents": ["notes.md"]})
+        plan = build_task_plan(request)
+        self.assertEqual([step.action for step in plan.steps], ["document_ingest", "report_write", "report", "report_audit"])
+        self.assertEqual(TaskPlanResult.from_handoff_dict(plan.to_handoff_dict()), plan)
+        for changes in ({"config": {}}, {"execution": {"command": ["python", "run.py"]}},
+                        {"requested_outputs": ("report", "experiments")}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                build_task_plan(replace(request, **changes))
+
     def test_prepared_reproduction_uses_evidence_and_fixed_protocol_not_innovation(self):
         request = TaskPlanRequest(task_kind="reproduction", goal="Reproduce one source result", request_text="Reproduce one source result",
             requested_outputs=("experiments", "report"), config={"research_materials_only": True, "research_local_documents": ["paper.pdf"]},

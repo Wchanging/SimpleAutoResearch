@@ -10,7 +10,7 @@ and PDF downloads using the existing document pipeline. Availability and extract
 remain best-effort; missing full text is recorded, not treated as read. Local
 materials mode never enables network retrieval through this option.
 
-`simple-ar start` offers `survey`, `bug_fix` and prepared `reproduction`, generating ordinary research
+`simple-ar start` offers `survey`, `bug_fix`, prepared `reproduction`, material-based `writing` and descriptive `data_analysis`, generating ordinary research
 TOML and (for code) CodeTask TOML plus task text. The same default/TOML/explicit
 CLI precedence applies; this is not a second configuration schema.
 
@@ -56,6 +56,47 @@ Missing non-interactive input fails instead of waiting. Declining the final
 confirmation retains saved inputs. After execution begins, resume the printed
 session via `research-session --session-root PATH --model env`, not another `start`.
 
+## Writing from supplied material
+
+`start --kind writing --goal "Explain my existing results" --material notes.md --prepare-only`
+saves ordinary TOML: `task.kind = "writing"`, `task.outputs = ["report"]`,
+`assets.materials = ["notes.md"]`, `model.name = "env"`.
+`--document`/`assets.papers` identifies a bibliographic source, not a draft;
+repeat `--material` for additional drafts, notes or result descriptions.
+Paths resolve from the configuration directory. Supported inputs are Markdown, text and PDF;
+raw tables are not automatically treated as verified experiment results. Execution configuration
+is rejected. Extracted text is persisted and reused on resume; search, synthesis and experiments
+are not prerequisites. Supplied results remain unverified external assertions.
+Guided writing defaults to `report.template = "analysis_report"` and `report.document_review = true`.
+Use `template = "experiment"` for an honest paper-style draft; missing evidence remains explicit.
+Local bibliographic metadata may be incomplete; authors, dates and venues must not be invented.
+
+## Existing data: descriptive analysis
+
+```toml
+[task]
+goal = "Describe supplied measurements"
+kind = "data_analysis"
+outputs = ["data_analysis"]
+
+[analysis]
+file = "observations.csv"
+value_columns = ["score"]
+group_column = "method"
+observation_unit = "one run"
+value_unit = "seconds"
+```
+
+`file` resolves relative to this TOML; `value_columns` and nonempty `observation_unit` are required.
+`group_column` and `value_unit` default empty (ungrouped / unknown unit). Optional fields:
+`mode = "observations"` computes count/mean/sample std, or `"values"` preserves supplied summaries
+with unique labels; `missing = "reject"` or explicitly `"omit"`; `width = "wide"` or `"column"`;
+physical input/output limits `max_mb = 20`, `max_figures = 100` (positive, adjustable).
+Missing values are never zero-filled; nonfinite/nonnumeric values fail. No inferred error bars or
+scientific verdict. The task accepts only its descriptive output, not execution or literature options.
+Model connections are not used or required. Settings and input bytes freeze at ingest; changing
+them requires a new task, while resume reuses completed snapshots. See [workflow](WORKFLOWS.md).
+
 ## Global `.env`
 
 `.env` is loaded by the LLM integration for credentials, endpoint, model and
@@ -86,7 +127,7 @@ File-relative paths resolve from the TOML directory; command argv remains litera
 
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
-| `[task]` | `goal`, `kind`, `outputs`, `output_root`, `selected_idea_id` | `goal` is required for a new session. `kind` defaults to `auto` and accepts `auto`, `survey`, `bug_fix`, `measurement`, `reproduction`. `outputs` is optional except that `measurement` requires `["experiments"]` and `reproduction` requires `["experiments"]` or `["experiments", "report"]`. Other explicit outputs use `summary`, `report`, `experiments`, and/or `bug_fix`. `output_root` defaults to `runs/research-session`; `selected_idea_id` is optional and must select an existing grounded candidate. |
+| `[task]` | `goal`, `kind`, `outputs`, `output_root`, `selected_idea_id` | New sessions require `goal`. Kinds: `auto` (default), `survey`, `bug_fix`, `measurement`, `reproduction`, `writing`, `data_analysis`. `measurement` requires `["experiments"]`; `reproduction` includes `experiments` and optionally `report`; `writing` only accepts `report`; `data_analysis` only accepts its same-name output. Other outputs: `summary`, `report`, `experiments`, `bug_fix`. `output_root` defaults `runs/research-session`. Optional `selected_idea_id` selects an existing grounded candidate. |
 | `[model]` | `name`, `feasibility_review_model`, `max_output_tokens` | A file config defaults `name` to `env`, which reads `SIMPLE_AR_MODEL`; `name = ""` selects deterministic processing. Optional `feasibility_review_model` routes only the source-backed implementation feasibility audit to another model on the same provider and session budget; it is saved for resume and cannot be changed within an existing session. `max_output_tokens` is optional. Credentials stay in the environment. |
 
 An independent feasibility review can challenge a candidate's mechanism before
@@ -101,9 +142,9 @@ reuse the saved choice).
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
 | `[research]` | `providers`, `queries`, `max_results`, `max_chunks`, `max_pdf_pages`, `read_max_shortlist`, `idea_limit`, `cache_dir` | Lists are optional; CLI defaults are `max_results = 10`, `max_chunks = 300`, `idea_limit = 3`. `max_pdf_pages` is an optional positive local-PDF extraction ceiling (default `20`); changing it requires a new session because existing extracted evidence is frozen. `read_max_shortlist` is optional (default: all papers up to 24); explicitly supplied papers are retained within this reading limit, and an over-limit request fails visibly. `cache_dir` is optional and is not a safe resume-change because it is not persisted. |
-| `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `max_fulltext_documents`, `max_pdf_mb`, `materials_only` | These switches default false and optional caps are unset. `materials_only = true` requires/uses `[assets].papers` and disables search; it does not disable model reading. Guided `start --fulltext --sources search` enables PDF cache retention with a 4-document, 20 MiB-per-PDF limit; expert TOML may adjust the positive caps. Remote PDFs require both PDF permission and cache retention. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
+| `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `max_fulltext_documents`, `max_pdf_mb`, `materials_only` | These switches default false and optional caps are unset. `materials_only = true` consumes supplied local inputs (`assets.papers`, or writing `assets.materials`) and disables search; it does not disable model reading. Writing always uses local-only scope. Guided `start --fulltext --sources search` enables PDF cache retention with a 4-document, 20 MiB-per-PDF limit; expert TOML may adjust the positive caps. Remote PDFs require both PDF permission and cache retention. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
 | `[research]` | `max_iterations`, `interaction` | `max_iterations` defaults to `1`; `0` stops after the first analysis. `interaction` defaults to `checkpoints` for a new CLI session and accepts `assisted`, `checkpoints`, or `autonomous`. Critical facts and permissions block every mode. |
-| `[assets]` | `papers` | Optional list of local Markdown/text/PDF paths. Paths resolve from the TOML directory and are read-only inputs. |
+| `[assets]` | `papers`, `materials` | Read-only local Markdown/text/PDF paths, resolved from the TOML directory. `papers` identifies bibliographic sources; `materials` is for `writing` drafts, notes and external result descriptions, not independently measured metrics. Writing requires at least one input and rejects duplicate/dual-role files. |
 
 Explicitly supplied local PDFs are parsed best-effort (the default parser reads
 at most 20 pages unless `max_pdf_pages` is set) even when `use_fulltext = false`; that flag governs remote

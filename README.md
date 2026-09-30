@@ -26,6 +26,8 @@ do not treat public access to the repository as an open-source license.
 | Your task | What you provide | What to inspect afterward |
 | --- | --- | --- |
 | Explore a research direction | A question, scope, and model access | Selected sources, reading notes, synthesis, and a Markdown report |
+| Describe and plot existing data | CSV/TSV or JSON records, selected columns and what a row represents | Counts, means/sample standard deviations or unchanged summary values, editable SVGs and rebuilding inputs; no API needed |
+| Write from existing material | Notes, drafts or result descriptions, optional reference papers and model access | Reviewed report or honest paper-style draft; external results remain unverified |
 | Improve or repair a codebase | A project, task, and validation commands | An isolated edited workspace, change records, reviews, and validation results |
 | Export an existing report | Saved report artifacts and optional local TeX tools | Editable ACM manuscript, bibliography, figures, and compilation diagnostics |
 | Check a paper conclusion under a prepared protocol | Local paper, ready environment, fixed command and expected outcome | Source evidence, measured results and a bounded reproduction report; no innovation required |
@@ -96,7 +98,7 @@ No hand-written configuration is needed for a first custom task:
 uv run simple-ar start
 ```
 
-Choose `survey`, `bug_fix` or prepared `reproduction`, describe the goal and source/edit scope. The short
+Choose `survey`, `bug_fix`, prepared `reproduction`, `writing` or `data_analysis`, describe the goal and relevant inputs. The short
 guided setup saves ordinary TOML under `runs/assistant/`, then uses the same
 resumable session. Use `--prepare-only` to save without API calls. This is not
 yet free-form conversation, external Agent execution or arbitrary paper reproduction.

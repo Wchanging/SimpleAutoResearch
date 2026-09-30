@@ -24,6 +24,43 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_writing_resume_keeps_explicit_paper_style_without_authorizing_execution(self):
+        from simple_ar.cli.main import _report_config_overrides
+
+        args = SimpleNamespace(command="research-session", report_template="experiment",
+                               _explicit_resume_destinations={"report_template"})
+        app = SimpleNamespace(services=SimpleNamespace(config={
+            "research_task_kind": "writing", "report": {"template": "analysis_report"}}))
+        self.assertEqual(_report_config_overrides(args, app), {"template": "experiment"})
+        app.services.config["report"]["template"] = "experiment"
+        self.assertEqual(_report_config_overrides(args, app), {})
+        app.services.config["research_task_kind"] = "survey"
+        self.assertEqual(_report_config_overrides(args, app), {"template": "survey"})
+
+    def test_writing_cli_preserves_explicit_paper_template_and_material_role(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            material = Path(tmp) / "external notes.md"
+            material.write_text("User notes", encoding="utf-8")
+            app = MagicMock()
+            view = SimpleNamespace(session_root=Path(tmp) / "session", status="completed", status_reason="",
+                                   next_action=None, state_refs={}, attempts=())
+            app.view.return_value = view
+            app.advance.return_value = view
+            app.services = SimpleNamespace(max_attempts=1)
+            stream = io.StringIO()
+            with patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()), \
+                 patch("simple_ar.app.research_application.create_session", return_value=app) as creator, \
+                 contextlib.redirect_stdout(stream):
+                main(["research-session", "--topic", "Write honestly", "--task-kind", "writing",
+                      "--material", str(material), "--report-template", "experiment", "--output-root", str(Path(tmp) / "sessions")])
+            brief = creator.call_args.args[0]
+            services = creator.call_args.kwargs["services"]
+            self.assertEqual(brief.requested_outputs, ("report",))
+            self.assertEqual(brief.asset_requests[0]["role"], "material")
+            self.assertEqual(services.config["report"]["template"], "experiment")
+            self.assertNotIn("execution", services.config)
+            self.assertIn("Implementation: not requested (supplied-material writing)", stream.getvalue())
+
     def test_code_task_init_same_second_reuses_unique_directory_owner(self):
         from datetime import datetime
 

@@ -2,6 +2,54 @@
 
 [English version](WORKFLOWS.md)
 
+## 已有数据分析与绘图（无需模型）
+
+```bash
+uv run simple-ar start --kind data_analysis --goal "描述测量结果" \
+  --data-file ./observations.csv --value-column score --group-column method \
+  --observation-unit "一次运行" --interaction autonomous --yes
+```
+
+明确选择列与每行含义，不猜 ID/指标。默认 `observations` 分组计算 count/mean/sample std；
+已有均值等汇总表用 `--data-mode values`，分组标签必须唯一，不再次平均、不自动造误差条。
+缺失默认拒绝，`--data-missing omit` 才按列省略并报告数量；非有限值、非数值、重复列、空表、
+不规则行、嵌套 JSON 都明确失败。输入支持 UTF-8 CSV/TSV、同构 JSON records。
+
+沿同一 SessionController 先固化输入及设置，再生成 `analysis.json`、`analysis.md`、数据副本与
+可编辑 SVG。不调用 API，不训练，也不伪造 experiment 状态。计算完成不证明采集、单位、独立性、
+显著性或因果关系；分享前检查数据敏感性。物理限制默认 20 MiB 输入、100 页 SVG；
+`--data-max-mb`、`--data-max-figures` 可明确调整，超出报错而非截掉数据。
+不同指标分轴，类别分页而非截掉。`--figure-width column|wide` 为通用 3.5/7 英寸，不保证会议版式。
+数值与视觉检查分别记录，图的初始视觉状态是 `not_performed`。
+
+恢复使用 `research-session --session-root PATH`，原文件更新/删除不替换已固化数据。
+交付目录可以搬迁，在安装项目包的环境中执行 `python -m simple_ar.result_analysis.table analysis.json`
+重建 SVG；计算记录不一致则拒绝重建，不宣称全量文件完整性认证。后续写作可使用 `analysis.md`；
+跨会话图附件自动连接和复杂统计仍待补齐。
+
+服务器数值验收：`python scripts/validate_table_nist.py --output-root runs/nist-NEW`。
+对照两份 NIST StRD 官方认证数值，评价器另用 Decimal 独立计算；仅验证算术和 CLI 交付，
+不算 Agent/论文复现/完整 NIST 成绩。下载失败时可将未修改的公开 `.dat` 放到该目录的 `inputs/` 后继续。
+
+## 从已有材料直接写作
+
+```bash
+uv run simple-ar start --kind writing --goal "说明已有结果、条件和局限" \
+  --material ./notes.md --interaction autonomous --yes
+```
+
+草稿、笔记、结果说明用可重复的 `--material`；另有参考论文则用 `--document`。
+支持 Markdown/text/PDF，不把原始数值表当成已验证的实验结果。提取文本后直接进入共享的
+Writer、Reviewer、装配和审计，不需要检索、创新候选、空综合产物或重新实验。
+用户提供的结果仍是外部陈述，不会因此成为本会话独立测量。
+
+默认输出简短分析报告；`--template experiment` 请求诚实的论文体草稿，不授权实验，
+也不保证论文质量。本地论文书目信息可能不完整，需核对，不能编造。
+引导时检查模板与审阅文件；专家自定义模板/criteria 路径通过普通研究 TOML 设置。
+
+失败或中断后用打印的路径执行 `research-session --session-root PATH --model env`。
+复用已保存的提取文本，修改原文件不会悄悄替换当前依据；这不是跨会话记忆服务。
+
 本文说明 SimpleAutoResearch 内部在做什么：任务驱动能力、artifact 归属、恢复边界和模块职责。它不重复完整文件手册；具体命令和文件树见 [使用与配置](USAGE_zh.md)，命令参数见 [CLI 参考](CLI_REFERENCE_zh.md)，TOML 字段见 [配置参考](CONFIG_REFERENCE_zh.md)。
 
 ## 任务驱动的执行与恢复
@@ -12,6 +60,8 @@
 只读来源的调研和固定协议复现，综合只整理证据，不凭空生成创新候选；任务明确要求候选评估/设计时
 仍采用研究综合。阅读笔记是模型解释，不冒充原文。Writer、逐节 Reviewer 和整篇 Reviewer
 接收同一份有标识、有界的原文片段与来源可读状态；截断显式标记，片段没有不等于原论文没有。
+逐篇笔记也接收任务目标，且与来源证据分开。默认保留入库块的长度，进一步缩短须标记；
+核对笔记身份和声明引用是否属于当前文档。这防止串源，不保证主张的语义正确，也不将有限选段当作全文核查。
 报告输入还保留原始任务和材料可读范围（正文已解析，或仅有元数据/摘要）。显式设置
 引用来源上限时，不提前截断检索和阅读候选，终稿核对不同引用数。未解决的重大事实性审阅意见或超出
 显式上限会让审计失败，失败产物仍可检查，会话暂停交付；普通风格意见仍是警告。
@@ -176,6 +226,10 @@ uv run simple-ar research-session-continue \
 已组装报告可独立使用 `report-export`：保存的引用键正文、文献和图转换为可编辑 ACM
 演示工程，不重复阅读、写作或测量。导出/编译状态与内容审计状态分别记录；命令见
 [CLI 参考](CLI_REFERENCE_zh.md#simple-ar-report-export)。
+
+pdfLaTeX 演示对常见希腊/数学 Unicode 符号采用导出层固定声明，不修改原 Markdown。
+这不等于通用多语言字体支持；不支持的字符或缺 TeX 包时，保留源工程和编译诊断，
+不悄悄改正文，也不冒称 PDF 交付成功。
 
 历史 session 可检查和读取，但不再由第二套 Writer/report/audit 执行器续写。
 `build_research_session_report_inputs()` 和 `build_code_task_report_inputs()` 只投影已有证据，

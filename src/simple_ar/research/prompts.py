@@ -118,20 +118,28 @@ def research_planner_user_prompt(
     )
 
 
-def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "") -> str:
+def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topic: str = "", problem_markdown: str = "") -> str:
     """Build the reading prompt for a single paper metadata record.
 
     Args:
         paper_json: JSON text containing one paper metadata object.
         evidence_snippets: Optional source-labelled retrieval snippets from the
             current run.
+        topic: User's task focus, not evidence of a paper's claims.
+        problem_markdown: User's requested scope and constraints, kept separate
+            from retrieved source text.
 
     Returns:
         Prompt requesting one structured paper note.
     """
     evidence_block = _evidence_block(evidence_snippets)
+    task_context = (
+        "Task context (user request, not source evidence):\n"
+        f"Topic: {topic}\n{problem_markdown}\n\n"
+        if topic.strip() or problem_markdown.strip() else ""
+    )
     return (
-        "Given one paper metadata record as JSON, write one synthesis-ready "
+        task_context + "Given one paper metadata record as JSON, write one synthesis-ready "
         "Paper Brief as a JSON object. Use only the supplied metadata and "
         "source snippets. If evidence is thin, write `unknown` or an empty "
         "list instead of inventing details.\n\n"

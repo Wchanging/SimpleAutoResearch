@@ -167,6 +167,8 @@ _CAPABILITY_OUTPUTS = {
     "plan": ("plan", "research_plan", "research_plan.v1"),
     "search": ("search", "search_result", "search_handoff.v1"),
     "document_ingest": ("documents", "document_bundle", "document_bundle.v1"),
+    "data_ingest": ("data_input", "table_input", "table_input.v1"),
+    "data_analysis": ("data_analysis", "table_analysis", "table_analysis.v1"),
     "read": ("read", "read_result", "read_result.v1"),
     "synthesize": ("synthesis", "synthesis_result", "synthesis_result.v1"),
     "assess_ideas": ("assessment", "idea_assessment", "idea_assessment.v1"),
@@ -1103,6 +1105,12 @@ class ResearchApplication:
 
         refs = self.controller.manifest.state_refs
         documents = self._load_documents()
+        if self._task_kind() == "writing":
+            from simple_ar.report.projection import build_material_report_inputs
+            return build_material_report_inputs(
+                topic=self.brief.objective or self.brief.request_text,
+                documents=documents, documents_ref=refs["documents"], assets=self.assets,
+            )
         search = self._load_search(documents=documents)
         synthesis = self._load_synthesis()
         read = self._load_read(documents=documents)
@@ -1275,7 +1283,7 @@ class ResearchApplication:
                 self.services.llm_client is not None
                 and planner_mode != "deterministic"
                 and not protocol_accepted
-                and self._task_kind() not in {"measurement", "reproduction"}
+                and self._task_kind() not in {"measurement", "reproduction", "writing", "data_analysis"}
             )
             task_plan = TaskPlanRequest(
                 task_kind=self._task_kind(),
@@ -1307,9 +1315,15 @@ class ResearchApplication:
                     use_llm=use_llm,
                     llm_client=self.services.llm_client,
                     task_plan_request=task_plan,
-                    task_plan_only=self._task_kind() in {"bug_fix", "measurement"} or "plan" in self.controller.manifest.state_refs,
+                    task_plan_only=self._task_kind() in {"bug_fix", "measurement", "data_analysis"} or "plan" in self.controller.manifest.state_refs,
                 ), self._input_refs("brief", "assets", "runtime_config")
             )
+        if action == "data_ingest":
+            return self._execute("data_ingest", "data_input", self._effective_config()["data_analysis"],
+                                 self._input_refs("brief", "assets", "runtime_config"))
+        if action == "data_analysis":
+            ref = self.controller.manifest.state_refs["data_input"]
+            return self._execute("data_analysis", "data_analysis", ref, (ref,))
         if action == "summarize":
             state_refs = tuple(
                 (name, ref)
@@ -3718,6 +3732,8 @@ class ResearchApplication:
                     "and is not connected yet."
                 )
                 gaps.append({"kind": "incompatible", "item": output, "reason": reason})
+            elif output == "data_analysis":
+                status, reason = "pending", "Descriptive data analysis and figures are pending."
             elif output in {"research_summary", "summary"}:
                 status, reason = "pending", "The evidence-backed summary has not been generated."
             elif output in _ASSESSMENT_OUTPUTS:
@@ -4219,6 +4235,10 @@ class ResearchApplication:
             config, delivery = resolve_research_only_delivery(config, source_count=available_sources)
             memory.template = config.template
             memory.key_decisions.append(json.dumps(delivery, ensure_ascii=False))
+        elif report_context.report_mode == "supplied_materials":
+            if config.template in {"", "auto"}:
+                config = config.model_copy(update={"template": "analysis_report"})
+            memory.template = config.template
         template = load_report_template_bundle(report_mode=report_context.report_mode, config=config)
         return report_context, memory, config, template, delivery
 
@@ -4612,7 +4632,7 @@ class ResearchApplication:
         bug_intents = {"bug", "bug_fix", "bug_repair", "repair"}
         if configured in bug_intents:
             return "bug_fix"
-        if configured in {"measurement", "reproduction"}:
+        if configured in {"measurement", "reproduction", "writing", "data_analysis"}:
             return configured
         if any(str(item).strip().lower() in bug_intents for item in self.brief.intents):
             return "bug_fix"
@@ -4723,6 +4743,10 @@ class ResearchApplication:
 
     def _plan_config(self) -> dict[str, object]:
         config, local_documents = self._execution_config(), self._local_documents()
+        if self._task_kind() == "writing":
+            config["research_materials_only"] = True
+            config["research_sources"] = ["local_files"]
+            config["research_allow_pdf_download"] = False
         if local_documents:
             config.setdefault("research_sources", ["local_files"])
             config["research_local_documents"] = [str(path) for path in local_documents]
@@ -5010,7 +5034,7 @@ class ResearchApplication:
         return tuple(dict.fromkeys(
             Path(asset.locator) for asset in self.assets
             if asset.availability != "missing"
-            and asset.role in {"paper", "document", "reference"}
+            and asset.role in {"paper", "document", "reference", "material"}
             and Path(asset.locator).is_file()
             and Path(asset.locator).suffix.lower() in {".md", ".markdown", ".txt", ".pdf"}
         ))

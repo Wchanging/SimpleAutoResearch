@@ -6,6 +6,7 @@ command and expected outputs. Run commands from the repository root.
 | Case | Goal | Entry and preparation |
 | --- | --- | --- |
 | [Survey](survey/README.md) | Literature survey, no training | `research-session --config examples/survey/research.toml`; configure model access |
+| [Data analysis](data-analysis/README.md) | Descriptive statistics and editable plots of existing data | `research-session --config examples/data-analysis/research.toml`; no model, GPU or plotting library |
 | [Conformal reproduction](conformal_reproduction/README.md) | Low-cost, fixed-protocol synthetic check of a published conclusion | Download the supplied paper, then run the checked-in research config; standard-library simulation, no GPU |
 | [Continual learning](continual_learning/README.md) | Mammoth/CIFAR-100 research improvement | Prepare the case-declared project, data and split under `runs/assets`, then run the checked-in research config |
 | [Digits MLP](code_task_digits_mlp/README.md) | Small CPU model-code improvement | Included project/task/config; requires NumPy and scikit-learn |

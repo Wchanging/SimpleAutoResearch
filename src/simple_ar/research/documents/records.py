@@ -10,7 +10,7 @@ from simple_ar.research.contracts import DocumentRecord, ExtractionStatus, Sourc
 from simple_ar.research.documents.fulltext import fulltext_hints_for_paper
 
 
-TEXT_SUFFIXES = {".md", ".txt"}
+TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 
 
 def build_document_records(

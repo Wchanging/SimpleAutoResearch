@@ -32,7 +32,12 @@ FIELDS = {
                   "max_iterations": ("max_research_iterations", int),
                  "keep_raw_pdf": ("research_keep_raw_pdf", bool),
                  "interaction": ("interaction", str)},
-    "assets": {"papers": ("local_document", list)},
+    "assets": {"papers": ("local_document", list), "materials": ("material", list)},
+    "analysis": {"file": ("data_file", str), "value_columns": ("value_column", list),
+                 "group_column": ("group_column", str), "observation_unit": ("observation_unit", str),
+                 "value_unit": ("value_unit", str), "mode": ("data_mode", str),
+                 "missing": ("data_missing", str), "width": ("figure_width", str), "max_mb": ("data_max_mb", int),
+                 "max_figures": ("data_max_figures", int)},
     "execution": {"command": ("command_argv", list), "cwd": ("cwd", str),
                   "timeout_sec": ("timeout_sec", int), "code_task_config": ("code_task_config", str),
                   "primary_metric": ("primary_metric", str), "metrics": ("metric", list),
@@ -44,9 +49,9 @@ FIELDS = {
                "max_cited_sources": ("report_max_cited_sources", int),
                "figures": ("report_figures", dict)},
 }
-PATHS = {"output_root", "cache_dir", "cwd", "code_task_config", "local_document"}
-LIST_FLAGS = {"providers": "--provider", "queries": "--query", "local_document": "--local-document",
-              "metric": "--metric", "metric_direction": "--metric-direction"}
+PATHS = {"output_root", "cache_dir", "cwd", "code_task_config", "local_document", "material", "data_file"}
+LIST_FLAGS = {"providers": "--provider", "queries": "--query", "local_document": "--local-document", "material": "--material",
+              "metric": "--metric", "metric_direction": "--metric-direction", "value_column": "--value-column"}
 
 
 def research_defaults(
@@ -122,10 +127,16 @@ def research_defaults(
             for key, value in allowances.items()
         ):
             raise ValueError("continuation.remaining must map resource names to numeric amounts")
-    if "outputs" in defaults and (not defaults["outputs"] or set(defaults["outputs"]) - {"summary", "report", "experiments", "bug_fix"}):
-        raise ValueError("task.outputs must contain summary, report, experiments and/or bug_fix")
-    if defaults.get("task_kind", "auto") not in {"auto", "survey", "bug_fix", "measurement", "reproduction"}:
-        raise ValueError("task.kind must be auto, survey, bug_fix, measurement or reproduction")
+    if "outputs" in defaults and (not defaults["outputs"] or set(defaults["outputs"]) - {"summary", "report", "experiments", "bug_fix", "data_analysis"}):
+        raise ValueError("task.outputs must contain summary, report, experiments, bug_fix and/or data_analysis")
+    if defaults.get("task_kind", "auto") not in {"auto", "survey", "bug_fix", "measurement", "reproduction", "writing", "data_analysis"}:
+        raise ValueError("task.kind must be auto, survey, bug_fix, measurement, reproduction, writing or data_analysis")
+    if defaults.get("task_kind") == "writing" and "outputs" in defaults and defaults["outputs"] != ["report"]:
+        raise ValueError('task.kind=writing requires task.outputs = ["report"]')
+    if "analysis" in data and defaults.get("task_kind") != "data_analysis":
+        raise ValueError("analysis configuration requires task.kind=data_analysis")
+    if defaults.get("task_kind") == "data_analysis" and defaults.get("outputs", ["data_analysis"]) != ["data_analysis"]:
+        raise ValueError('task.kind=data_analysis requires only data_analysis in task.outputs')
     if defaults.get("task_kind") == "reproduction" and (
         "experiments" not in defaults.get("outputs", []) or set(defaults.get("outputs", [])) - {"experiments", "report"}
     ):

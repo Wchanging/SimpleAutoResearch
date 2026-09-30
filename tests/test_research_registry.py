@@ -17,6 +17,8 @@ class ResearchCapabilityRegistryTests(unittest.TestCase):
                 "plan",
                 "search",
                 "document_ingest",
+                "data_ingest",
+                "data_analysis",
                 "read",
                 "synthesize",
                 "assess_ideas",

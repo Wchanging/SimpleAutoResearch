@@ -15,6 +15,18 @@ from simple_ar.research.evidence.reader import (
 
 
 class ReadBoundaryTests(unittest.TestCase):
+    def test_default_overview_keeps_ingest_sized_chunks_and_labels_further_clipping(self) -> None:
+        bundle = self._bundle(with_chunks=False)
+        bundle.chunks.append(TextChunk(chunk_id="complete", document_id="openalex-p1",
+            text="x" * 1000 + " A late qualification of the main conclusion."))
+        self.assertIn("late qualification", format_bundle_evidence_snippets(bundle))
+        clipped = format_bundle_evidence_snippets(bundle, max_chars=900)
+        self.assertNotIn("late qualification", clipped)
+        self.assertIn("1 chunk excerpt(s) shortened", clipped)
+        self.assertIn("not evidence of absence", clipped)
+        with self.assertRaises(ValueError):
+            format_bundle_evidence_snippets(bundle, max_chars=0)
+
     def test_bounded_reading_covers_late_sections_and_multiple_documents(self) -> None:
         bundle = self._bundle(with_chunks=False)
         bundle.chunks.extend(TextChunk(
@@ -68,6 +80,8 @@ class ReadBoundaryTests(unittest.TestCase):
         client = NoteClient()
         result = read_documents(ReadRequest(
             bundle=bundle, use_llm=True, llm_client=client,
+            topic="Investigate measurement uncertainty",
+            problem_markdown="Explain limitations relevant to my task.",
             config={"read_screening": "deterministic"},
         ))
         self.assertEqual(len(result.paper_notes), 2)
@@ -75,6 +89,42 @@ class ReadBoundaryTests(unittest.TestCase):
         self.assertNotIn("openalex-p2#chunk-001", client.prompts[0])
         self.assertIn("openalex-p2#chunk-001", client.prompts[1])
         self.assertNotIn("openalex-p1#chunk-001", client.prompts[1])
+        for prompt in client.prompts:
+            self.assertIn("Investigate measurement uncertainty", prompt)
+            self.assertIn("Explain limitations relevant to my task.", prompt)
+            self.assertIn("user request, not source evidence", prompt)
+
+    def test_model_cannot_relabel_a_note_as_another_paper(self) -> None:
+        class WrongIdentityClient:
+            def ask_json_many(self, requests, *, max_workers):
+                return [{"paper_id": "another-paper"} for _ in requests]
+
+        with self.assertRaisesRegex(ValueError, "Paper note identity mismatch"):
+            read_documents(ReadRequest(bundle=self._bundle(), use_llm=True,
+                llm_client=WrongIdentityClient(), config={"read_screening": "deterministic"}))
+
+    def test_incomplete_note_batch_cannot_silently_drop_sources(self) -> None:
+        class IncompleteClient:
+            def ask_json_many(self, requests, *, max_workers):
+                return []
+
+        with self.assertRaisesRegex(ValueError, "incomplete response set"):
+            read_documents(ReadRequest(bundle=self._bundle(), use_llm=True,
+                llm_client=IncompleteClient(), config={"read_screening": "deterministic"}))
+
+    def test_restored_notes_validate_passage_ownership_not_just_existence(self) -> None:
+        bundle = self._bundle()
+        bundle.chunks.append(TextChunk(chunk_id="p2-c1", document_id="openalex-p2", text="Another paper."))
+        handoff = read_documents(ReadRequest(bundle=bundle)).to_handoff_dict()
+        handoff["paper_notes"] = [{"paper_id": "openalex-p1", "evidence_refs": ["p2-c1", "missing"]}]
+        restored = ReadResult.from_handoff_dict(handoff, bundle=bundle)
+        self.assertEqual(restored.status, "partial")
+        self.assertTrue(any("cross-document" in message for message in restored.diagnostics))
+        self.assertEqual(restored.paper_notes[0]["evidence_refs"], ["p2-c1", "missing"])
+        handoff["paper_notes"] = [{"paper_id": "openalex-p1", "evidence_refs": ["openalex-p1", "openalex-p1#chunk-001"]}]
+        self.assertEqual(ReadResult.from_handoff_dict(handoff, bundle=bundle).status, "completed")
+        handoff["paper_notes"] = [{"paper_id": "missing-paper", "evidence_refs": []}]
+        self.assertEqual(ReadResult.from_handoff_dict(handoff, bundle=bundle).status, "partial")
 
     def test_document_query_filters_other_documents(self) -> None:
         bundle = self._bundle()

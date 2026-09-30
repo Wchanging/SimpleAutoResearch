@@ -17,6 +17,8 @@ _HANDLER_NAMES = (
     "plan",
     "search",
     "document_ingest",
+    "data_ingest",
+    "data_analysis",
     "read",
     "synthesize",
     "assess_ideas",
@@ -102,6 +104,12 @@ def _load_handlers(names: tuple[str, ...]) -> dict[str, CapabilityHandler]:
         from simple_ar.research.documents.ingest import run_document_ingest_capability
 
         handlers["document_ingest"] = run_document_ingest_capability
+    if "data_ingest" in names or "data_analysis" in names:
+        from simple_ar.result_analysis.table import snapshot_table_capability, analyze_table_capability
+        if "data_ingest" in names:
+            handlers["data_ingest"] = snapshot_table_capability
+        if "data_analysis" in names:
+            handlers["data_analysis"] = analyze_table_capability
     if "read" in names:
         from simple_ar.research.evidence.reader import run_read_capability
 

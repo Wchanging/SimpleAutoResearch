@@ -1,0 +1,18 @@
+[task]
+goal = "Describe and plot the supplied demonstration values; do not infer a scientific improvement or significance."
+kind = "data_analysis"
+outputs = ["data_analysis"]
+output_root = "../../runs/data-analysis"
+
+[research]
+interaction = "autonomous"
+
+[analysis]
+file = "observations.csv"
+value_columns = ["change_percent"]
+group_column = "method"
+observation_unit = "one synthetic demonstration row, not a real experiment"
+value_unit = "percent"
+mode = "observations"
+missing = "reject"
+width = "column"

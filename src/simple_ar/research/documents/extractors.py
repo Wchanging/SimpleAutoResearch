@@ -17,7 +17,7 @@ from simple_ar.research.documents.ports import (
 
 
 EXTRACTION_SCHEMA_VERSION = "fulltext_extraction.v1"
-TEXT_SUFFIXES = {".md", ".txt"}
+TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 MOJIBAKE_SEGMENT_PATTERN = re.compile(r"鈥[\u4e00-\u9fff]")
 
 

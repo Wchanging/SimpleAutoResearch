@@ -16,11 +16,41 @@ from simple_ar.app.session_roots import new_research_session_root
 from simple_ar.core.console import print_line
 
 
+def add_data_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--data-file", type=Path, help="Data analysis: UTF-8 CSV/TSV or JSON records.")
+    parser.add_argument("--value-column", action="append", default=[], help="Explicit numeric column; repeat for separate metrics/axes.")
+    parser.add_argument("--group-column", default="", help="Category column; values mode requires unique labels.")
+    parser.add_argument("--observation-unit", default="", help="What one row represents, e.g. one independent run or one supplied summary.")
+    parser.add_argument("--value-unit", default="", help="Unit shared by selected value columns; omitted is recorded as unknown.")
+    parser.add_argument("--data-mode", choices=("observations", "values"), default="observations",
+                        help="Observations: count/mean/sample std; values: no re-aggregation or inferred uncertainty.")
+    parser.add_argument("--data-missing", choices=("reject", "omit"), default="reject")
+    parser.add_argument("--figure-width", choices=("column", "wide"), default="wide", help="Generic 3.5/7-inch figure target, not a conference-specific size.")
+    parser.add_argument("--data-max-mb", type=int, default=20, help="Physical input size limit, MiB.")
+    parser.add_argument("--data-max-figures", type=int, default=100, help="Physical SVG page limit; overflow fails without dropping categories.")
+
+
+def data_settings(args: argparse.Namespace) -> dict:
+    from simple_ar.result_analysis.table import TableSpec
+    spec = TableSpec(tuple(args.value_column), args.observation_unit, args.group_column,
+                     args.value_unit, args.data_mode, args.data_missing, args.figure_width, args.data_max_mb, args.data_max_figures)
+    if args.data_file is None:
+        raise ValueError("Data analysis requires --data-file.")
+    path = args.data_file.expanduser().resolve()
+    if not path.is_file() or path.suffix.lower() not in {".csv", ".tsv", ".json"}:
+        raise ValueError("Provide an existing CSV/TSV or JSON records file.")
+    from dataclasses import asdict
+    return {"file": str(path), **asdict(spec)}
+
+
 def add_start_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("start", help="Set up a survey, code fix, or prepared reproduction without writing TOML.")
-    parser.add_argument("--kind", choices=("survey", "bug_fix", "reproduction"))
+    parser = subparsers.add_parser("start", help="Set up a survey, code fix, prepared reproduction, writing or descriptive data analysis without TOML.")
+    parser.add_argument("--kind", choices=("survey", "bug_fix", "reproduction", "writing", "data_analysis"))
+    add_data_options(parser)
     parser.add_argument("--goal", help="Describe the question or desired fix in your own words.")
     parser.add_argument("--document", action="append", default=[], type=Path)
+    parser.add_argument("--material", action="append", default=[], type=Path, help="Writing: draft, notes or result description (Markdown/text/PDF), not a bibliographic paper.")
+    parser.add_argument("--template", help="Writing: built-in report template or Markdown template path; default analysis_report. Use experiment for an honest paper-style draft.")
     parser.add_argument("--sources", choices=("materials", "search"), help="Use only supplied documents, or allow online search.")
     parser.add_argument("--fulltext", action="store_true", help="Allow remote full-text retrieval and PDF downloads for an online survey; otherwise read available abstracts/local materials.")
     parser.add_argument("--max-cited-sources", type=int, help="Optional maximum number of distinct sources cited in the final report.")
@@ -125,43 +155,82 @@ def _reproduction_rows(args: argparse.Namespace, *, interactive: bool) -> list[s
 def prepare_start(args: argparse.Namespace) -> Path | None:
     """Collect bounded user choices and write one canonical, editable input set."""
     interactive = sys.stdin.isatty()
-    print_line("Available now: survey (literature/direction report), bug_fix (isolated code change), reproduction (prepared paper-conclusion check).")
-    print_line("Standalone figures/writing and autonomous reproduction preparation are not yet offered by this guided entry.")
-    kind = _answer("Function / 功能 [survey / bug_fix / reproduction]", args.kind, interactive=interactive)
-    if kind not in {"survey", "bug_fix", "reproduction"}:
-        raise ValueError("Choose survey, bug_fix or reproduction.")
+    print_line("Available now: survey, bug_fix, prepared reproduction, material-based writing, data_analysis (descriptive tables and figures).")
+    print_line("Free-form scientific illustrations and autonomous reproduction preparation are not yet offered.")
+    kind = _answer("Function / 功能 [survey / bug_fix / reproduction / writing / data_analysis]", args.kind, interactive=interactive)
+    if kind not in {"survey", "bug_fix", "reproduction", "writing", "data_analysis"}:
+        raise ValueError("Choose survey, bug_fix, reproduction, writing or data_analysis.")
     goal = _answer("Goal / 目标", args.goal, interactive=interactive)
+    analysis = None
+    if kind == "data_analysis":
+        if interactive:
+            if args.data_file is None:
+                args.data_file = Path(_answer("Data file / 数据路径", None, interactive=True))
+            if not args.value_column:
+                args.value_column = [_answer("Numeric column / 数值列", None, interactive=True)]
+            args.observation_unit = _answer("What one row represents / 每行代表什么", args.observation_unit, interactive=True)
+        analysis = data_settings(args)
+    elif any((args.data_file, args.value_column, args.group_column, args.observation_unit, args.value_unit,
+              args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100)):
+        raise ValueError("Data options require --kind data_analysis.")
     documents = [path.expanduser().resolve() for path in args.document]
+    materials = [path.expanduser().resolve() for path in args.material]
+    if kind != "writing" and (materials or args.template):
+        raise ValueError("--material and --template require --kind writing.")
+    if kind == "writing" and interactive and not (documents or materials):
+        materials.append(Path(_answer("Draft, notes or results / 草稿、笔记或结果说明路径", None,
+                                      interactive=interactive)).expanduser().resolve())
     if kind in {"survey", "reproduction"} and interactive and not documents and args.sources is None:
         prompt = "Local document path / 本地材料" + ("（必需）" if kind == "reproduction" else "（可留空在线检索）")
         supplied = input(prompt + ": ").strip()
         if supplied:
             documents.append(Path(supplied).expanduser().resolve())
-    for path in documents:
+    for path in [*documents, *materials]:
         if not path.is_file():
             raise ValueError(f"Document not found: {path}")
+    if kind == "writing":
+        if not (materials or documents):
+            raise ValueError("Writing requires at least one --material or --document.")
+        if len(set([*documents, *materials])) != len(documents) + len(materials):
+            raise ValueError("Each writing file must have one role; do not repeat papers as material.")
+        if any(path.suffix.lower() not in {".md", ".markdown", ".txt", ".pdf"} for path in [*documents, *materials]):
+            raise ValueError("Writing material must be Markdown, text or PDF; raw data is not a verified result description.")
     project = None
     validation = None
     allowed = list(args.allow)
     sources = args.sources
     reproduction_rows: list[str] = []
+    writing_template = args.template or "analysis_report"
+    if kind == "writing":
+        from simple_ar.report.schema import ReportRuntimeConfig
+        from simple_ar.report.templates import ReportTemplateError, load_report_template_bundle
+        if Path(writing_template).suffix.lower() in {".md", ".markdown"}:
+            writing_template = str(Path(writing_template).expanduser().resolve())
+        try:
+            load_report_template_bundle(report_mode="supplied_materials",
+                                        config=ReportRuntimeConfig(template=writing_template))
+        except ReportTemplateError as exc:
+            raise ValueError(f"Invalid writing template or review criteria: {exc}") from exc
     if kind != "reproduction" and any((args.run_argv is not None, args.hypothesis, args.dataset,
             args.expected_outcome, args.metric, args.cwd is not None, args.timeout_sec is not None)):
         raise ValueError("Execution/protocol options require --kind reproduction; use --validate for bug_fix.")
-    if kind in {"survey", "reproduction"}:
+    if kind == "data_analysis":
+        if any((documents, materials, args.template, sources, args.fulltext, args.project, args.validate, allowed, args.max_cited_sources)):
+            raise ValueError("Data analysis accepts a data file and descriptive settings, not literature, editing or report-generation options.")
+    elif kind in {"survey", "reproduction", "writing"}:
         if args.max_cited_sources is not None and args.max_cited_sources < 1:
             raise ValueError("--max-cited-sources must be positive when specified.")
         if args.project or args.validate or allowed:
             raise ValueError(f"{kind} does not accept project editing or validation options; choose bug_fix.")
-        if kind == "reproduction":
+        if kind in {"reproduction", "writing"}:
             if sources not in {None, "materials"} or args.fulltext:
-                raise ValueError("Prepared reproduction uses supplied documents only; online preparation is not supported by this entry.")
+                raise ValueError("Prepared reproduction/writing uses supplied local material only; online preparation is not supported by this entry.")
             sources = "materials"
         else:
             sources = _answer("Source scope / 来源 [materials / search]", sources, interactive=interactive)
         if sources not in {"materials", "search"}:
             raise ValueError("Source scope must be materials or search.")
-        if sources == "materials" and not documents:
+        if sources == "materials" and not (documents or materials):
             raise ValueError("materials requires at least one --document; no online search will be inferred.")
         if args.fulltext and sources != "search":
             raise ValueError("--fulltext enables remote retrieval and requires --sources search; local documents are already read in materials mode.")
@@ -180,35 +249,47 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
         for pattern in allowed:
             if not pattern.strip() or Path(pattern).is_absolute() or ".." in pattern.replace("\\", "/").split("/"):
                 raise ValueError("Editable paths must be nonempty project-relative patterns without '..'.")
-    print_line(f"Task: {kind}\nGoal: {goal}\nModel: {args.model}\nInteraction: {args.interaction}")
+    print_line(f"Task: {kind}\nGoal: {goal}\nModel: {'not used (descriptive analysis)' if kind == 'data_analysis' else args.model}\nInteraction: {args.interaction}")
     if project:
         print_line(f"Project: {project}\nEdit scope: {', '.join(allowed)}\nValidation: {validation}")
         print_line("The validation command is authorized to execute in a copy using the current Python environment; copying is not an OS sandbox.")
+    elif kind == "data_analysis":
+        print_line(f"Data: {analysis['file']}; values: {', '.join(args.value_column)}; mode: {args.data_mode}; missing: {args.data_missing}")
+        print_line("No model/API calls, code execution or experiment verification. Descriptive statistics only; copied data may be sensitive.")
     else:
-        print_line(f"Sources: {sources}; documents: {len(documents)}. " +
+        print_line(f"Sources: {sources}; papers: {len(documents)}; materials: {len(materials)}. " +
                    ("One declared reproduction command requested." if kind == "reproduction" else "No code execution requested."))
         if args.max_cited_sources is not None:
             print_line(f"Final report source limit: {args.max_cited_sources} distinct cited source(s).")
         if sources == "search":
             print_line("Reading: remote full-text/PDF retrieval enabled (best effort)." if args.fulltext else
                        "Reading: abstracts and supplied local materials only. Use --fulltext for remote full-text/PDF retrieval.")
+        if kind == "writing":
+            print_line("Writes from supplied text only; user results are not independently verified. No experiment, research synthesis, or online search is requested.")
 
     # Persist before the final confirmation: an EOF/decline here loses no inputs.
     root = new_research_session_root(args.output_root, goal)
     config = root / "research.toml"
-    outputs = {"survey": ["report"], "bug_fix": ["bug_fix"], "reproduction": ["experiments", "report"]}
+    outputs = {"survey": ["report"], "bug_fix": ["bug_fix"], "reproduction": ["experiments", "report"], "writing": ["report"], "data_analysis": ["data_analysis"]}
     rows = ["[task]", f"goal = {_quote(goal)}", f"kind = {_quote(kind)}",
             f"outputs = {_array(outputs[kind])}",
             'output_root = "sessions"', "", "[model]", f"name = {_quote(args.model)}", "",
             "[research]", f"interaction = {_quote(args.interaction)}"]
-    if kind in {"survey", "reproduction"}:
+    if kind in {"survey", "reproduction", "writing"}:
         rows.extend(_literature_rows(args, sources, documents))
-        if args.max_cited_sources is not None or kind == "reproduction":
+        if kind == "writing":
+            rows.append(f"materials = {_array([str(path) for path in materials])}")
+        if args.max_cited_sources is not None or kind in {"reproduction", "writing"}:
             rows.extend(["", "[report]"])
             if args.max_cited_sources is not None:
                 rows.append(f"max_cited_sources = {args.max_cited_sources}")
         if kind == "reproduction":
             rows.extend(['template = "reproduction"', "document_review = true", *reproduction_rows])
+        elif kind == "writing":
+            rows.extend([f"template = {_quote(writing_template)}", "document_review = true"])
+    elif kind == "data_analysis":
+        rows.extend(["", "[analysis]", *[f"{key} = {_array(list(value)) if isinstance(value, tuple) else str(value) if type(value) is int else _quote(value)}"
+                                             for key, value in analysis.items()]])
     else:
         for name, text in _code_task_files(goal, project, validation, allowed).items():
             (root / name).write_text(text, encoding="utf-8")
