@@ -43,6 +43,14 @@ SimpleAutoResearch must avoid two forms of drift: adding general architecture wi
 11. **Compatibility layers have boundaries and exit conditions.** Preserve an old entrypoint when its usage still matters, but do not let it carry new business logic. Record its consumers, replacement, and deletion condition. Do not maintain two complete orchestrators indefinitely, and do not break valid historical reads merely to remove an old directory.
 12. **Each batch should be small and complete.** A batch should solve one visible problem and include the necessary implementation, validation, and explanation. Avoid changing directories, interfaces, behavior, dependency versions, and output formats all at once; remove locally superseded code when the migration is complete instead of only adding more code.
 
+For a localized change, run the affected capability and its direct consumers, then check a
+real user outcome. Expand coverage for shared configuration, session, execution or recovery
+changes; reserve full regression for release freezing or broad refactors. Record untested
+boundaries instead of treating test count as quality. Keep costly model runs, dependency
+installation and training on the chosen compute host. On a shared `uv` environment, use
+`uv sync --inexact` to retain extra scientific packages; benchmark dependencies belong in a
+separate environment, not the application's environment.
+
 ### Fixed Review Questions
 
 Every review should answer at least:

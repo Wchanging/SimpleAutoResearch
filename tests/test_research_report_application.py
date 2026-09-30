@@ -145,7 +145,9 @@ class ResearchReportApplicationTests(unittest.TestCase):
                     TextChunk(chunk_id="other-paper", document_id="different", text="Do not join this source")])
         note = {"paper_id": "local-paper", "datasets": ["Public observations"],
                 "metrics": ["Prediction error"], "key_claims": ["Reported error was 0.12"],
-                "limitations": ["One setting"], "confidence": "medium", "evidence_refs": ["result-span"]}
+                "limitations": ["One setting"], "confidence": "medium", "evidence_refs": ["result-span"],
+                "reading_coverage": {"available_chunks": 30, "shown_chunk_ids": ["result-span"],
+                                     "semantic_verification": "not_performed"}}
         context = ReportContext(topic="Evaluation", report_mode="research_only", source_handles=[
             SourceHandle(handle="paper:local-paper", kind="paper", paper_id="local-paper", citation_key="P1")])
         context, memory = attach_report_read_evidence(context, ReportMemory(), documents=documents,
@@ -155,6 +157,7 @@ class ResearchReportApplicationTests(unittest.TestCase):
         self.assertEqual(metadata["reading_notes"]["key_claims"], note["key_claims"])
         self.assertEqual(metadata["reading_notes"]["datasets"], note["datasets"])
         self.assertEqual(metadata["reading_notes"]["metrics"], note["metrics"])
+        self.assertEqual(metadata["reading_notes"]["reading_coverage"], note["reading_coverage"])
         self.assertEqual(metadata["reading_notes_kind"], "model_interpretation_not_source_text")
         self.assertEqual(metadata["evidence_passages"][0]["text"], "Reported error was 0.12")
         self.assertEqual(memory.source_handles, context.source_handles)

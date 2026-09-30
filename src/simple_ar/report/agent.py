@@ -2250,6 +2250,17 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
             elif isinstance(value, str):
                 projected_notes[key] = value[:600]
                 notes_truncated |= len(value) > 600
+        coverage = notes.get("reading_coverage")
+        if isinstance(coverage, dict):
+            bounded_coverage = {key: value if type(value) is int else str(value)[:160]
+                                for key in ("available_chunks", "selection", "excerpt_chars", "semantic_verification")
+                                if (value := coverage.get(key)) is not None}
+            for key in ("shown_chunk_ids", "shortened_chunk_ids"):
+                ids = coverage.get(key)
+                if isinstance(ids, list):
+                    bounded_coverage[key] = [str(item)[:240] for item in ids[:12]]
+                    notes_truncated |= len(ids) > 12 or any(len(str(item)) > 240 for item in ids[:12])
+            projected_notes["reading_coverage"] = bounded_coverage
         data["metadata"]["reading_notes"] = projected_notes
         data["metadata"]["reading_notes_truncated"] = notes_truncated
     passages = source_metadata.get("evidence_passages")

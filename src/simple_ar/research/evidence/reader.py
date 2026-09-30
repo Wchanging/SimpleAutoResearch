@@ -8,6 +8,8 @@ legacy facade. It does not search, write files, or require a pipeline Context.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
+import math
+import re
 from typing import Any, Callable, Literal, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
@@ -38,6 +40,7 @@ from simple_ar.research.evidence.screening import (
 
 
 ReadStatus = Literal["completed", "partial", "empty"]
+READ_OVERVIEW_CHUNKS = 12
 
 
 def query_evidence(
@@ -299,6 +302,7 @@ def read_documents(request: ReadRequest) -> ReadResult:
                 evidence_snippets_by_document={
                     record.document_id: format_bundle_evidence_snippets(
                         bundle, document_id=record.document_id,
+                        focus="\n".join((request.topic, request.problem_markdown)),
                     )
                     for record in bundle.records
                 },
@@ -307,6 +311,23 @@ def read_documents(request: ReadRequest) -> ReadResult:
                 emit=request.emit,
                 config=request.config,
             )
+            # Retain what the model actually saw, not just a document-level
+            # citation. Sampling/retrieval is not semantic claim verification.
+            focus = "\n".join((request.topic, request.problem_markdown))
+            for note in notes:
+                available = tuple(chunk for chunk in bundle.chunks
+                                  if chunk.document_id == note["paper_id"])
+                shown = tuple(chunk for chunk in select_reading_chunks(available, max_chunks=READ_OVERVIEW_CHUNKS, focus=focus)
+                              if chunk.text.strip())
+                note["reading_coverage"] = {
+                    "available_chunks": len(available),
+                    "shown_chunk_ids": [chunk.chunk_id for chunk in shown],
+                    "excerpt_chars": DEFAULT_CHUNK_CHARS,
+                    "shortened_chunk_ids": [chunk.chunk_id for chunk in shown
+                                            if len(" ".join(chunk.text.split())) > DEFAULT_CHUNK_CHARS],
+                    "selection": "overview_and_lexical_focus" if focus.strip() else "overview",
+                    "semantic_verification": "not_performed",
+                }
             paper_notes = tuple(notes)
             notes_markdown = render_paper_notes_markdown(notes)
     if not bundle.records:
@@ -648,12 +669,60 @@ def select_representative_chunks(
     return tuple(chunk for chunk in chunks if chunk.chunk_id in selected_ids)
 
 
+def select_reading_chunks(
+    chunks: tuple[TextChunk, ...] | list[TextChunk], *, max_chunks: int,
+    focus: str = "",
+) -> tuple[TextChunk, ...]:
+    """Reserve a bounded part of an overview for task-relevant passages.
+
+    Search all retained substantive chunks before sampling. Rare overlapping
+    terms rank passages; immediate same-document context shares the reserved
+    quota. The remaining budget still covers sections and late text. This is
+    lexical retrieval, not a relevance verdict, translation or claim audit.
+    """
+    def tokens(text: str) -> set[str]:
+        words = set(re.findall(r"[^\W\d_]{3,}|\d+(?:\.\d+)?", text.casefold()))
+        for run in re.findall(r"[\u3400-\u9fff]+", text):
+            words.update(run[i:i + 2] for i in range(len(run) - 1))
+        return words
+
+    terms = tokens(focus)
+    if not terms or max_chunks < 3 or len(chunks) <= max_chunks:
+        return select_representative_chunks(chunks, max_chunks=max_chunks)
+    candidates = [chunk for chunk in chunks if chunk.metadata.get("section") != "references"]
+    overlaps = [tokens(chunk.text) & terms for chunk in candidates]
+    frequencies = {term: sum(term in match for match in overlaps) for term in terms}
+    weights = {term: math.log((len(candidates) + 1) / (count + 1))
+               for term, count in frequencies.items() if 0 < count < len(candidates)}
+    ranked = sorted(range(len(candidates)),
+                    key=lambda index: (-math.fsum(weights.get(term, 0) for term in sorted(overlaps[index])), index))
+    pinned: list[str] = []
+    quota = max_chunks // 3
+    for index in ranked:
+        if len(pinned) >= quota:
+            break
+        if not any(weights.get(term, 0) > 0 for term in overlaps[index]):
+            break
+        # Original neighboring chunks, never cross-source context or invented
+        # text. Keep the hit before neighbors so a tiny budget retains it.
+        for position in (index, index - 1, index + 1):
+            if len(pinned) >= quota:
+                break
+            if 0 <= position < len(candidates):
+                chunk = candidates[position]
+                if chunk.document_id == candidates[index].document_id and chunk.chunk_id not in pinned:
+                    pinned.append(chunk.chunk_id)
+    return select_representative_chunks(chunks, max_chunks=max_chunks,
+                                         required_chunk_ids=tuple(pinned))
+
+
 def format_bundle_evidence_snippets(
     bundle: DocumentBundle,
     *,
-    max_chunks: int = 12,
+    max_chunks: int = READ_OVERVIEW_CHUNKS,
     max_chars: int = DEFAULT_CHUNK_CHARS,
     document_id: str | None = None,
+    focus: str = "",
 ) -> str:
     """Render bounded, source-labelled text for model reading prompts."""
 
@@ -665,7 +734,7 @@ def format_bundle_evidence_snippets(
         chunk for chunk in bundle.chunks
         if document_id is None or chunk.document_id == document_id
     )
-    selected = select_representative_chunks(available, max_chunks=max_chunks)
+    selected = select_reading_chunks(available, max_chunks=max_chunks, focus=focus)
     for chunk in selected:
         text = " ".join(chunk.text.split())
         if len(text) > max_chars:
@@ -686,6 +755,9 @@ def format_bundle_evidence_snippets(
             f"[coverage] Bounded overview sampled {len(selected)} of {len(available)} chunks; "
             "unseen details require a targeted source read."
         )
+        if focus.strip():
+            lines.append("[coverage] Selection combines section overview and lexical task matches; "
+                         "it does not establish complete coverage or absence of conflicting evidence.")
     if shortened:
         lines.append(f"[coverage] {shortened} chunk excerpt(s) shortened to {max_chars} characters; "
                      "a missing detail here is not evidence of absence from the retained source.")

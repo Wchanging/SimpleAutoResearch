@@ -560,6 +560,16 @@ or permitted remote text; Read selects and analyzes evidence, Synthesis combines
 it, and Design proposes an experiment. Missing full text remains an explicit
 limitation, not a claim that the paper was read in full.
 
+Paper notes use a bounded combination of section overview and lexical matches
+to the task, searched across retained substantive chunks. Matching excerpts
+include nearby same-source context within the existing excerpt budget. No
+embedding index, extra model round or task-specific paper rule is required.
+Each new note records `reading_coverage`: available chunk count, shown chunk
+IDs and an explicit `semantic_verification = not_performed` marker. A match
+helps locate evidence; it does not prove a claim or establish that no contrary
+passage exists. Unmatched or differently worded questions still need targeted
+source reading, and source acquisition/extraction failures remain limitations.
+
 LLM-generated ideas and local novelty checks are research suggestions, not proof
 of originality. Offline fixture output is not model-backed scientific analysis.
 See the capability entrypoints above for typed inputs and outputs.

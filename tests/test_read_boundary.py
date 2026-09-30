@@ -11,10 +11,42 @@ from simple_ar.research.evidence.reader import (
     query_evidence,
     read_documents,
     select_representative_chunks,
+    select_reading_chunks,
 )
 
 
 class ReadBoundaryTests(unittest.TestCase):
+    def test_task_focus_retrieves_unsampled_passage_without_expanding_budget(self) -> None:
+        chunks = [TextChunk(chunk_id=f"c-{index}", document_id="p", text=f"General discussion {index}.")
+                  for index in range(80)]
+        baseline = {chunk.chunk_id for chunk in select_representative_chunks(chunks, max_chunks=12)}
+        target = next(index for index in range(1, 79) if f"c-{index}" not in baseline)
+        chunks[target] = TextChunk(chunk_id=f"c-{target}", document_id="p",
+                                   text="Calibration uncertainty depends on heteroscedastic noise.")
+        selected = select_reading_chunks(chunks, max_chunks=12, focus="Explain heteroscedastic calibration uncertainty")
+        self.assertEqual(len(selected), 12)
+        self.assertIn(f"c-{target}", {chunk.chunk_id for chunk in selected})
+        self.assertTrue(any(chunk.chunk_id in {f"c-{target-1}", f"c-{target+1}"} for chunk in selected))
+        self.assertEqual(selected, select_reading_chunks(chunks, max_chunks=12, focus="Explain heteroscedastic calibration uncertainty"))
+
+    def test_focus_no_matches_keeps_overview_and_ignores_bibliography(self) -> None:
+        chunks = [TextChunk(chunk_id=f"c-{index}", document_id="p", text="Ordinary content.") for index in range(30)]
+        chunks.append(TextChunk(chunk_id="ref", document_id="p", text="Heteroscedastic noise.", metadata={"section": "references"}))
+        self.assertEqual(select_reading_chunks(chunks, max_chunks=6, focus="Heteroscedastic noise"),
+                         select_representative_chunks(chunks, max_chunks=6))
+        self.assertEqual(select_reading_chunks(chunks, max_chunks=2, focus="noise"),
+                         select_representative_chunks(chunks, max_chunks=2))
+
+    def test_chinese_focus_and_source_scoping(self) -> None:
+        bundle = self._bundle(with_chunks=False)
+        bundle.chunks.extend(TextChunk(chunk_id=f"c-{index}", document_id="openalex-p1", text="普通正文内容。") for index in range(40))
+        bundle.chunks[7] = TextChunk(chunk_id="c-7", document_id="openalex-p1", text="校准误差与仪器噪声影响置信区间。")
+        bundle.chunks.append(TextChunk(chunk_id="other", document_id="openalex-p2", text="校准误差属于另一个来源。"))
+        excerpts = format_bundle_evidence_snippets(bundle, document_id="openalex-p1", focus="校准误差", max_chunks=6)
+        self.assertIn("[c-7]", excerpts)
+        self.assertNotIn("[other]", excerpts)
+        self.assertIn("does not establish complete coverage", excerpts)
+
     def test_default_overview_keeps_ingest_sized_chunks_and_labels_further_clipping(self) -> None:
         bundle = self._bundle(with_chunks=False)
         bundle.chunks.append(TextChunk(chunk_id="complete", document_id="openalex-p1",
@@ -85,6 +117,8 @@ class ReadBoundaryTests(unittest.TestCase):
             config={"read_screening": "deterministic"},
         ))
         self.assertEqual(len(result.paper_notes), 2)
+        self.assertEqual(result.paper_notes[0]["reading_coverage"]["shown_chunk_ids"], ["openalex-p1#chunk-001"])
+        self.assertEqual(result.paper_notes[0]["reading_coverage"]["semantic_verification"], "not_performed")
         self.assertIn("openalex-p1#chunk-001", client.prompts[0])
         self.assertNotIn("openalex-p2#chunk-001", client.prompts[0])
         self.assertIn("openalex-p2#chunk-001", client.prompts[1])

@@ -572,7 +572,7 @@ def attach_report_read_evidence(
             metadata["reading_notes"] = {
                 key: note[key]
                 for key in ("method", "datasets", "metrics", "key_claims", "limitations",
-                            "open_questions", "confidence", "evidence_refs")
+                            "open_questions", "confidence", "evidence_refs", "reading_coverage")
                 if key in note
             }
             metadata["reading_notes_kind"] = "model_interpretation_not_source_text"

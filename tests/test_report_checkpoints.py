@@ -485,12 +485,14 @@ class ReportCheckpointTests(unittest.TestCase):
         source = SourceHandle(handle="paper:p1", kind="paper", paper_id="p1", citation_key="P1",
             summary="Abstract without numbers", metadata={"extraction_status": "parsed",
                 "reading_notes_kind": "model_interpretation_not_source_text",
-                "reading_notes": {"datasets": ["Public data"], "key_claims": ["Reported error 0.12"]},
+                "reading_notes": {"datasets": ["Public data"], "key_claims": ["Reported error 0.12"],
+                    "reading_coverage": {"available_chunks": 50, "shown_chunk_ids": ["p1#results"], "semantic_verification": "not_performed"}},
                 "evidence_passages": [{"chunk_id": "p1#results", "text": "Reported error 0.12", "truncated": False}]})
         section = ReportSectionPlan(section_id="results", heading="Results", goal="Review evidence", evidence_handles=[source.handle])
         projected = _handles_for_section(ReportMemory(source_handles=[source]), section)[0]["metadata"]
         self.assertEqual(projected["extraction_status"], "parsed")
         self.assertEqual(projected["reading_notes"]["datasets"], ["Public data"])
+        self.assertEqual(projected["reading_notes"]["reading_coverage"]["semantic_verification"], "not_performed")
         self.assertEqual(projected["evidence_passages"][0]["text"], "Reported error 0.12")
         self.assertFalse(projected["evidence_passages"][0]["truncated"])
 
