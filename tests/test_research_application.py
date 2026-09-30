@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 import tempfile
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -23,6 +24,65 @@ from simple_ar.research.implementation import ImplementationRequest
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_survey_source_bound_and_user_request_reach_report_without_truncating_search(self):
+        from simple_ar.report.schema import ReportContext, ReportMemory
+
+        goal = "Compare three primary studies and explain uncertainty, not a broad literature survey."
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(
+                ResearchBrief(request_text=goal, objective="Study comparison",
+                              requested_outputs=("report",), hard_constraints=("At most three citations.",)),
+                root=Path(tmp) / "session",
+                services=ResearchApplicationServices(config={
+                    "research_task_kind": "survey", "report": {"max_cited_sources": 3},
+                }),
+            )
+            plan = SimpleNamespace(source_plan=SimpleNamespace(budget={"max_documents": 12}))
+            self.assertEqual(app._search_limit(plan), 12)
+            context = ReportContext(topic="Study comparison", report_mode="research_only")
+            with patch.object(app, "report_inputs", return_value=(context, ReportMemory())):
+                projected, memory, config, _, _ = app._report_writing_parts()
+            self.assertEqual(config.max_cited_sources, 3)
+            self.assertEqual(projected.max_section_sources, 3)
+            self.assertEqual(projected.survey_contract["max_cited_sources"], 3)
+            self.assertIn(goal, projected.problem_markdown)
+            self.assertIn("At most three citations.", memory.objective)
+            self.assertIn("at most 3 distinct sources across all sections", memory.objective)
+
+    def test_separate_feasibility_client_uses_session_and_attempt_budget(self):
+        from simple_ar.research.design import ResearchDesignRequest
+
+        class Client:
+            def __init__(self):
+                self.bindings = []
+
+            def with_budget(self, ledger, *, session_id="", attempt_id=""):
+                self.bindings.append((ledger, session_id, attempt_id))
+                return self
+
+        author, reviewer = Client(), Client()
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(
+                ResearchBrief(request_text="Design a bounded experiment."),
+                root=Path(tmp) / "session",
+                services=ResearchApplicationServices(
+                    llm_client=author, feasibility_llm_client=reviewer,
+                    config={"feasibility_review_model": "review-model"},
+                ),
+            )
+            request = ResearchDesignRequest(synthesis={}, use_llm=True, llm_client=author,
+                                            feasibility_llm_client=reviewer)
+            bound = app._request_for_attempt(request, "research-design-0001")
+            self.assertIs(bound.feasibility_llm_client, reviewer)
+            self.assertEqual(reviewer.bindings[-1],
+                             (app.budget_ledger, app.controller.manifest.session_id, "research-design-0001"))
+            restored_reviewer = Client()
+            restored = load_session(Path(tmp) / "session", services=ResearchApplicationServices(
+                llm_client=Client(), feasibility_llm_client=restored_reviewer,
+            ))
+            self.assertEqual(restored.services.config["feasibility_review_model"], "review-model")
+            self.assertEqual(restored_reviewer.bindings[-1][1], app.controller.manifest.session_id)
+
     def test_report_input_gap_pauses_without_uncaught_exception_or_writer_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = create_session(
@@ -232,6 +292,63 @@ class ResearchApplicationTests(unittest.TestCase):
                 reason="Allow future model calls if explicitly configured.",
             )
             load_session(session).require_llm_binding(include_legacy_usage=True)
+
+    def test_prepared_reproduction_runs_fixed_command_and_preserves_paper_report_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# A source claim\nThe stated method has a reference value under stated conditions.\n", encoding="utf-8")
+            protocol = {"contract_id": "reproduce-source-subset", "hypothesis": "Check one published conclusion",
+                        "dataset": "Declared synthetic adaptation", "expected_outcome": "Observed value near 0.7; not a full paper reproduction",
+                        "metrics": ["observed"], "comparison_conditions": {"scope": "adapted", "seed": 3}}
+            app = create_session(ResearchBrief(request_text="Reproduce the supplied conclusion without innovation.",
+                intents=("reproduction",), requested_outputs=("experiments",),
+                asset_requests=({"locator": str(paper), "role": "paper"},)), root=root / "session",
+                services=ResearchApplicationServices(config={"research_task_kind": "reproduction", "research_materials_only": True,
+                    "interaction": "autonomous", "execution": {"command": [sys.executable, "-c", "print('observed: 0.7')"],
+                    "cwd": str(root), "timeout_sec": 5, "protocol": protocol, "result_schema": {"primary_metric": "observed"}}},
+                    budget_limits={"process_invocations": 1, "process_wall_seconds": 10}))
+            view = app.advance(max_actions=12)
+            self.assertEqual(view.status, "completed", view.status_reason)
+            self.assertNotIn("design", view.state_refs)
+            self.assertNotIn("assessment", view.state_refs)
+            self.assertNotIn("implementation", view.state_refs)
+            measurement = app.latest_experiment_ref()
+            result = app.controller.store.read_json(measurement)
+            self.assertEqual(result["experiment_contract"]["hypothesis"], protocol["hypothesis"])
+            self.assertEqual(result["metrics"]["observed"], 0.7)
+            context, _ = app.report_inputs()
+            self.assertEqual(context.hypothesis_markdown, protocol["hypothesis"])
+            self.assertEqual(context.experiment_plan["dataset"], protocol["dataset"])
+            self.assertTrue(context.papers)
+            resumed = load_session(root / "session")
+            self.assertEqual(resumed.advance(max_actions=1).status, "completed")
+            self.assertEqual(resumed.latest_experiment_ref(), measurement)
+            self.assertEqual(len(resumed.view().attempts), len(view.attempts))
+
+    def test_fixed_protocol_technical_retry_does_not_require_research_design(self):
+        for kind in ("measurement", "reproduction"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paper = root / "paper.md"
+                paper.write_text("# Reference\nCheck the fixed protocol result.\n", encoding="utf-8")
+                config = {"research_task_kind": kind, "research_materials_only": kind == "reproduction", "interaction": "autonomous",
+                    "execution": {"command": [sys.executable, "-c", "raise SystemExit(2)"], "cwd": str(root), "timeout_sec": 5,
+                        "protocol": {"hypothesis": "Check an existing conclusion", "dataset": "Synthetic fixture",
+                            "expected_outcome": "Value 0.7", "metrics": ["observed"]},
+                        "result_schema": {"primary_metric": "observed"}}}
+                app = create_session(ResearchBrief(request_text="Run the declared protocol.", intents=(kind,), requested_outputs=("experiments",),
+                    asset_requests=({"locator": str(paper), "role": "paper"},) if kind == "reproduction" else ()),
+                    root=root / "session", services=ResearchApplicationServices(config=config,
+                        budget_limits={"process_invocations": 2, "process_wall_seconds": 10}))
+                self.advance_to(app, "experiment")
+                app.advance()
+                retried = app.retry_experiment(command=(sys.executable, "-c", "print('observed: 0.7')"), cwd=root, timeout_sec=5)
+                self.assertEqual(retried.status, "completed", retried.status_reason)
+                self.assertNotIn("design", retried.state_refs)
+                result = app.controller.store.read_json(retried.state_refs["experiment"])
+                self.assertEqual(result["metrics"]["observed"], 0.7)
+                self.assertEqual(len([a for a in retried.attempts if a["capability"] == "experiment"]), 2)
 
     def test_direct_measurement_runs_without_research_discovery_or_design(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2108,6 +2225,44 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(app.controller.store.read_text(old_report), old_body)
 
         self.assertEqual(view.status, "completed", view.status_reason)
+
+    def test_failed_report_scope_audit_remains_inspectable_and_pauses_delivery(self):
+        from simple_ar.report.schema import AgentReportResult, ReportSectionDraft
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            papers = []
+            for index in (1, 2):
+                paper = root / f"source-{index}.md"
+                paper.write_text(f"# Calibration source {index}\n\nCalibration evidence for comparison.\n", encoding="utf-8")
+                papers.append({"locator": str(paper), "role": "paper"})
+            app = create_session(
+                ResearchBrief(request_text="Compare calibration evidence in the supplied studies, citing at most one.",
+                              requested_outputs=("report",), asset_requests=tuple(papers)),
+                root=root / "session",
+                services=ResearchApplicationServices(max_results=2,
+                    config={"report": {"max_cited_sources": 1}}),
+            )
+            # Simulate a persisted/legacy selection that contains more papers
+            # than a newer delivery bound; the final gate must still enforce it.
+            with patch.object(app, "_search_limit", return_value=2):
+                app.advance(max_actions=6)
+            app.services = replace(app.services, llm_client=LLMClient(LLMSettings(api_key="fixture")))
+
+            def overbroad_writer(**kwargs):
+                ids = [paper["id"] for paper in kwargs["context"].papers]
+                self.assertEqual(len(ids), 2)
+                return AgentReportResult(report_body="", memory=kwargs["memory"], used_agent=True,
+                    sections=[ReportSectionDraft(section_id="review", heading="Evidence",
+                        draft_markdown=f"Two prior works are noted [@{ids[0]}] [@{ids[1]}].")])
+
+            with patch("simple_ar.report.writing.run_report_agent", side_effect=overbroad_writer):
+                view = app.advance(max_actions=3)
+            self.assertEqual(view.status, "paused")
+            self.assertIn("report_audit", view.state_refs, view.status_reason)
+            audit = app.controller.store.read_json(view.state_refs["report_audit"])
+            self.assertEqual(audit["status"], "failed")
+            self.assertIn("source-scope-exceeded", [row["finding_id"] for row in audit["reviewer_findings"]])
 
     def test_request_report_reopens_completed_prefix_without_rerunning_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:

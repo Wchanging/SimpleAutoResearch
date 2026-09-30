@@ -92,6 +92,7 @@ class ResearchApplicationServices:
     """Concrete dependencies and bounded settings for one application run."""
 
     llm_client: Any | None = field(default=None, repr=False, compare=False)
+    feasibility_llm_client: Any | None = field(default=None, repr=False, compare=False)
     search_registry: SearchProviderRegistry | None = field(
         default=None, repr=False, compare=False
     )
@@ -1047,7 +1048,9 @@ class ResearchApplication:
                 task_text=self.brief.request_text,
                 contract=self._execution_contract(),
             )
-            inputs = self._input_refs("design", "runtime_config")
+            inputs = self._input_refs("runtime_config") if self._task_kind() in {"measurement", "reproduction"} else self._input_refs("design", "runtime_config")
+            if self._task_kind() == "reproduction":
+                inputs = (*inputs, *self._input_refs("read", "synthesis"))
             baseline_ref = self.controller.manifest.state_refs.get("baseline")
             if baseline_ref is not None:
                 inputs = (*inputs, baseline_ref)
@@ -1110,8 +1113,8 @@ class ResearchApplication:
             return attach_report_read_evidence(context, memory, documents=self._load_documents(),
                                                read=self._load_read(), read_ref=refs["read"])
         analysis_ref = self._latest_analysis_ref() or refs["analysis"]
-        design_ref = self._implementation_design_ref()
-        design = ResearchDesignResult.from_handoff_dict(self.controller.store.read_json(design_ref))
+        design_ref = self._implementation_design_ref() if "design" in refs else None
+        design = ResearchDesignResult.from_handoff_dict(self.controller.store.read_json(design_ref)) if design_ref else None
         analysis = AnalysisHandoff.from_handoff_dict(self.controller.store.read_json(analysis_ref))
         if "matrix_results" in refs and analysis.execution_ref == refs["matrix_results"]:
             from simple_ar.report.projection import attach_paired_report_measurements
@@ -1272,7 +1275,7 @@ class ResearchApplication:
                 self.services.llm_client is not None
                 and planner_mode != "deterministic"
                 and not protocol_accepted
-                and self._task_kind() != "measurement"
+                and self._task_kind() not in {"measurement", "reproduction"}
             )
             task_plan = TaskPlanRequest(
                 task_kind=self._task_kind(),
@@ -1398,6 +1401,9 @@ class ResearchApplication:
                         coverage=search.coverage_report, source_plan=plan.source_plan.to_row(),
                         execution_context=self._problem_markdown(),
                     ), idea_limit=self.services.idea_limit,
+                    purpose="evidence_review" if self._task_kind() in {"survey", "reproduction"}
+                    and not any(step.action in {"assess_ideas", "research_design"} for step in self._load_task_plan().steps)
+                    else "research",
                     use_llm=self.services.llm_client is not None, llm_client=self.services.llm_client,
                 ), self._input_refs("plan", "read", "brief", "runtime_config", "search" if "search" in self.controller.manifest.state_refs else "documents"), allow_partial=True,
             )
@@ -1551,6 +1557,7 @@ class ResearchApplication:
                     source_index=source_index,
                     use_llm=self.services.llm_client is not None,
                     llm_client=self.services.llm_client,
+                    feasibility_llm_client=self.services.feasibility_llm_client,
                 ), inputs, allow_partial=True,
             )
         if action == "prepare_execution":
@@ -1702,7 +1709,9 @@ class ResearchApplication:
                 self.controller.pause(str(exc))
                 self._persist_application_views()
                 return False
-            inputs = self._input_refs("runtime_config") if self._task_kind() == "measurement" else self._input_refs("design", "runtime_config")
+            inputs = self._input_refs("runtime_config") if self._task_kind() in {"measurement", "reproduction"} else self._input_refs("design", "runtime_config")
+            if self._task_kind() == "reproduction":
+                inputs += self._input_refs("read", "synthesis")
             if "preparation" in self.controller.manifest.state_refs:
                 inputs += self._input_refs("preparation")
             if action.startswith("matrix_candidate_") and "implementation" in self.controller.manifest.state_refs:
@@ -2408,6 +2417,16 @@ class ResearchApplication:
         measured_failure = capability in {"experiment", "analysis"} and result.status == "failed" and any(
             ref.kind == artifact_kind for ref in result.artifacts
         )
+        audited_failure = capability == "report_audit" and result.status == "failed" and any(
+            ref.kind == artifact_kind for ref in result.artifacts
+        )
+        if audited_failure:
+            # A failed quality gate is still an inspectable artifact. Keep its
+            # ref and stop this run; do not turn it into a successful delivery.
+            self._record_attempt_outputs(capability, state_name, attempt_id, result)
+            self.controller.pause("Report audit failed; inspect report_audit.json before delivery or revision.")
+            self._persist_application_views()
+            return False
         if result.status not in accepted and not measured_failure:
             if capability == "implement" and self._schedule_implementation_refinement(state_name, attempt_id, result):
                 self._persist_application_views()
@@ -2502,7 +2521,8 @@ class ResearchApplication:
                     idea_id=self._effective_config().get("research_selected_idea_id"),
                     source_workspace=workspace, source_index=source_index,
                     implementation_feedback={"gap": payload["implementation_feedback"], "evidence": evidence},
-                    execution_context=self._problem_markdown(), use_llm=True, llm_client=self.services.llm_client),
+                    execution_context=self._problem_markdown(), use_llm=True, llm_client=self.services.llm_client,
+                    feasibility_llm_client=self.services.feasibility_llm_client),
                 (design_ref, feedback_ref, *self._input_refs("brief", "runtime_config", "synthesis", "read", "documents", "preparation")),
             )
         config, reason = self._revision_execution_config()
@@ -2623,10 +2643,10 @@ class ResearchApplication:
                 "and use technical recovery separately before another scientific round."
             )
             options = [{"action": "technical_retry", "reason": "Inspect the failed attempt before retrying the technical fault."}]
-        elif self._task_kind() == "measurement":
+        elif self._task_kind() in {"measurement", "reproduction"}:
             accepted_action = "stop"
             disposition = "deliver_observed_result"
-            reason = "The requested direct measurement and analysis are complete; no research candidate or scientific follow-up was requested."
+            reason = "The requested fixed protocol and analysis are complete; no research candidate or scientific follow-up was requested." if self._task_kind() == "reproduction" else "The requested direct measurement and analysis are complete; no research candidate or scientific follow-up was requested."
         elif requested_action not in {"supplement", "revise_candidate", "stop", "request_input"}:
             accepted_action = "request_input"
             disposition = "await_input"
@@ -2996,7 +3016,7 @@ class ResearchApplication:
         return int(state.removeprefix("analysis_r") or 0)
 
     def _research_iteration_limit(self) -> int:
-        if self._task_kind() == "measurement":
+        if self._task_kind() in {"measurement", "reproduction"}:
             return 0
         value = self._effective_config().get("research_max_iterations", 1)
         maximum = value if type(value) is int and value >= 0 else 1
@@ -3473,6 +3493,14 @@ class ResearchApplication:
             nested = getattr(request, "task_plan_request", None)
             if nested is not None and hasattr(nested, "llm_client"):
                 updates["task_plan_request"] = replace(nested, llm_client=bound_client)
+        reviewer = getattr(request, "feasibility_llm_client", None)
+        reviewer_binder = getattr(reviewer, "with_budget", None) if reviewer is not None else None
+        if callable(reviewer_binder):
+            updates["feasibility_llm_client"] = reviewer_binder(
+                self.budget_ledger,
+                session_id=self.controller.manifest.session_id,
+                attempt_id=attempt_id,
+            )
         return replace(request, **updates) if updates else request
 
     def _finish_available_work(self) -> None:
@@ -4115,7 +4143,9 @@ class ResearchApplication:
         result_path = self.controller.store.root / "attempts" / attempt.attempt_id / "capability_result.json"
         if not result_path.is_file():
             raise ResearchApplicationError(
-                f"Attempt {attempt.attempt_id} has no persisted result; confirm it with recover_interrupted()."
+                f"Attempt {attempt.attempt_id} has no persisted result. If the previous worker has stopped, "
+                "resume research-session with --session-root PATH --recover-interrupted; "
+                "the saved evidence and report checkpoints are retained."
             )
         result = self.controller.reconcile_attempt(attempt.attempt_id)
         measured_failure = attempt.capability in {"experiment", "analysis"} and result.status == "failed" and any(
@@ -4156,6 +4186,27 @@ class ResearchApplication:
 
         report_context, memory = self.report_inputs()
         config = ReportRuntimeConfig.model_validate(self._effective_config().get("report", {}))
+        # The persisted brief is the delivery authority.  A synthesis is
+        # evidence, not a replacement for the user's requested scope.
+        report_context.goal_markdown = self.brief.objective or self.brief.request_text
+        report_context.problem_markdown = self._problem_markdown()
+        delivery_limit = (
+            f"Final document may cite at most {config.max_cited_sources} distinct sources across all sections.\n\n"
+            if config.max_cited_sources else ""
+        )
+        memory.objective = (
+            delivery_limit + report_context.problem_markdown[:2700]
+            + "\n\nAccepted research context: " + memory.objective[:1200]
+        )[:4000]
+        if config.max_cited_sources:
+            report_context.survey_contract = {
+                **report_context.survey_contract,
+                "max_cited_sources": config.max_cited_sources,
+            }
+            memory.survey_contract = dict(report_context.survey_contract)
+            report_context.max_section_sources = min(
+                report_context.max_section_sources, config.max_cited_sources
+            ) if report_context.max_section_sources > 0 else config.max_cited_sources
         delivery: dict[str, Any] = {"template": report_context.report_mode}
         analysis_ref = self._latest_analysis_ref()
         if analysis_ref is not None:
@@ -4166,7 +4217,10 @@ class ResearchApplication:
             report_context.results["delivery"] = delivery
             memory.key_decisions.append(json.dumps(delivery, ensure_ascii=False))
         elif report_context.report_mode == "research_only":
-            config, delivery = resolve_research_only_delivery(config, source_count=len(report_context.papers))
+            available_sources = len(report_context.papers)
+            if config.max_cited_sources:
+                available_sources = min(available_sources, config.max_cited_sources)
+            config, delivery = resolve_research_only_delivery(config, source_count=available_sources)
             memory.template = config.template
             memory.key_decisions.append(json.dumps(delivery, ensure_ascii=False))
         template = load_report_template_bundle(report_mode=report_context.report_mode, config=config)
@@ -4562,8 +4616,8 @@ class ResearchApplication:
         bug_intents = {"bug", "bug_fix", "bug_repair", "repair"}
         if configured in bug_intents:
             return "bug_fix"
-        if configured == "measurement":
-            return "measurement"
+        if configured in {"measurement", "reproduction"}:
+            return configured
         if any(str(item).strip().lower() in bug_intents for item in self.brief.intents):
             return "bug_fix"
         if configured == "survey" or any(
@@ -4911,7 +4965,11 @@ class ResearchApplication:
 
     def _search_limit(self, plan: ResearchPlanResult) -> int:
         value = plan.source_plan.budget.get("max_documents")
-        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else self.services.max_results
+        limit = value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else self.services.max_results
+        # The delivery citation bound does not narrow the evidence pool.
+        # Search/reading can inspect more candidates before the writer selects
+        # sources for the final document; the final audit owns that bound.
+        return limit
 
     def _load_plan(self) -> ResearchPlanResult:
         return ResearchPlanResult.from_handoff_dict(self._state_payload("plan"))
@@ -5458,6 +5516,10 @@ def _bind_budget_services(
     if callable(binder):
         client = binder(ledger, session_id=session_id)
         services = replace(services, llm_client=client)
+    reviewer = services.feasibility_llm_client
+    reviewer_binder = getattr(reviewer, "with_budget", None) if reviewer is not None else None
+    if callable(reviewer_binder):
+        services = replace(services, feasibility_llm_client=reviewer_binder(ledger, session_id=session_id))
     return services
 
 

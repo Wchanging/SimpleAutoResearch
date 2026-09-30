@@ -65,6 +65,52 @@ def _pack() -> dict[str, object]:
 
 
 class SynthesisCapabilityTests(unittest.TestCase):
+    def test_evidence_review_has_no_innovation_or_experiment_contract(self):
+        class Client:
+            def ask_json(self, system, user, *, label=""):
+                self.system, self.prompt = system, user
+                return {"synthesis_markdown": "The source reports validation, with a stated limitation."}
+        client = Client()
+        for use_llm in (False, True):
+            result = synthesize_evidence(SynthesisRequest(evidence_pack=_pack(), purpose="evidence_review",
+                use_llm=use_llm, llm_client=client if use_llm else None))
+            self.assertEqual(result.status, "ready")
+            self.assertFalse(result.ideas)
+            self.assertFalse(result.novelty_checks)
+            self.assertIsNone(result.experiment_contract)
+            self.assertEqual(result.hypothesis_markdown, "")
+            self.assertTrue(result.synthesis_markdown)
+        self.assertIn("actual reported empirical evidence", client.prompt)
+
+    def test_compact_handoff_keeps_constraints_and_reading_caveats(self):
+        import json
+        from simple_ar.research.synthesis import _evidence_notes_markdown
+        pack = _pack()
+        constraint = "Context. " * 1100 + "Do not change the held-out evaluation split."
+        pack["execution_context"] = constraint
+        pack["limitations"] = ["Only abstracts were obtained."]
+        pack["paper_notes"] = [{"paper_id": "paper-1", "method": "Method detail. " * 40,
+            "key_claims": ["Coverage under exchangeability"],
+            "limitations": ["Does not guarantee conditional coverage."],
+            "open_questions": ["No evidence under distribution shift."], "confidence": "low",
+            "evidence_refs": ["paper-1#chunk-1"]}]
+        payload = json.loads(_bounded_pack_json(pack))
+        self.assertEqual(payload["execution_context"], constraint)
+        self.assertEqual(payload["limitations"], pack["limitations"])
+        notes = _evidence_notes_markdown(pack)
+        for text in ("Do not change the held-out evaluation split.", "Does not guarantee conditional coverage.",
+                     "No evidence under distribution shift.", "confidence: low", "evidence_refs"):
+            self.assertIn(text, notes)
+
+    def test_bounded_handoff_exposes_omitted_card_rows(self):
+        import json
+        from simple_ar.research.synthesis import _evidence_notes_markdown
+        pack = _pack()
+        pack["paper_cards"] = pack["paper_cards"] * 25
+        payload = json.loads(_bounded_pack_json(pack))
+        self.assertEqual(payload["context_selection"]["paper_cards"], {"included": 24, "available": 25})
+        self.assertIn("1 paper_cards rows omitted", _evidence_notes_markdown(pack))
+
     def test_correction_is_bounded_and_retains_rejected_output(self):
         for corrected in (True, False):
             with self.subTest(corrected=corrected), tempfile.TemporaryDirectory() as tmp:

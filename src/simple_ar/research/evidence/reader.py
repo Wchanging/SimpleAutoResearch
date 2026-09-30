@@ -330,6 +330,17 @@ def read_documents(request: ReadRequest) -> ReadResult:
         diagnostics.append(
             "No text chunks were available; cards may rely on metadata abstracts."
         )
+    else:
+        covered = {chunk.document_id for chunk in bundle.chunks}
+        missing = [record.document_id for record in bundle.records if record.document_id not in covered]
+        if missing:
+            status = "partial"
+            diagnostics.append(
+                f"No text chunks for {len(missing)} selected document(s): "
+                + ", ".join(missing[:5])
+                + (" (and more)" if len(missing) > 5 else "")
+                + ". Claims about these documents require further source access."
+            )
     return _with_evidence_validation(ReadResult(
         status=status,
         bundle=bundle,

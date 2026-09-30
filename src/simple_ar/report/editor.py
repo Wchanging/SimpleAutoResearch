@@ -7,12 +7,14 @@ from collections.abc import Mapping
 from typing import Any
 
 from simple_ar.integrations.llm import LLMResponseError
+from simple_ar.report.tools import report_tool_specs
 from simple_ar.report.schema import (
     ReportMemory,
     ReportRuntimeConfig,
     ReportSectionDraft,
     ReportSectionReview,
     ReportTemplateBundle,
+    ReportToolResult,
 )
 
 
@@ -25,6 +27,9 @@ def review_document(
     *, client: Any, template: ReportTemplateBundle, memory: ReportMemory,
     sections: list[ReportSectionDraft], config: ReportRuntimeConfig,
     execution_summary: Mapping[str, Any], metric_summary: Mapping[str, Any],
+    source_evidence: list[dict[str, Any]] | None = None,
+    execution_evidence: Mapping[str, Any] | None = None,
+    supplementary_evidence: list[ReportToolResult] | None = None,
     label: str = "report-document-reviewer",
 ) -> list[ReportSectionReview]:
     """Identify a few actionable cross-section defects without rewriting facts."""
@@ -33,6 +38,8 @@ def review_document(
     if sum(len(row["markdown"]) for row in drafts) > MAX_DOCUMENT_REVIEW_CHARS:
         raise ValueError("Whole-document review exceeds its bounded source window; no complete review was performed.")
     known = {row.section_id for row in sections}
+    unresolved = [finding.model_dump(mode="json") for finding in memory.reviewer_findings
+                  if finding.severity in {"major", "critical"}]
     prompt = json.dumps({
         "task": "review_document_coherence",
         "objective": memory.objective,
@@ -41,13 +48,25 @@ def review_document(
         "criteria": template.criteria_markdown,
         "sections": drafts,
         "verified_execution_results": execution_summary,
+        "execution_evidence": dict(execution_evidence or {}),
         "metric_sources": metric_summary,
+        "source_evidence": source_evidence or [],
+        "supplementary_evidence": [row.model_dump(mode="json") for row in (supplementary_evidence or [])[-8:]],
+        "supplementary_evidence_omitted": max(0, len(supplementary_evidence or []) - 8),
+        "context_tools": [{"name": spec.name, "description": spec.description, "input_schema": spec.input_schema}
+                          for spec in report_tool_specs()] if config.allow_source_backtracking else [],
+        "context_request_limit": config.max_backtracking_calls if config.allow_source_backtracking else 0,
         "known_limitations": memory.limitations[:12],
+        "unresolved_section_findings": unresolved[:12],
+        "unresolved_section_findings_omitted": max(0, len(unresolved) - 12),
         "focus": [
+            "Prioritize unresolved major/critical section findings before stylistic repetition. Recheck them against the current draft and supplied evidence, not superseded prose. If still valid, target their sections for correction; if more remain than the two-section budget, retain them as unresolved rather than claiming complete repair.",
             "Find contradictions between sections about the same method, setting, result or conclusion.",
             "Find substantial repetition of protocol, metrics or limitations across sections; assign each fact a clear home.",
             "Check that abstract and conclusion do not claim more than results, and that paper versus analysis-report tone matches the evidence.",
             "Do not request new experiments or rewrite measurements. An evidence gap remains an unresolved finding.",
+            "Separate declared protocol, executor observations and method verification. Invocation does not prove algorithmic details; elapsed duration is not the configured timeout.",
+            "Distinguish parsed source passages from model reading notes and abstract-only access. Do not deny a reported result merely because it is absent from an abstract; check the supplied passages. Missing passages are not proof that the paper omits the result.",
             "Return at most two section-level reviews for the most consequential issues; do not pad findings.",
         ],
         "output_schema": {"section_reviews": [{
@@ -57,6 +76,8 @@ def review_document(
                           "severity": "info|minor|major|critical", "message": "specific cross-section issue",
                           "section_id": "same target section", "suggested_action": "bounded correction"}],
             "revision_instructions": ["specific change to this section without changing measured facts"],
+            "context_requests": [{"tool_name": "get_paper_brief|get_metric_source|get_code_task_result|get_neighbor_chunks|get_synthesis_brief",
+                                  "arguments": {}, "caller": "document_reviewer"}],
         }]},
     }, ensure_ascii=False)
     if len(prompt) > MAX_DOCUMENT_REVIEW_PROMPT_CHARS:

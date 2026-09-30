@@ -138,6 +138,40 @@ class ReportMeasurementAuditTests(unittest.TestCase):
                 )
                 self.assertEqual(informational.status, "passed")
 
+    def test_unresolved_major_factual_review_fails_but_style_remains_warning(self):
+        for topic in ("enzyme screening", "database query planning"):
+            context = ReportContext(topic=topic, report_mode="research_only")
+            body = f"# {topic}\n\nA finding needs review.\n"
+            factual = ReportMemory(reviewer_findings=[ReviewerFinding(
+                finding_id="unsupported", type="unsupported_claim", severity="major",
+                message="The claim is not supported by the inspected source.",
+            )])
+            style = ReportMemory(reviewer_findings=[ReviewerFinding(
+                finding_id="style", type="style", severity="major", message="Improve organization.",
+            )])
+            self.assertEqual(build_report_audit(report=body, report_body=body,
+                context=context, memory=factual).status, "failed")
+            self.assertEqual(build_report_audit(report=body, report_body=body,
+                context=context, memory=style).status, "warning")
+
+    def test_explicit_citation_scope_is_checked_for_unrelated_survey_topics(self):
+        for topic in ("enzyme screening", "database query planning"):
+            with self.subTest(topic=topic):
+                context = ReportContext(
+                    topic=topic, report_mode="research_only",
+                    papers=[{"id": f"P{i}"} for i in range(1, 5)],
+                    survey_contract={"max_cited_sources": 2},
+                )
+                excessive = "# Review\n\nFirst [@P1], second [@P2], third [@P3].\n"
+                audit = build_report_audit(report=excessive, report_body=excessive,
+                                           context=context, memory=ReportMemory())
+                self.assertEqual(audit.status, "failed")
+                self.assertIn("source-scope-exceeded", [row.finding_id for row in audit.reviewer_findings])
+                bounded = "# Review\n\nFirst [@P1], second [@P2].\n"
+                accepted = build_report_audit(report=bounded, report_body=bounded,
+                                              context=context, memory=ReportMemory())
+                self.assertNotIn("source-scope-exceeded", [row.finding_id for row in accepted.reviewer_findings])
+
     def test_verified_metrics_keep_declared_rows_and_link_full_execution_evidence(self):
         metric_names = ["accuracy", "macro_f1", "forgetting", "backward_transfer"] + [
             f"accuracy_after_task_{index}_on_task_{task}"
@@ -194,7 +228,7 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             report=missing_required, report_body=missing_required,
             context=context, memory=ReportMemory(),
         )
-        self.assertEqual(audit.metric_audit.status, "warning")
+        self.assertEqual(audit.metric_audit.status, "failed")
         self.assertIn("metric:baseline:macro_f1", audit.metric_audit.unmatched_metrics)
 
         explicitly_required = "accuracy_after_task_0_on_task_0"
@@ -211,6 +245,66 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             )],
         )
         self.assertIn(explicitly_required, _verified_experiment_evidence(required_context))
+
+    def test_metric_name_and_value_on_different_lines_do_not_count_as_evidence(self):
+        context = ReportContext(
+            topic="Classifier", report_mode="experiment",
+            metric_sources=[MetricSource(
+                metric_id="candidate-accuracy", name="accuracy", value=0.81,
+                artifact="candidate.json", label="candidate",
+            )],
+        )
+        body = "# Results\n\nAccuracy was measured.\n\nAn unrelated threshold was 0.81.\n"
+        audit = build_report_audit(report=body, report_body=body,
+                                   context=context, memory=ReportMemory())
+        self.assertIn("candidate-accuracy", audit.metric_audit.unmatched_metrics)
+
+    def test_numeric_metric_name_is_not_itself_a_measured_value(self):
+        context = ReportContext(
+            topic="Code evaluation", report_mode="experiment",
+            metric_sources=[MetricSource(
+                metric_id="pass-at-one", name="pass@1", value=1,
+                artifact="results.json", label="candidate",
+            )],
+        )
+        body = "# Results\n\nWe recorded pass@1.\n"
+        audit = build_report_audit(report=body, report_body=body,
+                                   context=context, memory=ReportMemory())
+        self.assertIn("pass-at-one", audit.metric_audit.unmatched_metrics)
+        measured = body + "The measured pass@1 was 1.\n"
+        checked = build_report_audit(report=measured, report_body=measured,
+                                     context=context, memory=ReportMemory())
+        self.assertIn("pass-at-one", checked.metric_audit.matched_metrics)
+
+    def test_swapped_baseline_and_candidate_table_values_fail_audit(self):
+        context = ReportContext(
+            topic="Classifier", report_mode="experiment",
+            results={"comparisons": [{"metrics": [{
+                "name": "accuracy", "baseline": 0.61, "candidate": 0.82,
+                "delta": 0.21, "interpretation": "improved",
+            }]}], "result_schema": {"primary_metric": "accuracy"}},
+            metric_sources=[
+                MetricSource(metric_id="baseline", name="accuracy", value=0.61,
+                             artifact="baseline.json", label="baseline"),
+                MetricSource(metric_id="candidate", name="accuracy", value=0.82,
+                             artifact="candidate.json", label="candidate"),
+            ],
+        )
+        body = _verified_experiment_evidence(context)
+        good = build_report_audit(report=body, report_body=body,
+                                  context=context, memory=ReportMemory())
+        self.assertEqual(good.metric_audit.status, "passed")
+        altered = body.replace("| `accuracy` | 0.61 | 0.82 |", "| `accuracy` | 0.82 | 0.61 |")
+        bad = build_report_audit(report=altered, report_body=altered,
+                                 context=context, memory=ReportMemory())
+        self.assertEqual(bad.metric_audit.status, "failed")
+        self.assertTrue(any("persisted evidence" in message for message in bad.metric_audit.warnings))
+
+        missing_table = "## Verified Experiment Metrics\n\nAccuracy was 0.61 and 0.82.\n"
+        missing = build_report_audit(report=missing_table, report_body=missing_table,
+                                     context=context, memory=ReportMemory())
+        self.assertEqual(missing.metric_audit.status, "failed")
+        self.assertTrue(any("table is missing" in message for message in missing.metric_audit.warnings))
 
     def test_paired_report_keeps_detailed_measurements_out_of_paper_body(self):
         summary = {

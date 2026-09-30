@@ -11,6 +11,30 @@ duplicating the full artifact manual; for concrete commands and file trees, see
 
 ## Task-Driven Execution And Recovery
 
+`start` saves regular task inputs and delegates to `research-session`; it is
+not another planner or lifecycle. Preparation alone makes no model/process calls.
+Reading-to-synthesis preserves limitations, open questions, confidence and refs,
+labels omitted card rows, and does not silently truncate user execution constraints.
+This does not certify semantic understanding.
+For supplied-source reviews and prepared reproduction, synthesis summarizes
+evidence without inventing innovation candidates. An explicitly requested
+candidate assessment/design still uses research synthesis. Reading notes remain
+model interpretations; report Writer, section Reviewer and document Reviewer receive
+the same bounded, identified source passages and source-access status. Truncation
+is explicit, and absence from an excerpt is not absence from the paper.
+Report inputs also retain the original task and the recorded source-access mix
+(parsed text versus metadata/abstract only). An explicit report citation cap
+does not truncate search or reading candidates; it is checked on the final body. Unresolved major
+factual reviewer findings or a violated explicit cap fail the report audit;
+the failed audit remains inspectable and delivery pauses. Style warnings do
+not become scientific failures, and a passing mechanical audit is not a
+certificate of semantic support.
+
+Report diagrams require labels actually present in the section: no generic
+filler or inferred arrows. Paired figures keep input metric order (at most four
+by default), without favoring continual-learning metrics. Rendering is not
+scientific validation.
+
 The formal research entrypoint is `research-session`. It owns attempts, artifacts,
 reports and audits in one session, while `ResearchApplication` selects only the
 capabilities justified by the task, supplied assets and accepted execution
@@ -192,6 +216,19 @@ The canonical session can continue through `research-report` after `--no-report`
 It reuses persisted evidence and measurements, adding only missing report actions.
 Writer execution and checkpoints belong to `report/writing.py`; assembly and audit
 remain separate canonical capabilities in the same application lifecycle.
+
+Writing and both review levels distinguish declared protocol, recorded execution,
+and independent implementation checks. Where the registered document bundle is
+available, reviewers can request bounded passages around a cited chunk; cached
+excerpts alone are not reported as fresh source reading. Revision traces retain
+candidate text and whole-document adoption decisions even when verification fails.
+Inspect unresolved findings before treating a generated report as a checked paper.
+
+An assembled report can be exported independently with `report-export`:
+the canonical citation-key body and bibliography become an editable ACM
+manuscript. Export reuses the saved text and figures; it does not repeat reading,
+writing or measurements. Rendering/compilation status is separate from report
+audit status. See the [command reference](CLI_REFERENCE.md#simple-ar-report-export).
 
 Historical sessions remain inspectable, but no second Writer/report/audit executor
 resumes them. `build_research_session_report_inputs()` and
@@ -415,8 +452,17 @@ plan -> search -> document ingest -> read -> synthesize -> design
   process is not a valid measurement; a valid negative result is not an
   instruction to repair forever.
 - Report generation uses the recorded literature, implementation and measurement
-  evidence. Mechanical audit success is not proof of publication quality or
-  semantic correctness.
+  evidence. The audit checks that a metric name and value appear in the same
+  prose line or table row, and compares framework-rendered experiment tables
+  with persisted results; altered baseline/candidate cells fail the audit.
+  This is a consistency check, not independent validation of the measurements.
+  Mechanical audit success is not proof of publication quality or semantic
+  correctness (`semantic_review_status` remains `semantic_unchecked`).
+- Terminal delivery shows the latest measured candidate's method-evidence status
+  separately from code validation and report audit. Paired runs cross-check each
+  candidate measurement against the collection's implementation reference;
+  mixed or incomplete lineage is shown as unavailable. `not independently checked`
+  is an evidence limit, not a failed experiment or an implicit method approval.
 - Resuming report work must not rerun experiments that have completed. See the
   session commands above and `scripts/research_session_smoke.py` for the entry
   point; the offline smoke is a fixture, not real scientific validation.

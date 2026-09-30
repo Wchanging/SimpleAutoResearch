@@ -11,6 +11,7 @@ from simple_ar.integrations.llm import LLMClient, LLMError, LLMResponseError
 from simple_ar.report.assembler import assemble_report_sections
 from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
 from simple_ar.report.editor import review_document
+from simple_ar.report.execution_evidence import report_execution_evidence
 from simple_ar.report.schema import (
     FACTUAL_REVIEW_FINDING_TYPES,
     AgentReportResult,
@@ -72,9 +73,10 @@ Do not invent citations, metrics, datasets, methods, or external references.
 Treat the supplied verified execution results as authoritative for local
 baseline, candidate, comparison, and resource claims.
 Use short citation keys exactly as provided, in Pandoc-style form like [@P1].
-Write survey prose, not a pipeline run log: do not mention artifact paths,
-stage names, JSON files, tool traces, or search/debug internals unless the
-section is explicitly about limitations.
+For surveys, write synthesized prose, not a pipeline run log: omit stage names
+and search/debug internals. For experiment/reproduction setup, include the
+meaningful command and execution controls needed to repeat the work, using
+execution_evidence rather than inferring them from protocol declarations.
 Keep paragraphs short and focused. Use as many paragraphs as the requested
 section target needs; only when no substantive length target is provided,
 prefer 2-4 compact paragraphs or a short comparison list instead of one dense
@@ -143,7 +145,7 @@ def run_report_agent(
         config: Runtime report config.
         gateway: Read-only report tool gateway.
         emit: Optional progress callback.
-        checkpoint_sink: Save only fully drafted/reviewed sections and their evidence.
+        checkpoint_sink: Save completed sections, pending drafts and revision diagnostics.
         completed_checkpoint: Previously completed prefix; the caller verifies input identity.
 
     Returns:
@@ -228,7 +230,7 @@ def run_report_agent(
                     source_batch_count=len(source_batches),
                     emit=emit,
                 )
-                iterations.append(_iteration(section_index, section, "draft", draft.status, draft.used_sources))
+                iterations.append(_iteration(section_index, section, "draft", draft.status, draft.used_sources, draft=draft))
 
                 if config.source_strategy == "batch_refine" and len(source_batches) > 1:
                     for batch_index, batch in enumerate(source_batches[1:], start=2):
@@ -257,7 +259,7 @@ def run_report_agent(
                         )
                         draft = _merge_revision_draft(draft, revised)
                         iterations.append(
-                            _iteration(section_index, section, "integrate_sources", draft.status, draft.used_sources)
+                            _iteration(section_index, section, "integrate_sources", draft.status, draft.used_sources, draft=draft)
                         )
             if config.reviewer == "disabled":
                 sections.append(draft)
@@ -269,6 +271,8 @@ def run_report_agent(
             section_findings: list[ReviewerFinding] = []
             pending_draft = draft
             checkpoint()
+            review_context = next((row.tool_results for row in reversed(iterations)
+                if row.section_id == section.section_id and row.action == "revise"), [])
             # A review pass is always recorded. Each allowed correction then
             # receives another review, so max_review_iterations means actual
             # review -> revise cycles rather than extra reviews without edits.
@@ -286,8 +290,10 @@ def run_report_agent(
                     config=config,
                     label=f"report-reviewer-{section.section_id}{label_suffix}",
                     emit=emit,
+                    extra_context=review_context,
                 )
                 tool_results = _run_context_requests(gateway, review, config)
+                review_context = tool_results
                 all_tool_results.extend(tool_results)
                 section_findings.extend(review.findings)
                 all_findings.extend(review.findings)
@@ -330,8 +336,12 @@ def run_report_agent(
                         "revise",
                         draft.status,
                         draft.used_sources,
+                        draft=draft,
+                        tool_results=tool_results,
                     )
                 )
+                pending_draft = draft
+                checkpoint()
 
             sections.append(draft)
             _merge_draft_into_memory(current, draft, section_findings)
@@ -364,6 +374,7 @@ def run_report_agent(
                 client=client, context=context, template=template, memory=current,
                 config=config, sections=sections, iterations=iterations,
                 all_findings=all_findings, emit=emit,
+                checkpoint=checkpoint, gateway=gateway, all_tool_results=all_tool_results,
             )
             document_review_done = True
             checkpoint()
@@ -391,6 +402,8 @@ def _edit_whole_document(
     memory: ReportMemory, config: ReportRuntimeConfig, sections: list[ReportSectionDraft],
     iterations: list[ReportIterationRecord], all_findings: list[ReviewerFinding],
     emit: Callable[[str], None] | None,
+    checkpoint: Callable[[], None], gateway: ReportToolGateway,
+    all_tool_results: list[ReportToolResult],
 ) -> None:
     """Revise at most two sections against the assembled report, retaining failed reviews."""
     plans = {plan.section_id: plan for plan in memory.section_plan}
@@ -401,7 +414,10 @@ def _edit_whole_document(
             client=client, template=template, memory=memory,
             sections=_final_sequence(memory.section_plan, sections), config=config,
             execution_summary=_compact_execution_results(context.results),
+            execution_evidence=report_execution_evidence(context),
+            supplementary_evidence=all_tool_results,
             metric_summary=_prompt_metrics(memory, detail="summary"),
+            source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind == "paper"],
         )
     except (LLMError, ValidationError, ValueError) as exc:
         finding = ReviewerFinding(
@@ -426,23 +442,29 @@ def _edit_whole_document(
         try:
             # An optional editor must never replace an already reviewed section
             # with the generic writer/reviewer fallback after a provider error.
+            tool_results = _run_context_requests(gateway, review, config)
+            all_tool_results.extend(tool_results)
             strict = config.model_copy(update={"allow_llm_fallback": False})
             _emit(emit, f"Writer revising `{plan.heading}` for document coherence.")
             revised = _draft_section_with_recovery(
                 client=client, context=context, template=template, memory=memory,
-                section=plan, config=strict, extra_context=[], previous_draft=original,
+                section=plan, config=strict, extra_context=tool_results, previous_draft=original,
                 review=review, label=f"report-document-reviser-{plan.section_id}",
                 draft_mode="section_revision", emit=emit,
             )
+            iterations.append(_iteration(len(iterations) + 1, plan, "document_revise",
+                revised.status, revised.used_sources, draft=revised, tool_results=tool_results))
+            candidate_record = iterations[-1]
+            candidate_record.adopted = False
+            checkpoint()
             _emit(emit, f"Reviewer verifying revised `{plan.heading}`.")
             verification = _review_section_with_recovery(
                 client=client, context=context, template=template, memory=memory,
                 section=plan, draft=revised, config=strict,
                 label=f"report-document-verifier-{plan.section_id}", emit=emit,
+                extra_context=tool_results,
             )
             all_findings.extend(verification.findings)
-            iterations.append(_iteration(len(iterations) + 1, plan, "document_revise",
-                revised.status, revised.used_sources))
             iterations.append(_iteration(len(iterations) + 1, plan, "document_verify",
                 verification.verdict, revised.used_sources, findings=verification.findings))
             if _needs_revision(verification):
@@ -457,6 +479,7 @@ def _edit_whole_document(
                 ])
                 continue
             sections[index] = revised
+            candidate_record.adopted = True
             adopted_revision = True
             memory.reviewer_findings = [
                 finding for finding in memory.reviewer_findings if finding.section_id != plan.section_id
@@ -485,7 +508,10 @@ def _edit_whole_document(
                 client=client, template=template, memory=memory,
                 sections=_final_sequence(memory.section_plan, sections), config=config,
                 execution_summary=_compact_execution_results(context.results),
+                execution_evidence=report_execution_evidence(context),
+                supplementary_evidence=all_tool_results,
                 metric_summary=_prompt_metrics(memory, detail="summary"),
+                source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind == "paper"],
                 label="report-document-verifier",
             )
             for review in verification_reviews:
@@ -733,6 +759,10 @@ def _outline_planner_prompt(
         "report_mode": context.report_mode,
         "template": template.name,
         "style": config.style,
+        "delivery_constraints": {
+            "max_cited_sources": config.max_cited_sources or None,
+            "source_scope": "Final document, not each section" if config.max_cited_sources else None,
+        },
         "survey_contract": compact_contract,
         "required_structure": {
             "front_matter": ["Abstract", "Introduction"],
@@ -1198,7 +1228,10 @@ def _review_section_with_recovery(
     config: ReportRuntimeConfig,
     label: str,
     emit: Callable[[str], None] | None = None,
+    extra_context: list[ReportToolResult] | None = None,
 ) -> ReportSectionReview:
+    evidence_suffix = json.dumps({"extra_tool_context": [row.model_dump(mode="json")
+                                for row in (extra_context or [])[:6]]}, ensure_ascii=False) if extra_context else ""
     for attempt in range(2):
         try:
             return _review_section(
@@ -1206,10 +1239,10 @@ def _review_section_with_recovery(
                 section=section, draft=draft,
                 max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
                 label=f"{label}-retry" if attempt else label,
-                prompt_suffix=(
+                prompt_suffix=evidence_suffix + ((
                     "Return exactly one JSON object matching the reviewer schema, "
                     "with `revision_instructions` as a list of strings."
-                ) if attempt else "",
+                ) if attempt else ""),
             )
         except (LLMError, ValueError) as exc:
             failure = exc
@@ -1308,6 +1341,7 @@ def _writer_prompt(
             "execution_context": _compact_execution_context(context.execution_context),
             "experiment_plan": _compact_experiment_plan(context.experiment_plan),
             "verified_execution_results": _compact_execution_results(context.results),
+            "execution_evidence": report_execution_evidence(context),
             "synthesis": context.synthesis_markdown[:3000],
             "hypothesis": context.hypothesis_markdown[:1500],
         },
@@ -1332,7 +1366,7 @@ def _writer_prompt(
         "extra_tool_context": [result.model_dump(mode="json") for result in extra_context[:6]],
         "style_rules": [
             "Write as a long-form academic synthesis for the user topic, not as documentation of the SimpleAutoResearch pipeline.",
-            "Do not include artifact names, file paths, JSON filenames, stage numbers, or command provenance in the body.",
+            "Do not include pipeline/debug internals. In experiment/reproduction setup, preserve meaningful commands and declared limits needed to repeat the work, distinguishing them from verified method behavior. Survey prose need not include commands.",
             "Do not create sections named Search Scope, Evidence Summary, Pipeline, Artifacts, or Stage Outputs.",
             "Do not use prompt-planning phrases such as Hint:, Use this paper as, Paper Brief, or Additional synthesis detail.",
             "Do not write a paper-by-paper literature note dump; group papers by taxonomy and comparison dimensions.",
@@ -1399,6 +1433,7 @@ def _writer_recovery_prompt(
         "execution_context": _compact_execution_context(context.execution_context),
         "experiment_plan": _compact_experiment_plan(context.experiment_plan),
         "verified_execution_results": _compact_execution_results(context.results),
+        "execution_evidence": report_execution_evidence(context),
         "metric_sources": _prompt_metrics(
             memory, detail=_report_metric_detail(section.heading)
         ),
@@ -1495,6 +1530,7 @@ def _reviewer_prompt(
             memory, detail=_report_metric_detail(section.heading)
         ),
         "verified_execution_results": _compact_execution_results(context.results),
+        "execution_evidence": report_execution_evidence(context),
         "draft": draft.model_dump(mode="json"),
         "tool_policy": {
             "allowed_tools": [
@@ -1766,7 +1802,7 @@ def _compact_experiment_plan(plan: Mapping[str, Any] | object) -> dict[str, Any]
 
 
 def _compact_execution_context(value: object) -> str:
-    """Keep the narrative boundary, not repeated commands and artifact paths."""
+    """Legacy narrative view; structured declared/observed evidence is separate."""
     if not isinstance(value, str):
         return ""
     narrative = value.split("## Prepared execution specification", 1)[0].strip()
@@ -2196,6 +2232,34 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
         data["summary"] = str(data["summary"])[:800]
     metadata = _compact_source_metadata(data.get("metadata", {}))
     data["metadata"] = {key: value[:160] for key, value in metadata.items()}
+    # Writer and Reviewer must see the same evidence, not just an abstract.
+    # Keep source excerpts distinct from model-derived reading notes.
+    source_metadata = handle.metadata
+    for key in ("document_id", "extraction_status", "reading_artifact", "reading_notes_kind"):
+        if source_metadata.get(key):
+            data["metadata"][key] = str(source_metadata[key])[:240]
+    notes = source_metadata.get("reading_notes")
+    if isinstance(notes, dict):
+        projected_notes = {}
+        notes_truncated = False
+        for key in ("method", "datasets", "metrics", "key_claims", "limitations", "open_questions", "confidence", "evidence_refs"):
+            value = notes.get(key)
+            if isinstance(value, list):
+                projected_notes[key] = [str(item)[:400] for item in value[:6]]
+                notes_truncated |= len(value) > 6 or any(len(str(item)) > 400 for item in value[:6])
+            elif isinstance(value, str):
+                projected_notes[key] = value[:600]
+                notes_truncated |= len(value) > 600
+        data["metadata"]["reading_notes"] = projected_notes
+        data["metadata"]["reading_notes_truncated"] = notes_truncated
+    passages = source_metadata.get("evidence_passages")
+    if isinstance(passages, list):
+        data["metadata"]["evidence_passages"] = [
+            {"chunk_id": str(row.get("chunk_id", "")), "text": str(row.get("text", ""))[:1000],
+             "truncated": bool(row.get("truncated")) or len(str(row.get("text", ""))) > 1000}
+            for row in passages[:6] if isinstance(row, dict)
+        ]
+        data["metadata"]["evidence_passages_truncated"] = bool(source_metadata.get("evidence_passages_truncated")) or len(passages) > 6
     if "section" in data:
         data["section"] = str(data["section"])[:240]
     citation_key = data.get("citation_key") or ""
@@ -2265,6 +2329,7 @@ def _iteration(
     *,
     findings: list[ReviewerFinding] | None = None,
     tool_results: list[ReportToolResult] | None = None,
+    draft: ReportSectionDraft | None = None,
 ) -> ReportIterationRecord:
     return ReportIterationRecord(
         iteration=iteration,
@@ -2275,6 +2340,7 @@ def _iteration(
         used_sources=used_sources[:8],
         findings=findings or [],
         tool_results=tool_results or [],
+        draft=draft.model_copy(deep=True) if draft is not None else None,
     )
 
 

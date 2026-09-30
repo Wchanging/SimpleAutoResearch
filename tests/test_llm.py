@@ -25,6 +25,22 @@ from simple_ar.integrations.llm import (
 
 
 class LLMParsingTests(unittest.TestCase):
+    def test_json_mode_defaults_auto_and_respects_explicit_compatibility_choice(self):
+        from simple_ar.integrations.llm import _json_response_format_mode
+        self.assertEqual(LLMSettings().json_response_format, "auto")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_json_response_format_mode("SIMPLE_AR_JSON_RESPONSE_FORMAT"), "auto")
+        with patch.dict(os.environ, {"SIMPLE_AR_JSON_RESPONSE_FORMAT": "off"}):
+            self.assertEqual(_json_response_format_mode("SIMPLE_AR_JSON_RESPONSE_FORMAT"), "off")
+
+    def test_auto_json_only_falls_back_for_explicit_format_rejection(self):
+        client = LLMClient(LLMSettings(api_key="fixture", api_mode="chat"))
+        with patch.object(client, "ask", side_effect=[LLMError("response_format json_object is not supported"), '{"ready":true}']) as ask:
+            self.assertEqual(client.ask_json("system", "user"), {"ready": True})
+            self.assertEqual(ask.call_count, 2)
+            self.assertEqual(ask.call_args_list[0].kwargs["response_format"], {"type": "json_object"})
+            self.assertNotIn("response_format", ask.call_args_list[1].kwargs)
+
     def test_json_format_failure_is_distinct_from_provider_failure(self):
         client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat"))
         with patch.object(client, "ask", return_value="not JSON"):

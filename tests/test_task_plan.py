@@ -26,11 +26,46 @@ from simple_ar.research.task_plan import (
     append_research_followup,
     build_task_plan,
     default_task_steps,
+    _llm_prompt,
 )
 from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class TaskPlanTests(unittest.TestCase):
+    def test_prepared_reproduction_uses_evidence_and_fixed_protocol_not_innovation(self):
+        request = TaskPlanRequest(task_kind="reproduction", goal="Reproduce one source result", request_text="Reproduce one source result",
+            requested_outputs=("experiments", "report"), config={"research_materials_only": True, "research_local_documents": ["paper.pdf"]},
+            execution={"command": [sys.executable, "experiment.py"], "protocol": {
+                "hypothesis": "A source claim", "dataset": "Declared synthetic adaptation", "expected_outcome": "Coverage within declared tolerance"}})
+        plan = build_task_plan(request)
+        self.assertEqual([step.action for step in plan.steps], ["document_ingest", "read", "synthesize", "experiment", "analysis", "report_write", "report", "report_audit"])
+        restored = TaskPlanResult.from_handoff_dict(plan.to_handoff_dict())
+        self.assertEqual(restored, plan)
+        for changes in ({"config": {"research_local_documents": ["paper.pdf"]}},
+                        {"execution": {"command": ["python"], "protocol": {}}},
+                        {"execution": {**request.execution, "baseline_policy": "run"}},
+                        {"requested_outputs": ("report",)}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                build_task_plan(replace(request, **changes))
+
+    def test_planner_distinguishes_process_authority_from_available_work(self) -> None:
+        survey = TaskPlanRequest(task_kind="survey", goal="Review evidence", request_text="Review evidence", requested_outputs=("report",))
+        def boundary(request):
+            return json.loads(_llm_prompt(request, default_task_steps(request)).split("\n\n", 1)[1])
+        data = boundary(survey)
+        self.assertEqual(data["planning_boundary"]["allowed_process_steps"], [])
+        self.assertIn("read", data["available_non_process_actions"])
+        self.assertIn("report_audit", data["available_non_process_actions"])
+        self.assertIsNone(data["stop_after_action"])
+        self.assertNotIn("checkpoint", data["planning_boundary"])
+        measurement = replace(survey, task_kind="measurement", requested_outputs=("experiments",), execution={"command": [sys.executable, "-V"], "cwd": str(Path.cwd()), "timeout_sec": 5})
+        measured = boundary(measurement)
+        self.assertEqual(measured["available_non_process_actions"], ["analysis"])
+        self.assertIsNone(measured["stop_after_action"])
+        research = boundary(replace(measurement, task_kind="research"))
+        self.assertEqual(research["stop_after_action"], "research_design")
+        self.assertNotIn("experiment", research["available_non_process_actions"])
+
     def test_single_corrected_response_wrapper_keeps_all_plan_checks(self) -> None:
         request = TaskPlanRequest(task_kind="survey", goal="Review evidence", request_text="Review evidence")
         valid = default_task_steps(request)

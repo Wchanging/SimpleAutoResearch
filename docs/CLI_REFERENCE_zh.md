@@ -2,6 +2,16 @@
 
 [English version](CLI_REFERENCE.md)
 
+`start --fulltext --sources search` 明确允许远程全文抓取与 PDF 下载；不加时使用摘要和已提供的本地材料，启动前会显示该范围。全文获取失败不会冒充全文阅读。
+
+## 引导入口
+
+`simple-ar start` 询问已实现功能（`survey` / `bug_fix`）及任务输入，保存普通 TOML，
+再交给 `research-session`。选项：`--kind`、`--goal`、可重复的 `--document`、
+`--sources materials|search`、`--fulltext`、调研可选 `--max-cited-sources N`（最终引用来源上限）、`--project`、`--validate`、可重复的 `--allow`、
+`--model`、`--interaction`、`--output-root`、`--prepare-only`、`--yes`。
+默认值、权限和续跑见[配置说明](CONFIG_REFERENCE_zh.md#引导设置)。不调用外部 Agent。
+
 本文是 SimpleAutoResearch 的命令速查手册，只关注命令语法、参数、产物和少量边界说明。
 
 普通使用的正式任务入口是 `simple-ar research-session`，它负责有界的综述、改码和显式实验。
@@ -20,10 +30,12 @@ session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使
 
 | 命令 | 用途 |
 | --- | --- |
+| `simple-ar start` | 引导设置调研/代码修复，保存可编辑配置并进入同一 research-session。 |
 | `simple-ar research-session` | 有界任务驱动 session 的正式入口；accepted plan 选择适用的研究与执行步骤。 |
 | `simple-ar research-session-continue` | 重试 canonical 显式实验中的技术失败。 |
 | `simple-ar research-session-migrate` | 从只读的 `session_manifest.v1` 创建 canonical 后继 session。 |
 | `simple-ar research-report` | 从已完成的 research session 生成并审查报告。 |
+| `simple-ar report-export` | 将已组装报告转换为新的可编辑 ACM 工程，可选本地 TeX 编译。 |
 | `simple-ar research-brief` | 分段/开发接口：从主题或本地文献构建有证据支持的 research brief。 |
 | `simple-ar status` | 查看 research run 或 code-task run 状态。 |
 | `simple-ar tools ...` | 导出 tool schema、调用 run-local tool，或通过 MCP stdio 暴露只读 tools。 |
@@ -33,6 +45,33 @@ session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使
 | `simple-ar code-task ...` | 在隔离可编辑 workspace 中处理已有代码项目。 |
 
 ## Research 命令
+
+### 固定协议复现
+
+固定协议论文结论检查使用 `research-session --config examples/conformal_reproduction/research.toml`，
+先按案例 README 准备论文。`--task-kind reproduction` 要求本地材料和显式固定协议，
+不代表任意论文的自动环境探索/代码实现。
+
+### `simple-ar report-export`
+
+```bash
+uv run simple-ar report-export --report-dir 报告attempt目录 --output runs/acm-draft --compile
+```
+
+输入目录须包含保留引用键的 `report_body.md`；有引用时还需 `references.bib`。
+Pandoc 转换已有正文，不调用模型或重跑实验。目录内的图复制到工程，SVG 转换需
+`rsvg-convert`；不抓取远程图片。可用 `--title` 指定面向读者的标题。
+每次选新的输出目录，保留已有导出及人工编辑。
+
+`source.md` 与 TeX 使用包内图路径，可搬迁整个目录；可编辑 SVG 与转换后的图一同保留。
+指向外部本地证据的链接改为标签，原目标记录在 `export.json`；不会自动复制或重分发
+数据集和来源产物。正文事实审计仍需单独查看。
+
+输出为单栏 `acmart` 演示工程，含 `main.tex`、`body.tex`、文献、图和 `export.json`。
+它不替用户选择具体会议投稿选项，也不认证科研结论。需安装 Pandoc；加 `--compile`
+还需 `pdflatex`、`bibtex` 和 acmart 依赖。缺编译器或编译失败时返回非零状态，保留
+源码和诊断；实际编译写入 `build.log`。当前使用 pdfLaTeX，中文等非拉丁文字需自行
+调整可编辑工程的引擎和字体。
 
 
 ### `simple-ar research-brief`（分段/开发接口）
@@ -80,6 +119,11 @@ LLM 任务计划校验失败时最多自动纠正一次，不静默改用固定�
 显式提供新目标、outputs、本地文献或执行配置会修订当前 session。attempt 历史保留；只有
 命令、结果 schema、协议、准备 lineage 和保护资产仍匹配的测量才复用，其余依赖步骤重新规划。
 新增文献本身不会重跑有效实验；task kind 改变仍须新建 session。详见配置参考的续接说明。
+
+进程被杀且还没保存结果时，确认旧进程已停止，再用
+`--session-root PATH --recover-interrupted --model env` 恢复。旧 attempt 计入原预算，
+保留此前证据和有效章节检查点，重试当前步骤；配置/输入修改另一次续跑处理。
+已有失败结果的普通 API 故障使用常规续跑即可。
 恢复时未显式提供的报告选项沿用已存设置；对已请求报告的 session，显式报告改动只重建报告产物。
 尚未请求报告的前缀请使用 `research-report` 添加交付物。与已存 session 不匹配、
 且不能安全修订的搜索/摄取设置会在执行前拒绝；要应用这些设置请新建 session。

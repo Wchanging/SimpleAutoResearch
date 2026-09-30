@@ -49,10 +49,13 @@ class SynthesisRequest:
     include_experiment_contract: bool = True
     use_llm: bool = False
     llm_client: Any | None = field(default=None, repr=False, compare=False)
+    purpose: Literal["research", "evidence_review"] = "research"
 
     def __post_init__(self) -> None:
         if self.idea_limit < 1:
             raise ValueError("idea_limit must be at least 1")
+        if self.purpose not in {"research", "evidence_review"}:
+            raise ValueError("purpose must be research or evidence_review")
         if not self.novelty_backend.strip():
             raise ValueError("novelty_backend must not be empty")
         if self.use_llm and self.llm_client is None:
@@ -197,7 +200,7 @@ def _synthesize_deterministic_evidence(request: SynthesisRequest) -> SynthesisRe
     files, or choose a report claim.
     """
     pack = dict(request.evidence_pack)
-    ideas = build_idea_candidates(pack, limit=request.idea_limit)
+    ideas = build_idea_candidates(pack, limit=request.idea_limit) if request.purpose == "research" else []
     novelty_checks = build_novelty_checks(
         ideas,
         pack,
@@ -205,11 +208,11 @@ def _synthesize_deterministic_evidence(request: SynthesisRequest) -> SynthesisRe
     )
     experiment_contract = (
         build_experiment_contract(ideas, pack)
-        if request.include_experiment_contract
+        if request.include_experiment_contract and request.purpose == "research"
         else None
     )
 
-    diagnostics = _diagnostics(pack, ideas)
+    diagnostics = _diagnostics(pack, ideas, require_ideas=request.purpose == "research")
     return SynthesisResult(
         status="ready" if not diagnostics else "needs_review",
         gap_summary=build_gap_summary(pack),
@@ -219,6 +222,7 @@ def _synthesize_deterministic_evidence(request: SynthesisRequest) -> SynthesisRe
         generation_mode="deterministic",
         diagnostics=tuple(diagnostics),
         execution_context=_execution_context_text(pack),
+        synthesis_markdown=_evidence_notes_markdown(pack) if request.purpose == "evidence_review" else "",
     )
 
 
@@ -324,7 +328,18 @@ def _add_llm_synthesis(
             ),
             source_count=source_count,
     )
-    response = client.ask_json(SYNTHESIZE_SYSTEM, prompt, label="research-synthesis")
+    system = SYNTHESIZE_SYSTEM
+    if request.purpose == "evidence_review":
+        system = "Synthesize supplied source evidence for a review or a fixed-protocol reproduction. Distinguish source claims, reported observations, interpretation and unknowns. Never invent evidence."
+        prompt = (
+            "Return JSON with synthesis_markdown: a source-grounded synthesis addressing the user request. "
+            "Preserve assumptions, actual reported empirical evidence and its conditions, disagreements, limitations and unresolved questions. "
+            "Source measurements are prior work, not a local run. This task does not request innovative candidates or a new experiment protocol; "
+            "do not return idea_candidates or a proposed hypothesis. Use the supplied source identifiers for provenance.\n\n"
+            + _evidence_notes_markdown(pack) + "\n\nStructured source context:\n" + _bounded_pack_json(pack)
+            + "\n\nSource excerpts:\n" + str(pack.get("evidence_snippets") or "")
+        )
+    response = client.ask_json(system, prompt, label="research-synthesis")
     for round_index in range(2):
         if trace is not None:
             trace(f"response-{round_index + 1}", response)
@@ -332,8 +347,14 @@ def _add_llm_synthesis(
             if not isinstance(response, Mapping):
                 raise LLMError("LLM synthesis response must be a JSON object.")
             synthesis_markdown = _required_text(response, "synthesis_markdown")
-            hypothesis_markdown = _required_text(response, "hypothesis_markdown")
-            llm_ideas = _parse_llm_idea_candidates(response, pack, limit=request.idea_limit)
+            if request.purpose == "evidence_review":
+                if response.get("idea_candidates"):
+                    raise LLMError("Evidence-review synthesis must not generate research candidates.")
+                hypothesis_markdown = ""
+                llm_ideas = None
+            else:
+                hypothesis_markdown = _required_text(response, "hypothesis_markdown")
+                llm_ideas = _parse_llm_idea_candidates(response, pack, limit=request.idea_limit)
             break
         except LLMError as exc:
             if trace is not None:
@@ -342,7 +363,7 @@ def _add_llm_synthesis(
                 raise
             correction = {"validation_error": str(exc), "previous_response": response,
                           "allowed_motivation_refs": sorted(allowed_evidence_refs(pack))}
-            response = client.ask_json(SYNTHESIZE_SYSTEM,
+            response = client.ask_json(system,
                 prompt + "\n\nCorrect the rejected JSON once. Preserve grounded content; revise or omit an idea "
                 "that lacks evidence, never replace its citation with an unrelated allowed ID. Return the complete object.\n"
                 + json.dumps(correction, ensure_ascii=False, separators=(",", ":")),
@@ -574,6 +595,7 @@ def _bounded_pack_json(pack: Mapping[str, Any]) -> str:
         "topic": pack.get("topic", ""),
         "coverage": pack.get("coverage", {}),
         "counts": pack.get("counts", {}),
+        "limitations": pack.get("limitations", []),
         # Make the closed provenance boundary explicit in the model-facing
         # context.  The validator remains authoritative, but an exact
         # allowlist reduces avoidable retries when a model remembers a nearby
@@ -582,11 +604,16 @@ def _bounded_pack_json(pack: Mapping[str, Any]) -> str:
     }
     execution_context = _execution_context_text(pack)
     if execution_context:
-        selected["execution_context"] = execution_context[:8000]
+        # User constraints are not optional background. Truncating the tail can
+        # erase a permission or evaluation boundary while appearing complete.
+        selected["execution_context"] = execution_context
+    selection: dict[str, Any] = {}
     for key in ("paper_cards", "claim_cards", "method_cards", "dataset_cards"):
         value = pack.get(key)
         if isinstance(value, list):
             selected[key] = value[:24]
+            selection[key] = {"included": min(len(value), 24), "available": len(value)}
+    selected["context_selection"] = selection
     return json.dumps(selected, ensure_ascii=False, default=str)
 
 
@@ -602,7 +629,7 @@ def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
                 "A requested goal is not evidence that code, data or an environment is ready. "
                 "Preserve explicitly supplied execution constraints; otherwise identify what must be prepared, "
                 "without describing missing assets as a prepared boundary.",
-                execution_context[:8000],
+                execution_context,
             ]
         )
     for key, heading, fields in (
@@ -613,7 +640,8 @@ def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
         (
             "paper_notes",
             "Model Reading Notes",
-            ("paper_id", "title", "method", "relation_to_topic", "synthesis_hint"),
+            ("paper_id", "title", "method", "key_claims", "limitations", "open_questions",
+             "evidence_refs", "confidence", "relation_to_topic", "synthesis_hint"),
         ),
     ):
         rows = pack.get(key)
@@ -623,10 +651,21 @@ def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
         for row in rows[:24]:
             if not isinstance(row, Mapping):
                 continue
-            values = [str(row.get(field) or "").strip() for field in fields]
-            values = [value[:360] for value in values if value]
+            values = []
+            for field in fields:
+                value = row.get(field)
+                if value is None or value == "" or value == []:
+                    continue
+                text = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value).strip()
+                # Keep the reader's compact notes intact, including caveats and
+                # uncertainty; do not compress only the positive method story.
+                if key != "paper_notes" and len(text) > 360:
+                    text = text[:360] + " [truncated; consult source card]"
+                values.append(f"{field}: {text}")
             if values:
                 lines.append("- " + " | ".join(values))
+        if len(rows) > 24:
+            lines.append(f"[coverage] {len(rows) - 24} {key} rows omitted; this is not the complete evidence set.")
     return "\n".join(lines)
 
 
@@ -650,7 +689,7 @@ def _generation_mode(value: object) -> Literal["deterministic", "llm"]:
     return "llm" if str(value or "").strip().lower() == "llm" else "deterministic"
 
 
-def _diagnostics(pack: Mapping[str, Any], ideas: list[IdeaCandidate]) -> list[str]:
+def _diagnostics(pack: Mapping[str, Any], ideas: list[IdeaCandidate], *, require_ideas: bool = True) -> list[str]:
     """Report evidence gaps without blocking conservative synthesis."""
     diagnostics: list[str] = []
     # Facet gaps remain visible in ``gap_summary`` and the evidence pack.  They
@@ -664,7 +703,7 @@ def _diagnostics(pack: Mapping[str, Any], ideas: list[IdeaCandidate]) -> list[st
             diagnostics.append("No source documents are available.")
         if int(counts.get("chunks") or 0) <= 0:
             diagnostics.append("No source chunks are available.")
-    if not any(idea.motivation_refs for idea in ideas):
+    if require_ideas and not any(idea.motivation_refs for idea in ideas):
         diagnostics.append("No idea candidate has an evidence reference.")
     return diagnostics
 

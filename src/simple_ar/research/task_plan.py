@@ -144,7 +144,7 @@ class TaskPlanRequest:
     llm_client: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.task_kind not in {"survey", "bug_fix", "measurement", "research"}:
+        if self.task_kind not in {"survey", "bug_fix", "measurement", "reproduction", "research"}:
             raise ValueError(f"Unsupported task kind: {self.task_kind!r}")
         if not self.goal.strip() or not self.request_text.strip():
             raise ValueError("Task plan goal and request_text cannot be empty.")
@@ -194,7 +194,7 @@ class TaskPlanResult:
             raise ValueError("Only accepted task plans can be dispatched.")
         task_kind = str(data.get("task_kind") or "research")
         goal = str(data.get("goal") or "").strip()
-        if task_kind not in {"survey", "bug_fix", "measurement", "research"} or not goal:
+        if task_kind not in {"survey", "bug_fix", "measurement", "reproduction", "research"} or not goal:
             raise ValueError("Accepted task plan has an invalid task kind or goal.")
         return cls(
             task_kind=task_kind,
@@ -320,6 +320,12 @@ def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:
 
     if request.task_kind == "measurement":
         return [_row("experiment"), _row("analysis")]
+
+    if request.task_kind == "reproduction":
+        steps = [_row(action) for action in ("document_ingest", "read", "synthesize", "experiment", "analysis")]
+        if set(request.requested_outputs) & {"report", "paper", "full_paper"}:
+            steps.extend(_row(action) for action in ("report_write", "report", "report_audit"))
+        return steps
 
     if _provided_materials_only(request):
         # Supplied papers are an input boundary, not the output of a fake
@@ -553,9 +559,9 @@ def _planning_boundary(request: TaskPlanRequest) -> dict[str, Any]:
         allowed_rows = _bug_fix_steps(execution or {})
         checkpoint = "implementation"
         unauthorized_reason = "Bug-fix routing authorizes only its preparation and implementation actions."
-    elif request.task_kind == "measurement":
+    elif request.task_kind in {"measurement", "reproduction"}:
         allowed_rows = [_row("experiment")] if configured else []
-        checkpoint = "measurement"
+        checkpoint = request.task_kind
         unauthorized_reason = "Direct measurement authorizes only its supplied execution command."
     elif request.task_kind == "survey":
         checkpoint = "evidence"
@@ -586,7 +592,7 @@ def _planning_boundary(request: TaskPlanRequest) -> dict[str, Any]:
     return {
         "protocol_accepted": bool(request.execution_protocol_accepted),
         "execution_configured": configured,
-        "checkpoint": checkpoint,
+        "execution_phase": checkpoint,
         "allowed_process_steps": process_rows(allowed_rows),
         "deferred_process_steps": process_rows(deferred_rows),
         "unauthorized_process_reason": unauthorized_reason,
@@ -702,7 +708,7 @@ def _complete_required_steps(
     proposal and the inserted actions remain visible in the attempt trace.
     """
 
-    if request.task_kind in {"bug_fix", "measurement"}:
+    if request.task_kind in {"bug_fix", "measurement", "reproduction"}:
         return proposed, ()
     steps = list(proposed)
     explicit = {step.action for step in steps}
@@ -765,6 +771,24 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
             errors.append("Direct measurement requires exactly experiment then analysis; it does not perform research discovery or design.")
         if not isinstance(request.execution, Mapping) or not request.execution.get("command"):
             errors.append("Direct measurement requires an explicit execution command.")
+        if errors:
+            raise ValueError("\n".join(errors))
+        return
+    if request.task_kind == "reproduction":
+        expected = [row["action"] for row in default_task_steps(request)]
+        execution = request.execution or {}
+        protocol = execution.get("protocol")
+        if actions != expected:
+            errors.append("Prepared reproduction reads supplied evidence, runs one fixed protocol and analyzes it; it does not invent candidates or modify code.")
+        if not request.config.get("research_local_documents") or not _provided_materials_only(request):
+            errors.append("Prepared reproduction requires supplied documents and materials-only scope.")
+        if not execution.get("command") or execution.get("code_task") or execution.get("pairs") or execution.get("baseline_policy") in {"run", "reuse"}:
+            errors.append("Prepared reproduction requires one explicit command without CodeTask or paired baseline runs.")
+        if not isinstance(protocol, Mapping) or any(not str(protocol.get(key) or "").strip()
+                                                   for key in ("hypothesis", "dataset", "expected_outcome")):
+            errors.append("Prepared reproduction requires execution.protocol hypothesis, dataset and expected_outcome describing the exact reproduction scope and comparison criterion.")
+        if not set(request.requested_outputs) <= {"experiments", "report"} or "experiments" not in request.requested_outputs:
+            errors.append("Prepared reproduction outputs must include experiments and optionally report.")
         if errors:
             raise ValueError("\n".join(errors))
         return
@@ -975,6 +999,12 @@ def _planning_output_tokens(config: Mapping[str, object]) -> int | None:
 
 def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str:
     planning_boundary = _planning_boundary(request)
+    # Process authority and availability of evidence/report work are different
+    # axes. A survey has no process budget, but still has executable capabilities.
+    non_process = [
+        row["action"] for row in defaults
+        if row["capability"] not in _PROCESS_CAPABILITIES
+    ]
     boundary = {
         "task_kind": request.task_kind,
         "goal": request.goal,
@@ -994,6 +1024,11 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
             "repair_limit": _repair_limit(request.execution or {}),
         },
         "planning_boundary": planning_boundary,
+        "available_non_process_actions": non_process,
+        "required_output_actions": list(_required_output_actions(request)),
+        "stop_after_action": (
+            "research_design" if defaults and defaults[-1]["action"] == "research_design" else None
+        ),
         "material_boundary": {
             "provided_materials_only": _provided_materials_only(request),
             "search_allowed": not _provided_materials_only(request),
@@ -1010,16 +1045,21 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
     return (
         "Interpret this task into one short sequential accepted plan. The returned JSON must have "
         "a `steps` array. The suggested steps are context only, not authorization: choose the "
-        "necessary sequential stages for the task, assets, and constraints, and use only process "
-        "actions listed as allowed in `planning_boundary`. Deferred actions are not executable in "
-        "this proposal; stop at the named checkpoint and let the application resume after its "
-        "unlocking artifact exists. Return action, step_id, problem_solved, observation, and "
+        "necessary sequential stages for the task, assets, and constraints. Non-process work "
+        "is listed in available_non_process_actions; an empty allowed_process_steps list forbids "
+        "processes, not literature reading, synthesis or requested report delivery. Process "
+        "actions must be listed as allowed in planning_boundary. Deferred process actions are "
+        "not executable in this proposal. Only a non-null stop_after_action is an actual "
+        "planning checkpoint: end with that action and let the application continue later. "
+        "Otherwise include required_output_actions and their inputs. execution_phase is descriptive, "
+        "not a step, condition or instruction to stop. Return action, step_id, problem_solved, observation, and "
         "the supplied condition if any. Do not generate capability or state_name: the executor derives them. "
         "The boundary is authoritative even when a suggested step or task wording seems to imply more. "
         "`prepare_execution` creates an isolated workspace, `implement` only locates/patches/validates "
         "authorized code, `experiment` measures a configured condition, `analysis` interprets completed "
         "measurements, and none of these actions is a substitute for research design or report writing. "
         "For measurement, use exactly experiment then analysis; the supplied command is the accepted measurement protocol, not a research candidate. "
+        "For reproduction, use the supplied fixed-protocol suggested steps without research_design, assess_ideas or code edits; the user has already specified the reproduction scope and command. "
         "For bug_fix, use only prepare_execution (when required) and implement; implementation "
         "already includes validation and the repair explanation, so do not append summary or report steps. "
         "Do not invent dynamic indices, repair rounds, capabilities, processes, or parallel work. "
@@ -1031,7 +1071,8 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
         "execution or delivery yet. Missing required prerequisites are recorded and compiled by "
         "the application, but unauthorized actions and reversed explicit order are rejected. "
         "Inputs are bound by capability adapters; do not invent "
-        "input fields. Do not use `plan` or `task_plan` as a step: this planning attempt is "
+        "input fields. Completion is owned by the application; do not append stop, finish, "
+        "or request_input steps. Do not use `plan` or `task_plan` as a step: this planning attempt is "
         "already producing the accepted plan.\n\n"
         + json.dumps(boundary, ensure_ascii=False, indent=2, default=str)
     )

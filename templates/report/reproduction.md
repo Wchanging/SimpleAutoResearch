@@ -3,8 +3,9 @@
 ## Intended Use
 
 Use this template when a run attempts to reproduce, adapt, or ablate an
-existing method. V2.4 treats this as a report structure; managed environment and
-large ablation orchestration are handled in later versions.
+existing method. This is a writing structure, not an environment installer or
+experiment runner. Describe the declared reproduction scope; omit unsupported
+ablations rather than suggesting they were performed.
 
 ## Writing Workflow
 

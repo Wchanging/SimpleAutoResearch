@@ -1,0 +1,45 @@
+[task]
+kind = "reproduction"
+goal = "Check the known-weight split conformal coverage conclusion in Tibshirani et al. (2019) under the declared synthetic covariate shift. This is an adapted numerical check of the construction, not reproduction of the airfoil experiment or the entire paper. Compare observed coverage with the nominal 0.9 level, report Monte Carlo uncertainty and the ordinary unweighted comparison. Do not claim a new method or a proof of the theorem."
+outputs = ["experiments", "report"]
+output_root = "../../runs/conformal-reproduction/sessions"
+
+[model]
+name = "env"
+
+[research]
+materials_only = true
+interaction = "autonomous"
+
+[assets]
+papers = ["../../runs/conformal-reproduction/inputs/paper.pdf"]
+
+[execution]
+command = ["python", "run.py", "--seed", "7", "--repetitions", "3000", "--output", "../../runs/conformal-reproduction/observations/seed-7.json"]
+cwd = "."
+timeout_sec = 120
+baseline_policy = "skip"
+primary_metric = "weighted_coverage"
+metrics = ["weighted_coverage", "ordinary_coverage", "weighted_mc_standard_error", "infinite_radius_fraction"]
+
+[execution.protocol]
+contract_id = "weighted-conformal-synthetic-adaptation"
+hypothesis = "Exactly known covariate density ratios with the target-point mass at infinity retain marginal coverage under the paper's covariate-shift assumptions."
+dataset = "Independent synthetic Bernoulli covariates with source p=0.1 and target p=0.9; Y=X+epsilon, where epsilon is Gaussian with mean 0 and standard deviation 0.1 (variance 0.01); fixed predictor zero. No downloaded dataset."
+metrics = ["weighted_coverage", "ordinary_coverage", "weighted_mc_standard_error", "infinite_radius_fraction"]
+expected_outcome = "Nominal coverage is 0.9. Treat 3000 independent repetitions as a numerical check, not a proof. Predeclared diagnostic: known-weight coverage >=0.87 and ordinary coverage <0.8 for this strong shift. Report the values and Monte Carlo standard error even if the diagnostic fails. These are adaptation criteria, not numeric results copied from the paper."
+risks = ["One synthetic setting and one random stream; does not evaluate estimated ratios, learned predictors, the paper's airfoil data or robustness across settings."]
+
+[execution.protocol.comparison_conditions]
+scope = "adapted"
+seed = 7
+calibration_size = 200
+repetitions = 3000
+alpha = 0.1
+weight_source = "exact analytical ratio"
+
+[report]
+template = "reproduction"
+max_review_iterations = 2
+document_review = true
+max_cited_sources = 1

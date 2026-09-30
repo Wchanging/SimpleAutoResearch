@@ -11,6 +11,7 @@ from simple_ar.literature.openalex_client import _fulltext_url_from_openalex
 from simple_ar.research.contracts import (
     ClaimCard,
     DocumentRecord,
+    DocumentSection,
     ExperimentContract,
     PaperCard,
     QueryPlan,
@@ -46,6 +47,37 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class ResearchFoundationTests(unittest.TestCase):
+    def test_global_chunk_cap_preserves_coverage_across_long_documents(self) -> None:
+        records = [
+            DocumentRecord(document_id="long", title="Long", source="fixture", abstract="A" * 240),
+            DocumentRecord(document_id="short", title="Short", source="fixture", abstract="B" * 80),
+        ]
+        chunks = build_text_chunks(records, max_chunks=3, chunk_chars=40, overlap_chars=0)
+        self.assertEqual([chunk.document_id for chunk in chunks], ["long", "short", "long"])
+        self.assertEqual(chunks[0].chunk_id, "long#chunk-001")
+        self.assertEqual(chunks[2].chunk_id, "long#chunk-002")
+
+        sections = [
+            DocumentSection(section_id="long#section-001", document_id="long", section="method", heading="Method", text="A" * 240),
+            DocumentSection(section_id="short#section-001", document_id="short", section="method", heading="Method", text="B" * 80),
+        ]
+        section_chunks = build_text_chunks(records, sections=sections, max_chunks=2, chunk_chars=40, overlap_chars=0)
+        self.assertEqual([chunk.document_id for chunk in section_chunks], ["long", "short"])
+        self.assertEqual(len(build_text_chunks(records, max_chunks=None, chunk_chars=40, overlap_chars=0)), 8)
+
+    def test_read_marks_selected_documents_without_text_as_partial(self) -> None:
+        records = [
+            DocumentRecord(document_id="with-text", title="With text", source="fixture", abstract="Method evidence"),
+            DocumentRecord(document_id="without-text", title="Without text", source="fixture"),
+        ]
+        bundle = DocumentBundle(
+            records=records, sections=[], chunks=build_text_chunks(records),
+            fulltext_manifest={}, fulltext_extraction={},
+        )
+        result = read_documents(ReadRequest(bundle=bundle))
+        self.assertEqual(result.status, "partial")
+        self.assertIn("without-text", " ".join(result.diagnostics))
+
     def test_local_document_id_does_not_embed_workspace_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             local = Path(tmp) / "private_notes.md"

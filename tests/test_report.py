@@ -18,6 +18,7 @@ from simple_ar.report.agent import (
     _is_claim_record_response,
     _merge_revision_draft,
     _normalize_draft_response,
+    _outline_planner_prompt,
     _outline_is_overly_template_like,
     run_report_agent,
 )
@@ -228,6 +229,18 @@ def _extract_prompt_value(prompt: str, key: str) -> str:
 
 
 class ReportSafetyTests(unittest.TestCase):
+    def test_outline_planner_sees_document_wide_citation_bound(self) -> None:
+        config = ReportRuntimeConfig(max_cited_sources=3)
+        prompt = _outline_planner_prompt(
+            context=ReportContext(topic="Compare evidence", report_mode="survey"),
+            template=load_report_template_bundle(report_mode="survey", config=config),
+            memory=ReportMemory(objective="Compare the supplied studies."),
+            config=config,
+        )
+        constraint = json.loads(prompt.partition("\n\n")[2])["delivery_constraints"]
+        self.assertEqual(constraint["max_cited_sources"], 3)
+        self.assertEqual(constraint["source_scope"], "Final document, not each section")
+
     def test_writer_and_reviewer_distinguish_failed_execution_from_written_code(self) -> None:
         for instruction in (WRITER_SYSTEM, REVIEWER_SYSTEM):
             self.assertIn("A failed run", instruction)
@@ -714,6 +727,34 @@ class ReportSafetyTests(unittest.TestCase):
         paper_handles = [handle for handle in first_section.evidence_handles if handle.startswith("paper:")]
 
         self.assertEqual(len(paper_handles), 12)
+
+    def test_small_experiment_window_routes_paper_to_method_and_measurement_to_result(self) -> None:
+        paper = Paper(id="source-x", title="An existing method", authors=[],
+                      abstract="Source evidence", url="https://example.com/source")
+        context = _report_fixture([paper], topic="Method check", report_mode="experiment", max_section_sources=1)
+        context.source_handles.insert(0, SourceHandle(
+            handle="artifact:execution", kind="experiment", title="Local measurements"))
+        template = load_report_template_bundle(report_mode="experiment",
+                                              config=ReportRuntimeConfig(template="reproduction"))
+        memory = initialize_report_memory(context=context, template=template)
+        plans = {row.section_id: row for row in memory.section_plan}
+        method = plans["target_method_and_claimed_result"]
+        self.assertEqual(method.evidence_handles, ["paper:source-x"])
+        self.assertEqual(method.min_citations, 1)
+        result = plans["reproduction_result"]
+        self.assertEqual(result.evidence_handles, ["artifact:execution"])
+        self.assertEqual(result.min_citations, 0)
+        self.assertTrue(all(len(row.evidence_handles) <= 1 for row in memory.section_plan))
+
+    def test_method_without_literature_does_not_require_an_invented_citation(self) -> None:
+        context = _report_fixture([], topic="Measurement report", report_mode="experiment", max_section_sources=1)
+        context.source_handles = [SourceHandle(handle="artifact:execution", kind="experiment")]
+        template = load_report_template_bundle(report_mode="experiment",
+                                              config=ReportRuntimeConfig(template="reproduction"))
+        memory = initialize_report_memory(context=context, template=template)
+        method = next(row for row in memory.section_plan if "target_method" in row.section_id)
+        self.assertEqual(method.min_citations, 0)
+        self.assertEqual(method.evidence_handles, ["artifact:execution"])
 
     def test_report_agent_drafts_and_reviews_template_sections(self) -> None:
         paper = Paper(

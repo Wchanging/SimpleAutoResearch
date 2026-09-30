@@ -209,7 +209,7 @@ def _plan_hint(
         return _replace_hint(hint, status="skipped", reason="max_fulltext_fetch_attempts_reached")
     if hint.kind in {"pdf", "html", "text"}:
         return _replace_hint(hint, status="selected", reason="within_fulltext_budget")
-    return _replace_hint(hint, status="hint_only", reason="not_fetchable_by_day9")
+    return _replace_hint(hint, status="hint_only", reason="unsupported_remote_fulltext_kind")
 
 
 def _fulltext_fetch_attempt_cap(budget: dict[str, Any], *, target: int) -> int:

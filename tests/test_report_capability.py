@@ -57,10 +57,9 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             absent = assemble_report_document(replace(request, paired_summaries=()), report_dir=root / "no-data")
             self.assertEqual(absent.figures, ())
 
-    def test_default_paired_figures_stay_compact_and_prioritize_core_metrics(self):
+    def test_default_paired_figures_keep_task_metric_order_without_domain_bias(self):
         metrics = [
-            "accuracy", "forgetting", "average_incremental_accuracy",
-            "backward_transfer", "accuracy_after_task_10_on_task_1",
+            "rmse", "energy", "yield", "runtime", "accuracy",
         ]
         pair = {
             "seed": 0,
@@ -103,9 +102,10 @@ class ReportAuditCapabilityTests(unittest.TestCase):
 
         self.assertEqual(len(result.figures), 4)
         titles = " ".join(figure.title for figure in result.figures)
-        self.assertIn("accuracy", titles)
-        self.assertIn("forgetting", titles)
-        self.assertNotIn("accuracy_after_task_10_on_task_1", titles)
+        self.assertIn("rmse", titles)
+        self.assertIn("yield", titles)
+        self.assertNotIn("accuracy", titles)
+        self.assertTrue(result.figures[0].title.startswith("rmse"))
 
     def test_report_capability_assembles_explicit_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -262,7 +262,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                         ReportSectionDraft(
                             section_id="introduction",
                             heading="Introduction",
-                            draft_markdown="Evidence-backed claim [@paper-1].",
+                            draft_markdown="Evidence-backed claim [@paper-1].\n\n- Method A\n- Method B\n- Method C",
                         ),
                     ),
                 ),

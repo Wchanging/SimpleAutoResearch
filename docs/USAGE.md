@@ -66,7 +66,7 @@ SIMPLE_AR_MAX_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
 SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
 SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
-SIMPLE_AR_JSON_RESPONSE_FORMAT=off
+SIMPLE_AR_JSON_RESPONSE_FORMAT=auto
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
@@ -135,9 +135,10 @@ Notes:
   the saved plan; it does not erase completed evidence. Do not use this flag
   while another worker may still be active or combine it with input revisions.
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` controls provider-native JSON mode for
-  structured calls. The default `off` uses prompt-only parsing for broad
-  provider compatibility. `auto` tries `response_format={"type":"json_object"}`
-  and falls back if the provider rejects it; `json_object` always sends it.
+  structured calls. The default `auto` tries `response_format={"type":"json_object"}`
+  and falls back only when the provider explicitly rejects that format; ordinary text
+  calls are unchanged. `off` retains prompt-only parsing for providers that require it;
+  `json_object` always sends the format. Existing `.env` files with `off` keep that choice.
 - Price fields are optional and only affect cost estimates in usage summaries.
 
 ## Choose a task and its smallest input

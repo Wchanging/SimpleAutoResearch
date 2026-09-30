@@ -10,7 +10,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Column, Table
 from rich.text import Text
 
-from simple_ar.core.capabilities import ArtifactStore
+from simple_ar.core.capabilities import ArtifactRef, ArtifactStore
 from simple_ar.core.console import make_console
 from simple_ar.core.reporting import style_progress_message
 from simple_ar.core.process_output import ProcessMessage
@@ -21,7 +21,7 @@ DESCRIPTIONS = {
     "search": "Search literature providers and select sources",
     "document_ingest": "Fetch and extract available documents",
     "read": "Read documents and collect traceable evidence",
-    "synthesize": "Compare evidence and propose candidate ideas",
+    "synthesize": "Synthesize source evidence; propose candidates only when requested",
     "summarize": "Save the research summary",
     "assess_ideas": "Assess candidate evidence and feasibility",
     "research_design": "Design the selected experiment",
@@ -169,6 +169,9 @@ class ResearchConsole:
         audit_line = report_audit_line(view)
         if audit_line is not None:
             self.console.print(Text(audit_line))
+        method_line = method_validation_line(view)
+        if method_line is not None:
+            self.console.print(Text(method_line))
         self.console.print("Completion describes delivered artifacts, not scientific success or paper quality.", style="dim")
 
 
@@ -187,6 +190,63 @@ def report_audit_line(view) -> str | None:
     if audit.get("semantic_review_status") == "semantic_unchecked":
         return f"Report audit: {status} (semantic support is not certified)."
     return f"Report audit: {status}."
+
+
+def method_validation_line(view) -> str | None:
+    """Expose the measured candidate's method-evidence boundary at delivery."""
+    work_plan = getattr(view, "work_plan", {})
+    task = work_plan.get("task", {}) if isinstance(work_plan, dict) else {}
+    if isinstance(task, dict) and task.get("kind") in {"measurement", "reproduction"}:
+        return None  # A fixed protocol does not promise a new candidate implementation.
+    refs = view.state_refs
+    latest_experiment = next(
+        (name for label, name in reversed(_artifact_rows(view)) if label.startswith("experiment")),
+        None,
+    )
+    matrix_ref = _measured_matrix_ref(view)
+    experiment_ref = matrix_ref or refs.get(latest_experiment)
+    if experiment_ref is None:
+        return None
+    store = ArtifactStore(view.session_root)
+    try:
+        result = store.read_json(experiment_ref)
+        if not isinstance(result, dict):
+            return "Candidate method evidence: unavailable (invalid experiment artifact)."
+        if matrix_ref is not None:
+            pairs = result.get("pairs")
+            if not isinstance(pairs, list) or not pairs:
+                return None
+            candidates = [pair.get("candidate") if isinstance(pair, dict) else None for pair in pairs]
+            if all(candidate is None for candidate in candidates):
+                return None
+            measured_refs = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    return "Candidate method evidence: unavailable (incomplete candidate lineage)."
+                measurement = store.read_json(ArtifactRef.from_dict(candidate))
+                measured = measurement.get("implementation_ref") if isinstance(measurement, dict) else None
+                if not isinstance(measured, dict):
+                    return "Candidate method evidence: unavailable (incomplete candidate lineage)."
+                measured_refs.append(measured)
+            if any(ref != measured_refs[0] for ref in measured_refs[1:]):
+                return "Candidate method evidence: unavailable (mixed candidate implementations)."
+            if result.get("implementation_ref") != measured_refs[0]:
+                return "Candidate method evidence: unavailable (collection lineage mismatch)."
+            implementation_ref = measured_refs[0]
+        else:
+            implementation_ref = result.get("implementation_ref")
+            if not isinstance(implementation_ref, dict):
+                return "Candidate method evidence: unavailable (incomplete candidate lineage)."
+        implementation = store.read_json(ArtifactRef.from_dict(implementation_ref))
+    except (OSError, ValueError, TypeError, KeyError):
+        return "Candidate method evidence: unavailable (inspect the experiment artifacts)."
+    check = implementation.get("method_validation") if isinstance(implementation, dict) else None
+    if not isinstance(check, dict):
+        return "Candidate method evidence: not independently checked."
+    status = str(check.get("status") or "未检查")
+    if status == "未检查":
+        return "Candidate method evidence: not independently checked."
+    return f"Candidate method evidence: {status}."
 
 
 def _artifact_rows(view):
@@ -212,7 +272,7 @@ def _artifact_rows(view):
 
     if not by_role["baseline"] and "baseline" in refs:
         by_role["baseline"].append("baseline")
-    if "matrix_results" in refs:
+    if _measured_matrix_ref(view) is not None:
         rows.append(("matrix_results", "matrix_results"))
     for role, names in by_role.items():
         if not names and role in refs:
@@ -231,6 +291,24 @@ def _artifact_rows(view):
         for name in ("decision", "report", "report_audit") if name in refs
     )
     return rows
+
+
+def _measured_matrix_ref(view) -> ArtifactRef | None:
+    """Hide the session's preallocated matrix until a candidate was measured."""
+    ref = view.state_refs.get("matrix_results")
+    if ref is None:
+        return None
+    try:
+        payload = ArtifactStore(view.session_root).read_json(ref)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    pairs = payload.get("pairs") if isinstance(payload, dict) else None
+    if not isinstance(pairs, list) or not any(
+        isinstance(row, dict) and isinstance(row.get("candidate"), dict)
+        for row in pairs
+    ):
+        return None
+    return ref
 
 
 def _shell_join(parts):

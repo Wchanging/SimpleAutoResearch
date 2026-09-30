@@ -25,7 +25,9 @@ from simple_ar.research.synthesis import SynthesisResult
 
 class ResearchDesignTests(unittest.TestCase):
     _ALIGNED_REVIEW = {"verdict": "accept", "mechanism_alignment": "aligned",
-                       "mechanism_rationale": "The edit preserves the selected intervention.", "issues": []}
+                       "mechanism_rationale": "The edit preserves the selected intervention.",
+                       "premise_verdict": "supported", "premise_rationale": "The observed producer and consumer agree.",
+                       "blocking_issues": [], "delegated_checks": []}
 
     def test_initial_research_design_clarifies_method_before_code_task(self):
         from unittest.mock import Mock
@@ -46,7 +48,8 @@ class ResearchDesignTests(unittest.TestCase):
                   "unresolved_questions": [], "target_paths": ["model.py"],
                   "code_task_questions": ["Check the input shape at the forward call site."],
                   "source_quotes": [{"path": "model.py", "quote": "return x"}]},
-                self._ALIGNED_REVIEW,
+                {**self._ALIGNED_REVIEW,
+                 "delegated_checks": ["Verify the output dtype with a small local probe."]},
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
@@ -57,22 +60,27 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertEqual(result.status, "ready")
             self.assertIn("changed forward output", result.implementation_spec)
             self.assertEqual(result.code_task_questions,
-                             ("Check the input shape at the forward call site.",))
+                             ("Check the input shape at the forward call site.",
+                              "Verify the output dtype with a small local probe."))
             self.assertEqual(ResearchDesignResult.from_handoff_dict(result.to_handoff_dict()).code_task_questions,
                              result.code_task_questions)
             self.assertIn("def forward", client.ask_json.call_args.args[1])
+            refinement_prompt = client.ask_json.call_args_list[1].args[1]
+            self.assertIn('"fixed_idea_id": ""', refinement_prompt)
 
     def test_initial_design_does_not_accept_missing_or_different_mechanism_review(self):
         from unittest.mock import Mock
         from simple_ar.code_task.analysis.source_context import source_file_inventory
 
         for review in (
-            {"verdict": "accept", "issues": []},
+            {"verdict": "accept", "blocking_issues": [], "delegated_checks": []},
             {"verdict": "accept", "mechanism_alignment": "different",
-             "mechanism_rationale": "The edit changes a different model behavior.", "issues": []},
+             "mechanism_rationale": "The edit changes a different model behavior.",
+             "blocking_issues": [], "delegated_checks": []},
             {"verdict": "accept", "mechanism_alignment": "aligned",
              "mechanism_rationale": "The intervention appears aligned.",
-             "issues": ["The producer path still needs inspection."]},
+             "premise_verdict": "unknown", "premise_rationale": "The producer path is missing.",
+             "blocking_issues": ["The producer path still needs inspection."], "delegated_checks": []},
         ):
             with self.subTest(review=review), tempfile.TemporaryDirectory() as tmp:
                 workspace = Path(tmp)
@@ -101,6 +109,43 @@ class ResearchDesignTests(unittest.TestCase):
                     else "producer path",
                     client.ask_json.call_args.args[1],
                 )
+
+    def test_core_premise_contradiction_cannot_be_delegated_across_project_types(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        for filename, source in (
+            ("trainer.py", "def train(items):\n    return items[::-1]\n"),
+            ("pipeline.ts", "function train(items) { return items.reverse(); }\n"),
+        ):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                (workspace / filename).write_text(source, encoding="utf-8")
+                quote = "return items[::-1]" if filename.endswith(".py") else "return items.reverse()"
+                client = Mock()
+                client.ask_json.side_effect = [
+                    {"selected_idea_id": "idea-002", "rationale": "Try the selected direction."},
+                    {"status": "ready", "implementation_spec": "Apply the candidate to matching items.",
+                     "unresolved_questions": [], "target_paths": [filename],
+                     "source_quotes": [{"path": filename, "quote": quote}]},
+                    {"verdict": "revise", "mechanism_alignment": "aligned",
+                     "mechanism_rationale": "The proposed edit is in scope.",
+                     "premise_verdict": "contradicted",
+                     "premise_rationale": "The observed consumer reverses the intended item identity.",
+                     "blocking_issues": ["The candidate assumes matching items but the consumer reorders them."],
+                     "delegated_checks": ["Check dtype before editing."]},
+                    {"status": "blocked", "implementation_spec": "",
+                     "unresolved_questions": ["The required item identity is not preserved."]},
+                ]
+                result = build_research_design(ResearchDesignRequest(
+                    synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                    execution_boundary={"code_task": {"code_root": str(workspace)}},
+                    source_workspace=workspace, source_index=source_file_inventory(workspace),
+                    use_llm=True, llm_client=client,
+                ))
+                self.assertEqual(result.status, "blocked")
+                self.assertEqual(result.code_task_questions, ())
+                self.assertIn("contradicted", client.ask_json.call_args.args[1])
 
     def test_delegated_code_questions_reach_existing_code_task_handoff(self):
         from simple_ar.research.implementation import ImplementationRequest, _prepare_research_task
@@ -214,7 +259,9 @@ class ResearchDesignTests(unittest.TestCase):
                                    {"path": "model.py", "quote": "def build(k=5)"}]},
                 {"verdict": "revise", "mechanism_alignment": "different",
                  "mechanism_rationale": "The default is overridden by active configuration.",
-                 "issues": ["Changing the default is dormant: active config supplies k=32."]},
+                 "premise_verdict": "contradicted", "premise_rationale": "The active config overrides k.",
+                 "blocking_issues": ["Changing the default is dormant: active config supplies k=32."],
+                 "delegated_checks": []},
                 {"status": "blocked", "implementation_spec": "", "unresolved_questions": [
                     "A config-only change is outside the authorized edit scope."]},
             ]
@@ -513,6 +560,121 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertIn("model = Model(bins=bin_edges)", client.ask_json.call_args.args[1])
             self.assertIn("or a measured baseline", client.ask_json.call_args.args[1])
 
+    def test_refinement_accepts_unwrapped_read_only_source_query(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text("def train(x):\n    return model(x)\n", encoding="utf-8")
+            previous = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"files": ["model.py"], "symbols": ["train"], "query": "where is training called?", "literal": ""},
+                {"status": "ready", "implementation_spec": "Use the observed training path for a bounded candidate.",
+                 "unresolved_questions": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), previous_design=previous.to_handoff_dict(),
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertIn("return model(x)", client.ask_json.call_args_list[1].args[1])
+
+    def test_refinement_reasks_once_for_invalid_decision_shape(self):
+        from unittest.mock import Mock
+
+        previous = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
+        client = Mock()
+        client.ask_json.side_effect = [
+            {"status": "need_more_context", "implementation_spec": ""},
+            {"status": "blocked", "implementation_spec": "", "unresolved_questions": ["Source is unavailable."]},
+        ]
+        result = build_research_design(ResearchDesignRequest(
+            synthesis=self._synthesis(), previous_design=previous.to_handoff_dict(),
+            use_llm=True, llm_client=client,
+        ))
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("required decision shape", client.ask_json.call_args_list[1].args[1])
+        self.assertEqual(client.ask_json.call_count, 2)
+
+    def test_refinement_allows_one_contiguous_final_source_window(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text(
+                "".join(f"# source line {number:03d}: {'x' * 15}\n" for number in range(1, 281)),
+                encoding="utf-8",
+            )
+            previous = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
+            client = Mock()
+            requests = [
+                {"status": "inspect_source", "context_request": {
+                    "files": ["model.py"], "symbols": [], "query": "",
+                    "line_range": {"start": start, "end": start + 19},
+                }} for start in (1, 21, 41)
+            ]
+            requests.append({"status": "inspect_source", "context_request": {
+                "files": ["model.py"], "symbols": [], "query": "",
+                "line_range": {"start": 61, "end": 260},
+            }})
+            client.ask_json.side_effect = [
+                *requests,
+                {"status": "ready", "implementation_spec": "Use the observed source behavior.",
+                 "unresolved_questions": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), previous_design=previous.to_handoff_dict(),
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertEqual(client.ask_json.call_count, 5)
+            self.assertIn("# source line 260", client.ask_json.call_args_list[4].args[1])
+
+    def test_refinement_rejects_noncontiguous_fourth_source_request(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text(
+                "".join(f"# source line {number}\n" for number in range(1, 151)), encoding="utf-8",
+            )
+            previous = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"status": "inspect_source", "context_request": {
+                    "files": ["model.py"], "symbols": [], "query": "",
+                    "line_range": {"start": start, "end": start + 19},
+                }} for start in (1, 21, 41, 101)
+            ] + [
+                {"status": "blocked", "implementation_spec": "",
+                 "unresolved_questions": ["The source does not establish an implementable change."]}
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), previous_design=previous.to_handoff_dict(),
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.diagnostics, ("The source does not establish an implementable change.",))
+            self.assertEqual(client.ask_json.call_count, 5)
+            self.assertIn("Already supplied source ranges", client.ask_json.call_args_list[4].args[1])
+
+    def test_contiguous_read_allows_revisiting_a_partially_seen_last_line(self):
+        from simple_ar.research.design import _is_contiguous_source_read
+
+        excerpts = [{"path": "model.py", "end_line": 374, "text": "partial"}]
+        query = {"files": ["model.py"], "symbols": [], "query": "", "literal": "",
+                 "line_range": {"start": 374, "end": 573}}
+        self.assertTrue(_is_contiguous_source_read(query, excerpts))
+        query["line_range"] = {"start": 372, "end": 571}
+        self.assertFalse(_is_contiguous_source_read(query, excerpts))
+
     def test_refinement_reads_other_target_after_exact_literal_was_supplied(self):
         from unittest.mock import Mock
         from simple_ar.code_task.analysis.source_context import source_file_inventory
@@ -611,6 +773,37 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertEqual(client.ask_json.call_count, 4)
             self.assertIn("exact observed source quote from at least one existing target",
                           client.ask_json.call_args_list[2].args[1])
+
+    def test_initial_feasibility_uses_separate_reviewer_when_supplied(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "service.ts").write_text(
+                "export function total(lines) { return lines.reduce(sumLine, 0); }\n",
+                encoding="utf-8",
+            )
+            author = Mock()
+            author.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Bounded change."},
+                {"status": "ready", "implementation_spec": "Fix aggregation.",
+                 "unresolved_questions": [], "target_paths": ["service.ts"],
+                 "source_quotes": [{"path": "service.ts", "quote": "lines.reduce(sumLine, 0)"}]},
+            ]
+            reviewer = Mock()
+            reviewer.ask_json.return_value = self._ALIGNED_REVIEW
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {"code_root": str(workspace)}},
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=author, feasibility_llm_client=reviewer,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertEqual(author.ask_json.call_count, 2)
+            reviewer.ask_json.assert_called_once()
+            self.assertEqual(reviewer.ask_json.call_args.kwargs["label"],
+                             "research-design-feasibility-review")
 
     def test_initial_feasibility_can_add_a_new_file_with_existing_integration_context(self):
         from unittest.mock import Mock
@@ -741,7 +934,8 @@ class ResearchDesignTests(unittest.TestCase):
                 inspect("first"), inspect("second"), inspect("third"), ready,
                 {"verdict": "revise", "mechanism_alignment": "uncertain",
                  "mechanism_rationale": "The relevant source is not yet visible.",
-                 "issues": ["Inspect audit_target before editing."]},
+                 "premise_verdict": "unknown", "premise_rationale": "The consumer is not visible.",
+                 "blocking_issues": ["Inspect audit_target before editing."], "delegated_checks": []},
                 inspect("audit_target"), ready, self._ALIGNED_REVIEW,
             ]
             result = build_research_design(ResearchDesignRequest(
@@ -806,6 +1000,8 @@ class ResearchDesignTests(unittest.TestCase):
         self.assertIsNone(result.novelty_check)
         with self.assertRaises(LLMError):
             build_research_design(replace(request, idea_id=original.selected_idea.idea_id))
+        self.assertEqual(build_research_design(replace(request, idea_id=original.selected_idea.idea_id,
+            idea_id_is_fixed=False)).selected_idea, alternate)
         different_data = replace(alternate, required_datasets=["other"])
         self.assertEqual(build_research_design(replace(request,
             synthesis=replace(synthesis, ideas=(different_data,)))).status, "blocked")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -16,7 +17,7 @@ class SemanticScholarSearchError(RuntimeError):
 
 
 _BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
-_FIELDS = "paperId,title,abstract,year,venue,citationCount,authors,externalIds,url"
+_FIELDS = "paperId,title,abstract,year,venue,citationCount,authors,externalIds,url,openAccessPdf"
 _MAX_RESULTS = 25
 _TIMEOUT_SEC = 20
 _REQUEST_GAP_SEC = 1.5
@@ -97,6 +98,12 @@ def _paper_from_row(item: dict[str, Any]) -> Paper:
     url = str(item.get("url") or "").strip()
     if not url and arxiv_id:
         url = f"https://arxiv.org/abs/{arxiv_id}"
+    open_pdf = item.get("openAccessPdf")
+    pdf_url = str(open_pdf.get("url") or "").strip() if isinstance(open_pdf, dict) else ""
+    if not pdf_url.startswith("https://"):
+        pdf_url = ""
+    if not pdf_url and re.fullmatch(r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?", arxiv_id):
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
     return Paper(
         id=normalize_paper_id(f"s2-{paper_id or title[:40]}"),
         title=title,
@@ -108,6 +115,7 @@ def _paper_from_row(item: dict[str, Any]) -> Paper:
         source="semantic_scholar",
         source_id=paper_id or None,
         doi=doi or None,
+        fulltext_url=pdf_url or None,
     )
 
 

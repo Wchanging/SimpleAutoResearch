@@ -428,6 +428,35 @@ class ResearchConfigTests(unittest.TestCase):
             )
             self.assertEqual(LocalDocumentParser.from_source_plan(plan).max_pdf_pages, 40)
 
+    def test_fulltext_fetch_limits_roundtrip_to_source_budget(self):
+        from simple_ar.research.sources.base import build_source_plan
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.toml"
+            path.write_text(
+                '[task]\ngoal="Compare source evidence"\n'
+                '[research]\nuse_fulltext=true\nallow_pdf_download=true\nkeep_raw_pdf=true\n'
+                'max_fulltext_documents=3\nmax_pdf_mb=16\n', encoding="utf-8",
+            )
+            argv = ["research-session", "--config", str(path)]
+            defaults = research_defaults(argv)
+            args = build_parser(research_defaults=defaults).parse_args(argv)
+            self.assertEqual(args.research_max_fulltext_documents, 3)
+            self.assertEqual(args.research_max_pdf_mb, 16)
+            plan = build_source_plan(
+                topic=args.topic, problem_markdown="",
+                config={
+                    "research_use_fulltext": args.research_use_fulltext,
+                    "research_allow_pdf_download": args.research_allow_pdf_download,
+                    "research_keep_raw_pdf": args.research_keep_raw_pdf,
+                    "research_max_fulltext_documents": args.research_max_fulltext_documents,
+                    "research_max_pdf_mb": args.research_max_pdf_mb,
+                }, default_query=args.topic, default_max_results=args.max_results,
+            )
+            self.assertEqual(plan.budget["max_fulltext_documents"], 3)
+            self.assertEqual(plan.budget["max_pdf_mb"], 16)
+            self.assertTrue(plan.budget["keep_raw_pdf"])
+
     def test_config_can_record_an_explicit_idea_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "research.toml"

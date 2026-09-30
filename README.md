@@ -27,6 +27,8 @@ do not treat public access to the repository as an open-source license.
 | --- | --- | --- |
 | Explore a research direction | A question, scope, and model access | Selected sources, reading notes, synthesis, and a Markdown report |
 | Improve or repair a codebase | A project, task, and validation commands | An isolated edited workspace, change records, reviews, and validation results |
+| Export an existing report | Saved report artifacts and optional local TeX tools | Editable ACM manuscript, bibliography, figures, and compilation diagnostics |
+| Check a paper conclusion under a prepared protocol | Local paper, ready environment, fixed command and expected outcome | Source evidence, measured results and a bounded reproduction report; no innovation required |
 | Investigate a research improvement | Prepared code, data, environment, evaluation conditions, and resource limits | Candidate changes, actual measurements, analysis, and an evidence-based report or draft |
 
 ### Why SimpleAutoResearch?
@@ -87,6 +89,20 @@ provider supports. Do not commit credentials. Advanced transport, retry, and
 timeout options belong in the [configuration reference](docs/CONFIG_REFERENCE.md).
 
 ### 3. Run a survey
+
+No hand-written configuration is needed for a first custom task:
+
+```bash
+uv run simple-ar start
+```
+
+Choose `survey` or `bug_fix`, describe the goal and source/edit scope. The short
+guided setup saves ordinary TOML under `runs/assistant/`, then uses the same
+resumable session. Use `--prepare-only` to save without API calls. This is not
+yet free-form conversation, external Agent execution or arbitrary paper reproduction.
+See [guided configuration](docs/CONFIG_REFERENCE.md#guided-setup).
+
+Or run the supplied survey case directly:
 
 ```bash
 uv run simple-ar research-session --config examples/survey/research.toml

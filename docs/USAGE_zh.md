@@ -62,7 +62,7 @@ SIMPLE_AR_MAX_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
 SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
 SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
-SIMPLE_AR_JSON_RESPONSE_FORMAT=off
+SIMPLE_AR_JSON_RESPONSE_FORMAT=auto
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
@@ -97,7 +97,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
   `simple-ar research-session --session-root PATH --recover-interrupted --model MODEL`。
   它会按原预算记录一次失败并沿保存的计划继续，不删除已完成证据。原进程仍可能运行时不要使用；
   也不要同时提交输入修订。
-- `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制结构化 JSON 调用是否使用 provider 原生格式。默认 `off` 表示只靠 prompt 和本地解析，兼容性最好；`auto` 会尝试发送 `response_format={"type":"json_object"}`，仅在接口明确不支持时退回普通提示；`json_object` 表示强制发送。
+- `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制结构化 JSON 调用是否使用 provider 原生格式。默认 `auto` 尝试发送 `response_format={"type":"json_object"}`，仅在接口明确不支持时退回普通提示；普通文本调用不变。`off` 保留仅靠 prompt 和本地解析的模式，`json_object` 表示强制发送。已有 `.env` 明确写了 `off` 时继续尊重该选择，不静默覆盖。
 - 价格字段只影响 usage summary 中的费用估算；不填也会记录 token。
 
 ## 选择任务与最小输入

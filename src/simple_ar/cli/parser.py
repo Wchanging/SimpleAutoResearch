@@ -13,6 +13,18 @@ def build_parser(
     parser = argparse.ArgumentParser(prog="simple-ar")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    from simple_ar.cli.start import add_start_parser
+    add_start_parser(subparsers)
+
+    export_parser = subparsers.add_parser(
+        "report-export", help="Export an assembled report as an editable ACM acmart manuscript."
+    )
+    export_parser.add_argument("--report-dir", type=Path, required=True,
+                               help="Directory containing report_body.md and references.bib.")
+    export_parser.add_argument("--output", type=Path, required=True, help="New export directory.")
+    export_parser.add_argument("--title", help="Optional reader-facing document title.")
+    export_parser.add_argument("--compile", action="store_true", help="Also compile with installed pdflatex/bibtex; retain source and logs on failure.")
+
 
     brief_parser = subparsers.add_parser(
         "research-brief",
@@ -87,8 +99,8 @@ def build_parser(
         required=not (allow_resume_without_topic or bool(research_defaults and research_defaults.get("topic"))),
     )
     session_parser.add_argument(
-        "--task-kind", choices=("auto", "survey", "bug_fix", "measurement"), default="auto",
-        help="Task-driven path: survey reads evidence; bug_fix patches a project; measurement runs and analyzes an explicit command without research discovery.",
+        "--task-kind", choices=("auto", "survey", "bug_fix", "measurement", "reproduction"), default="auto",
+        help="Task-driven path: survey reads evidence; bug_fix patches a project; measurement analyzes a command; reproduction reads supplied papers then checks a fixed explicit protocol without innovation.",
     )
     session_parser.add_argument("--outputs", nargs="+", choices=("summary", "report", "experiments", "bug_fix"))
     session_parser.add_argument("--total-tokens", type=int, default=None, help="Optional session API token budget; omitted means unlimited.")
@@ -106,6 +118,11 @@ def build_parser(
         "--model",
         default=None,
         help="Optional model override; enables LLM-backed planning, reading, synthesis, and analysis.",
+    )
+    session_parser.add_argument(
+        "--feasibility-review-model",
+        default=None,
+        help="Optional independent model for source-backed implementation feasibility review.",
     )
     session_parser.add_argument(
         "--output-root",
@@ -139,6 +156,10 @@ def build_parser(
     )
     session_parser.add_argument("--max-results", type=int, default=10)
     session_parser.add_argument("--max-chunks", type=int, default=300)
+    session_parser.add_argument("--max-fulltext-documents", dest="research_max_fulltext_documents", type=int,
+                                default=None, help="Maximum remote full-text documents to fetch; omit for no document count cap.")
+    session_parser.add_argument("--max-pdf-mb", dest="research_max_pdf_mb", type=int,
+                                default=None, help="Maximum size of each fetched PDF in MiB; omit for no PDF size cap.")
     session_parser.add_argument("--idea-limit", type=int, default=3)
     session_parser.add_argument(
         "--max-research-iterations", type=int, default=1,

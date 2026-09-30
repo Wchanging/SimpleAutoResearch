@@ -480,6 +480,55 @@ class ReportCheckpointTests(unittest.TestCase):
         self.assertNotIn("full_text", projected_source["metadata"])
         self.assertEqual(len(projected_source["metadata"]["method"]), 160)
 
+    def test_writer_and_reviewer_preserve_fulltext_evidence_not_just_abstract(self):
+        from simple_ar.report.agent import _handles_for_section
+        source = SourceHandle(handle="paper:p1", kind="paper", paper_id="p1", citation_key="P1",
+            summary="Abstract without numbers", metadata={"extraction_status": "parsed",
+                "reading_notes_kind": "model_interpretation_not_source_text",
+                "reading_notes": {"datasets": ["Public data"], "key_claims": ["Reported error 0.12"]},
+                "evidence_passages": [{"chunk_id": "p1#results", "text": "Reported error 0.12", "truncated": False}]})
+        section = ReportSectionPlan(section_id="results", heading="Results", goal="Review evidence", evidence_handles=[source.handle])
+        projected = _handles_for_section(ReportMemory(source_handles=[source]), section)[0]["metadata"]
+        self.assertEqual(projected["extraction_status"], "parsed")
+        self.assertEqual(projected["reading_notes"]["datasets"], ["Public data"])
+        self.assertEqual(projected["evidence_passages"][0]["text"], "Reported error 0.12")
+        self.assertFalse(projected["evidence_passages"][0]["truncated"])
+
+    def test_whole_document_review_receives_source_passages(self):
+        class Client:
+            def ask_json(self, system, prompt, **kwargs):
+                payload = json.loads(prompt)
+                self.payload = payload
+                return {"section_reviews": []}
+        client = Client()
+        config = ReportRuntimeConfig(document_review=True)
+        template = load_report_template_bundle(report_mode="survey", config=config)
+        review_document(client=client, template=template, memory=ReportMemory(),
+            sections=[ReportSectionDraft(section_id="results", heading="Results", draft_markdown="A reported value.")],
+            config=config, execution_summary={}, metric_summary={},
+            source_evidence=[{"extraction_status": "parsed", "text": "Reported value 0.12"}])
+        self.assertEqual(client.payload["source_evidence"][0]["text"], "Reported value 0.12")
+
+    def test_document_review_receives_remaining_major_section_findings(self):
+        from simple_ar.report.schema import ReviewerFinding
+        class Client:
+            def ask_json(self, system, prompt, **kwargs):
+                self.payload = json.loads(prompt)
+                return {"section_reviews": []}
+        client = Client()
+        config = ReportRuntimeConfig(document_review=True)
+        memory = ReportMemory(reviewer_findings=[ReviewerFinding(
+            finding_id="unverified-setup", type="unsupported_claim", severity="major",
+            section_id="setup", message="Configured conditions are not independently verified."),
+            ReviewerFinding(finding_id="wording", type="style", severity="minor", message="Simplify prose.")])
+        review_document(client=client,
+            template=load_report_template_bundle(report_mode="experiment", config=config), memory=memory,
+            sections=[ReportSectionDraft(section_id="setup", heading="Setup", draft_markdown="The configured setting.")],
+            config=config, execution_summary={}, metric_summary={})
+        self.assertEqual([row["finding_id"] for row in client.payload["unresolved_section_findings"]],
+                         ["unverified-setup"])
+        self.assertEqual(client.payload["unresolved_section_findings_omitted"], 0)
+
     def test_reviewer_failure_obeys_explicit_fallback_setting(self):
         context = ReportContext(topic="Calibration", report_mode="experiment")
         memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])

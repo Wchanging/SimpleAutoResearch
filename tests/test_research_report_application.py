@@ -124,6 +124,57 @@ class ResearchReportApplicationTests(unittest.TestCase):
             self.assertEqual(evidence["metadata"]["reading_artifact"], "read/result.json")
         self.assertEqual(memory.source_handles, projected.source_handles)
         self.assertEqual(context.source_handles[0].summary, "")
+        self.assertIn("2 metadata/abstract-only", projected.evidence_summary)
+        self.assertTrue(any("Do not describe metadata/abstract-only sources" in line
+                            for line in memory.limitations))
+
+    def test_local_document_reading_notes_reach_report_tools_without_connector_metadata(self):
+        from simple_ar.report.projection import attach_report_read_evidence
+        from simple_ar.core.capabilities import ArtifactRef
+        from simple_ar.research.contracts import DocumentRecord
+        from simple_ar.research.documents.ingest import DocumentBundle
+        from simple_ar.research.evidence.reader import ReadResult
+        from simple_ar.report.schema import SourceHandle, ReportToolCall
+        from simple_ar.report.tool_gateway import ReportToolGateway
+
+        record = DocumentRecord(document_id="local-paper", source="local_files", title="Local paper",
+                                extraction_status="parsed", abstract="Background only")
+        from simple_ar.research.contracts import TextChunk
+        documents = DocumentBundle(records=[record], fulltext_manifest={}, fulltext_extraction={}, sections=[],
+            chunks=[TextChunk(chunk_id="result-span", document_id="local-paper", text="Reported error was 0.12"),
+                    TextChunk(chunk_id="other-paper", document_id="different", text="Do not join this source")])
+        note = {"paper_id": "local-paper", "datasets": ["Public observations"],
+                "metrics": ["Prediction error"], "key_claims": ["Reported error was 0.12"],
+                "limitations": ["One setting"], "confidence": "medium", "evidence_refs": ["result-span"]}
+        context = ReportContext(topic="Evaluation", report_mode="research_only", source_handles=[
+            SourceHandle(handle="paper:local-paper", kind="paper", paper_id="local-paper", citation_key="P1")])
+        context, memory = attach_report_read_evidence(context, ReportMemory(), documents=documents,
+            read=ReadResult(status="completed", bundle=documents, paper_notes=(note,)), read_ref=ArtifactRef("read.json"))
+        result = ReportToolGateway(context).call(ReportToolCall(tool_name="get_paper_brief", arguments={"citation_key": "P1"}))
+        metadata = result.content["handles"][0]["metadata"]
+        self.assertEqual(metadata["reading_notes"]["key_claims"], note["key_claims"])
+        self.assertEqual(metadata["reading_notes"]["datasets"], note["datasets"])
+        self.assertEqual(metadata["reading_notes"]["metrics"], note["metrics"])
+        self.assertEqual(metadata["reading_notes_kind"], "model_interpretation_not_source_text")
+        self.assertEqual(metadata["evidence_passages"][0]["text"], "Reported error was 0.12")
+        self.assertEqual(memory.source_handles, context.source_handles)
+
+    def test_projection_and_synthesis_tool_keep_evidence_prose_not_only_idea_scaffold(self):
+        from simple_ar.report.projection import _synthesis_markdown
+        from simple_ar.research.synthesis import SynthesisResult
+        from simple_ar.report.schema import ReportToolCall
+        from simple_ar.report.tool_gateway import ReportToolGateway
+
+        text = "## Reported evidence\nThe source reports a controlled measurement, not a new experiment."
+        synthesis = SynthesisResult(status="ready", gap_summary="Sparse local heuristic", ideas=(),
+                                    novelty_checks=(), synthesis_markdown=text)
+        self.assertEqual(_synthesis_markdown(synthesis), text)
+        context = ReportContext(topic="Review", report_mode="research_only", synthesis_markdown=text,
+                                evidence_summary="One document ingested.")
+        result = ReportToolGateway(context).call(ReportToolCall(tool_name="get_synthesis_brief"))
+        self.assertEqual(result.content["text"], text)
+        legacy = SynthesisResult(status="ready", gap_summary="Historical summary", ideas=(), novelty_checks=())
+        self.assertIn("Historical summary", _synthesis_markdown(legacy))
 
     def test_metric_projection_keeps_each_conditions_own_units_and_direction(self):
         candidate = {"metrics": {"accuracy": 0.8},

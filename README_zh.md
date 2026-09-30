@@ -36,6 +36,13 @@
 
 ## 快速开始
 
+已准备好环境的论文结论检查可用 `task.kind = "reproduction"`，不强制提出创新。
+低开销完整案例见 [conformal_reproduction](examples/conformal_reproduction/README.md)，
+它是声明过条件的合成改编检查，不是整篇论文或 PaperBench 成绩。
+
+已有报告可用 `simple-ar report-export` 导出可编辑 ACM 演示工程并选择编译；
+无需再调用模型或重跑实验，依赖及命令见[CLI 参考](docs/CLI_REFERENCE_zh.md#simple-ar-report-export)。
+
 先运行一个真实文献调研：**无需数据集、训练环境或 GPU**，但需要网络和可用的模型 API。
 
 ### 1. 安装
@@ -75,6 +82,19 @@ Responses 接口，则选择 `responses`。不要提交密钥。
 
 ### 3. 启动调研
 
+第一次尝试自己的任务不必先写配置文件：
+
+```bash
+uv run simple-ar start
+```
+
+按提示选择 `survey` 或 `bug_fix`，说明目标与材料/可修改范围。引导入口会把
+普通 TOML 保存到 `runs/assistant/`，再交给同一套可续跑的会话；
+加 `--prepare-only` 可以只保存输入，不调用模型或执行命令。它目前不是自由对话，
+也不提供任意论文复现或外部 Agent 执行。详见[引导配置](docs/CONFIG_REFERENCE_zh.md)。
+
+也可以直接运行仓库中的调研案例：
+
 ```bash
 uv run simple-ar research-session --config examples/survey/research.toml
 ```
@@ -96,6 +116,12 @@ goal = "比较小内存持续学习中的回放方法，解释各自的权衡、
 > 耗时取决于服务商与任务，不承诺固定几分钟完成。
 
 ## 选择案例
+
+无需手写配置即可尝试自己的任务：`uv run simple-ar start`。当前支持 `survey`
+（调研报告）和 `bug_fix`（隔离改码与验证），询问目标和来源/修改范围后，在
+`runs/assistant/` 保存普通 TOML，再进入同一可恢复会话。`--prepare-only` 只准备输入，
+不调用 API。这是简短问答引导，尚非自由对话 Agent，也不包含任意论文复现。
+详见[引导设置](docs/CONFIG_REFERENCE_zh.md#引导设置)。
 
 每个示例目录对应一个完整案例，包含输入、配置与运行说明。实际运行产物统一放入 `runs/`。
 

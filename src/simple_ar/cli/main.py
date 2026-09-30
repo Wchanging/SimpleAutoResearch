@@ -92,6 +92,27 @@ def main(argv: Sequence[str] | None = None) -> None:
     except (OSError, ValueError) as exc:
         raise SystemExit(f"Invalid research configuration: {exc}") from exc
     args = parser.parse_args(arguments)
+    if args.command == "report-export":
+        from simple_ar.report.export import export_acm_report
+        try:
+            result = export_acm_report(args.report_dir, args.output, title=args.title, compile_pdf=args.compile)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"Report export failed: {exc}") from exc
+        print_line(f"ACM project: {args.output.resolve()}; status: {result['status']}")
+        if result.get("compile_note"):
+            print_line(result["compile_note"])
+        if args.compile and not result["compiled"]:
+            raise SystemExit(1)
+        return
+    if args.command == "start":
+        from simple_ar.cli.start import prepare_start
+        try:
+            config_path = prepare_start(args)
+        except (OSError, ValueError, EOFError, KeyboardInterrupt) as exc:
+            raise SystemExit(f"Task setup stopped: {exc}") from exc
+        if config_path is not None and not args.prepare_only:
+            main(["research-session", "--config", str(config_path)])
+        return
     if args.command == "research-session":
         args._explicit_resume_destinations = _explicit_session_option_destinations(
             parser, arguments, explicit_config_destinations,
@@ -316,6 +337,10 @@ def _print_research_session(args: argparse.Namespace) -> None:
         )
     if getattr(args, "research_max_pdf_pages", None) is not None and args.research_max_pdf_pages < 1:
         raise SystemExit("research.max_pdf_pages must be positive.")
+    for name in ("research_max_fulltext_documents", "research_max_pdf_mb"):
+        value = getattr(args, name, None)
+        if value is not None and value < 1:
+            raise SystemExit(f"{name.removeprefix('research_')} must be positive when provided.")
     if args.timeout_sec is not None and args.timeout_sec < 1:
         raise SystemExit("--timeout-sec must be positive when provided.")
     if args.max_review_iterations < 0:
@@ -323,8 +348,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
     if args.max_research_iterations < 0:
         raise SystemExit("--max-research-iterations cannot be negative.")
     task_kind = str(getattr(args, "task_kind", "auto") or "auto").strip().lower()
-    if task_kind not in {"auto", "survey", "bug_fix", "measurement"}:
-        raise SystemExit("--task-kind must be auto, survey, bug_fix or measurement.")
+    if task_kind not in {"auto", "survey", "bug_fix", "measurement", "reproduction"}:
+        raise SystemExit("--task-kind must be auto, survey, bug_fix, measurement or reproduction.")
     command = tuple(args.command_argv or ())
     execution_details = getattr(args, "execution_details", {})
     if command and execution_details.get("pairs"):
@@ -341,6 +366,17 @@ def _print_research_session(args: argparse.Namespace) -> None:
             raise SystemExit("--task-kind measurement requires --outputs experiments.")
         if not command or getattr(args, "code_task_config", None) or execution_details.get("pairs") or execution_details.get("baseline_policy") in {"run", "reuse"}:
             raise SystemExit("--task-kind measurement requires one explicit command without CodeTask, paired runs, or baseline comparison.")
+    if task_kind == "reproduction":
+        if not outputs or "experiments" not in outputs or set(outputs) - {"experiments", "report"}:
+            raise SystemExit("--task-kind reproduction requires outputs experiments and optionally report.")
+        if not command or getattr(args, "code_task_config", None) or execution_details.get("pairs") or execution_details.get("baseline_policy") in {"run", "reuse"}:
+            raise SystemExit("Prepared reproduction requires one explicit command without CodeTask or paired runs.")
+        protocol = execution_details.get("protocol")
+        if not isinstance(protocol, dict) or any(not str(protocol.get(key) or "").strip()
+                                                for key in ("hypothesis", "dataset", "expected_outcome")):
+            raise SystemExit("Prepared reproduction requires execution.protocol hypothesis, dataset and expected_outcome.")
+        if not getattr(args, "local_document", None) or not getattr(args, "research_materials_only", False):
+            raise SystemExit("Prepared reproduction requires local documents and research.materials_only=true.")
     if outputs and (args.with_report or args.no_report):
         raise SystemExit("Use explicit outputs or --with-report/--no-report, not both.")
     for field in ("total_tokens", "llm_requests", "max_output_tokens", "process_invocations", "process_wall_seconds"):
@@ -398,6 +434,12 @@ def _print_research_session(args: argparse.Namespace) -> None:
     if args.with_report and args.no_report:
         raise SystemExit("Use either --with-report or --no-report for research-session, not both.")
     llm_client = _optional_research_llm_client(args.model, "research session", max_output_tokens=getattr(args, "max_output_tokens", None))
+    review_model = (getattr(args, "feasibility_review_model", None) or "").strip()
+    if review_model and llm_client is None:
+        raise SystemExit("--feasibility-review-model requires --model for research design.")
+    feasibility_client = _optional_research_llm_client(
+        review_model or None, "feasibility review", max_output_tokens=getattr(args, "max_output_tokens", None),
+    )
     if task_kind == "bug_fix" and (args.with_report or (outputs and "report" in outputs)):
         raise SystemExit("Bug-fix tasks produce a patch and validation evidence, not an academic report.")
     report_requested = False if task_kind == "bug_fix" else bool(args.with_report or (llm_client is not None and not args.no_report))
@@ -479,7 +521,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         request_text += "\n\n## Implementation task\n\n" + task_text.strip()
     report_config: dict[str, object] = {
         "mode": "experiment" if experiment_requested else "research_only",
-        "template": args.report_template if experiment_requested else (
+        "template": ("reproduction" if task_kind == "reproduction" and args.report_template == "experiment" else args.report_template) if experiment_requested else (
             "survey" if args.report_template == "experiment" else args.report_template
         ),
         "reviewer": args.report_reviewer,
@@ -493,15 +535,23 @@ def _print_research_session(args: argparse.Namespace) -> None:
         report_config["max_section_tokens"] = args.max_section_tokens
     if getattr(args, "report_figures", None):
         report_config["figures"] = args.report_figures
+    if getattr(args, "report_max_cited_sources", None) is not None:
+        report_config["max_cited_sources"] = args.report_max_cited_sources
     config: dict[str, object] = {
         "research_max_documents": args.max_results,
         "research_max_iterations": args.max_research_iterations,
         "report": report_config,
     }
+    if review_model and resume_root is None:
+        config["feasibility_review_model"] = review_model
     if getattr(args, "read_max_shortlist", None) is not None:
         config["research_read_max_shortlist"] = args.read_max_shortlist
     if getattr(args, "research_max_pdf_pages", None) is not None:
         config["research_max_pdf_pages"] = args.research_max_pdf_pages
+    for name in ("research_max_fulltext_documents", "research_max_pdf_mb"):
+        value = getattr(args, name, None)
+        if value is not None:
+            config[name] = value
     if resume_root is None:
         config["interaction"] = getattr(args, "interaction", None) or "checkpoints"
     if task_kind != "auto":
@@ -542,6 +592,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
     display = ResearchConsole()
     services = ResearchApplicationServices(
         llm_client=llm_client,
+        feasibility_llm_client=feasibility_client,
         max_results=args.max_results,
         max_chunks=args.max_chunks,
         idea_limit=args.idea_limit,
@@ -596,6 +647,19 @@ def _print_research_session(args: argparse.Namespace) -> None:
             from dataclasses import replace
             app = load_session(session_root, services=replace(services, config={}))
             app.require_llm_binding(include_legacy_usage=True)
+            saved_review_model = str(app.services.config.get("feasibility_review_model") or "")
+            if review_model and review_model != saved_review_model:
+                raise ResearchApplicationError(
+                    "The feasibility review model differs from the saved session; start a new session to change it."
+                )
+            if saved_review_model and app.services.feasibility_llm_client is None:
+                reviewer = _optional_research_llm_client(
+                    saved_review_model, "feasibility review",
+                    max_output_tokens=getattr(args, "max_output_tokens", None),
+                )
+                app.services = replace(app.services, feasibility_llm_client=reviewer.with_budget(
+                    app.budget_ledger, session_id=app.controller.manifest.session_id,
+                ))
             explicit = getattr(args, "_explicit_resume_destinations", set())
             interaction_update = (
                 args.interaction
@@ -1021,6 +1085,7 @@ def _report_config_overrides(args: argparse.Namespace, app: Any) -> dict[str, ob
             "report_document_review": "document_review",
             "max_section_tokens": "max_section_tokens",
             "report_figures": "figures",
+            "report_max_cited_sources": "max_cited_sources",
         }
     supplied: dict[str, object] = {}
     for destination, key in fields.items():
@@ -1052,6 +1117,12 @@ def _changed_resume_research_settings(
         ),
         "research_max_pdf_pages": (
             getattr(args, "research_max_pdf_pages", None), saved.get("research_max_pdf_pages"),
+        ),
+        "research_max_fulltext_documents": (
+            getattr(args, "research_max_fulltext_documents", None), saved.get("research_max_fulltext_documents"),
+        ),
+        "research_max_pdf_mb": (
+            getattr(args, "research_max_pdf_mb", None), saved.get("research_max_pdf_mb"),
         ),
         "idea_limit": (args.idea_limit, app.services.idea_limit),
         "max_research_iterations": (

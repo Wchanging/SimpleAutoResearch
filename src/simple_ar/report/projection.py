@@ -43,6 +43,7 @@ _RESEARCH_CONTEXT_FIELDS = (
     "risks",
     "report_claim_plan",
 )
+from simple_ar.report.execution_evidence import execution_record
 
 if TYPE_CHECKING:
     from simple_ar.research.evidence.reader import ReadResult
@@ -432,6 +433,7 @@ def attach_experiment_history(
             "status": status,
             "metrics": dict(measured) if isinstance(measured, Mapping) else {},
             "implementation_ref": result.get("implementation_ref"),
+            "execution_record": execution_record(result),
             "measurement": {
                 key: value for key in ("condition_id", "protocol_fingerprint", "seed", "source_kind")
                 if isinstance(result.get("measurement"), Mapping)
@@ -473,12 +475,25 @@ def attach_report_read_evidence(
 ) -> tuple[ReportContext, ReportMemory]:
     """Join reading notes by document identity, not title or position."""
 
-    by_paper = {
-        record.metadata["paper_id"]: record
-        for record in documents.records
-        if "paper_id" in record.metadata
-    }
+    # Local papers use document_id as their citable identity; retrieved papers
+    # may additionally carry the original connector's paper_id. Neither titles
+    # nor list positions are identities (and source_id can be a file path).
+    by_paper = {record.document_id: record for record in documents.records}
+    for record in documents.records:
+        paper_id = str(record.metadata.get("paper_id") or "")
+        if paper_id:
+            by_paper.setdefault(paper_id, record)
     notes = {note["paper_id"]: note for note in read.paper_notes}
+    chunks = {chunk.chunk_id: chunk for chunk in documents.chunks}
+    statuses = [record.extraction_status for record in documents.records]
+    parsed_count = sum(status == "parsed" for status in statuses)
+    metadata_count = sum(status == "metadata_only" for status in statuses)
+    unavailable_count = sum(status in {"failed", "skipped"} for status in statuses)
+    coverage_note = (
+        f"Source access: {parsed_count} parsed full/local text, {metadata_count} metadata/abstract-only, "
+        f"{unavailable_count} unavailable or skipped. Do not describe metadata/abstract-only sources "
+        "as full-text reading."
+    )
     handles: list[SourceHandle] = []
     for handle in context.source_handles:
         record = by_paper.get(handle.paper_id)
@@ -495,18 +510,32 @@ def attach_report_read_evidence(
         if note is not None:
             metadata["reading_notes"] = {
                 key: note[key]
-                for key in ("method", "key_claims", "limitations", "evidence_refs")
+                for key in ("method", "datasets", "metrics", "key_claims", "limitations",
+                            "open_questions", "confidence", "evidence_refs")
                 if key in note
             }
             metadata["reading_notes_kind"] = "model_interpretation_not_source_text"
+            refs = note.get("evidence_refs", [])
+            supported = [chunks[ref] for ref in refs if ref in chunks
+                         and chunks[ref].document_id == record.document_id]
+            # Interpretations alone are not a passage-level check. Carry a
+            # bounded set of the exact persisted passages alongside the notes.
+            metadata["evidence_passages"] = [
+                {"chunk_id": chunk.chunk_id, "text": chunk.text[:1200],
+                 "truncated": len(chunk.text) > 1200}
+                for chunk in supported[:6]
+            ]
+            metadata["evidence_passages_truncated"] = len(supported) > 6
         handles.append(
             handle.model_copy(
                 update={"summary": record.abstract or handle.summary, "metadata": metadata}
             )
         )
     return (
-        context.model_copy(update={"source_handles": handles}),
-        memory.model_copy(update={"source_handles": handles}),
+        context.model_copy(update={"source_handles": handles,
+                                   "evidence_summary": f"{context.evidence_summary} {coverage_note}".strip()}),
+        memory.model_copy(update={"source_handles": handles,
+                                  "limitations": [*memory.limitations, coverage_note]}),
     )
 
 
@@ -1019,6 +1048,12 @@ def evidence_handles_from_claim(value: object) -> list[str]:
 
 
 def _synthesis_markdown(synthesis: Any) -> str:
+    # Prefer the persisted evidence synthesis, not the historical research-idea
+    # projection. In particular, a survey must not lose reported results merely
+    # because no local experiment was requested.
+    text = str(getattr(synthesis, "synthesis_markdown", "") or "").strip()
+    if text:
+        return text
     lines = [f"Gap summary: {synthesis.gap_summary}".strip()]
     for idea in synthesis.ideas:
         lines.append(

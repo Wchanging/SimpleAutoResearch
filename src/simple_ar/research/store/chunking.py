@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from simple_ar.research.contracts import DocumentRecord, DocumentSection, TextChunk
 
@@ -33,6 +33,8 @@ def build_text_chunks(
         records contribute abstract chunks; parsed local text records contribute
         local-file text when available.
     """
+    if max_chunks is not None and max_chunks < 1:
+        raise ValueError("max_chunks must be positive when provided.")
     if sections is not None:
         return _chunks_from_sections(
             sections,
@@ -47,6 +49,8 @@ def build_text_chunks(
         if not text.strip():
             continue
         for index, span in enumerate(_split_text(text, chunk_chars=chunk_chars, overlap_chars=overlap_chars), start=1):
+            if max_chunks is not None and index > max_chunks:
+                break
             chunks.append(
                 TextChunk(
                     chunk_id=f"{record.document_id}#chunk-{index:03d}",
@@ -64,9 +68,7 @@ def build_text_chunks(
                     },
                 )
             )
-            if max_chunks is not None and len(chunks) >= max_chunks:
-                return chunks
-    return chunks
+    return _bounded_document_coverage(chunks, max_chunks)
 
 
 def _chunks_from_sections(
@@ -77,11 +79,16 @@ def _chunks_from_sections(
     overlap_chars: int,
 ) -> list[TextChunk]:
     chunks: list[TextChunk] = []
+    per_document: dict[str, int] = {}
     for section in sections:
         text = section.text
         if not text.strip():
             continue
+        if max_chunks is not None and per_document.get(section.document_id, 0) >= max_chunks:
+            continue
         for index, span in enumerate(_split_text(text, chunk_chars=chunk_chars, overlap_chars=overlap_chars), start=1):
+            if max_chunks is not None and per_document.get(section.document_id, 0) >= max_chunks:
+                break
             chunks.append(
                 TextChunk(
                     chunk_id=f"{section.section_id}#chunk-{index:03d}",
@@ -99,9 +106,36 @@ def _chunks_from_sections(
                     },
                 )
             )
-            if max_chunks is not None and len(chunks) >= max_chunks:
-                return chunks
-    return chunks
+            per_document[section.document_id] = per_document.get(section.document_id, 0) + 1
+    return _bounded_document_coverage(chunks, max_chunks)
+
+
+def _bounded_document_coverage(chunks: list[TextChunk], max_chunks: int | None) -> list[TextChunk]:
+    """Keep source order when possible; otherwise share the cap across documents.
+
+    A long first PDF must not silently consume the entire reading budget while
+    later selected documents receive no source text at all. Within each
+    document, section/chunk order and source IDs remain unchanged.
+    """
+    if max_chunks is None or len(chunks) <= max_chunks:
+        return chunks
+    by_document: dict[str, list[TextChunk]] = {}
+    for chunk in chunks:
+        by_document.setdefault(chunk.document_id, []).append(chunk)
+    selected: list[TextChunk] = []
+    offset = 0
+    while len(selected) < max_chunks:
+        advanced = False
+        for document_chunks in by_document.values():
+            if len(document_chunks) > offset:
+                selected.append(document_chunks[offset])
+                advanced = True
+                if len(selected) == max_chunks:
+                    break
+        if not advanced:
+            break
+        offset += 1
+    return selected
 
 
 def _record_text(record: DocumentRecord) -> tuple[str, str | None]:
@@ -112,24 +146,23 @@ def _record_text(record: DocumentRecord) -> tuple[str, str | None]:
     return record.abstract or "", record.local_path or record.url
 
 
-def _split_text(text: str, *, chunk_chars: int, overlap_chars: int) -> list[str]:
+def _split_text(text: str, *, chunk_chars: int, overlap_chars: int) -> Iterator[str]:
     compact = text.strip()
     if not compact:
-        return []
+        return
     if len(compact) <= chunk_chars:
-        return [compact]
-    chunks: list[str] = []
+        yield compact
+        return
     start = 0
     step = max(1, chunk_chars - max(0, overlap_chars))
     while start < len(compact):
         end = min(len(compact), start + chunk_chars)
         chunk = compact[start:end].strip()
         if chunk:
-            chunks.append(chunk)
+            yield chunk
         if end >= len(compact):
             break
         start += step
-    return chunks
 
 
 def _line_start(text: str, span: str) -> int | None:

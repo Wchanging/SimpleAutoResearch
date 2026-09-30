@@ -97,7 +97,7 @@ class LLMSettings:
     retry_max_delay_sec: float = 12.0
     transport_backend: str = "openai"
     api_mode: str = "responses"
-    json_response_format: str = "off"
+    json_response_format: str = "auto"
     chat_token_limit_param: str = "auto"
     reasoning_effort: str = ""
     thinking_mode: str = ""
@@ -1189,7 +1189,7 @@ def _positive_int(env_name: str, *, default: int) -> int:
 
 
 def _json_response_format_mode(env_name: str) -> str:
-    value = os.environ.get(env_name, "off").strip().lower().replace("-", "_")
+    value = os.environ.get(env_name, "auto").strip().lower().replace("-", "_")
     aliases = {
         "": "off",
         "auto": "auto",

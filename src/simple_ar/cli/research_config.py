@@ -7,7 +7,8 @@ import tomllib
 FIELDS = {
     "task": {"goal": ("topic", str), "kind": ("task_kind", str), "outputs": ("outputs", list), "output_root": ("output_root", str),
               "selected_idea_id": ("selected_idea_id", str)},
-    "model": {"name": ("model", str), "max_output_tokens": ("max_output_tokens", int)},
+    "model": {"name": ("model", str), "feasibility_review_model": ("feasibility_review_model", str),
+              "max_output_tokens": ("max_output_tokens", int)},
     "budget": {"total_tokens": ("total_tokens", int), "llm_requests": ("llm_requests", int),
                "process_invocations": ("process_invocations", int), "process_wall_seconds": ("process_wall_seconds", int)},
     "continuation": {"authorization_id": ("authorization_id", str),
@@ -21,6 +22,8 @@ FIELDS = {
     "research": {"providers": ("providers", list), "queries": ("queries", list),
                  "max_results": ("max_results", int), "max_chunks": ("max_chunks", int),
                  "max_pdf_pages": ("research_max_pdf_pages", int),
+                 "max_fulltext_documents": ("research_max_fulltext_documents", int),
+                 "max_pdf_mb": ("research_max_pdf_mb", int),
                  "read_max_shortlist": ("read_max_shortlist", int),
                  "idea_limit": ("idea_limit", int), "cache_dir": ("cache_dir", str),
                  "use_fulltext": ("research_use_fulltext", bool),
@@ -38,6 +41,7 @@ FIELDS = {
                "max_review_iterations": ("max_review_iterations", int),
                "document_review": ("report_document_review", bool),
                "max_section_tokens": ("max_section_tokens", int),
+               "max_cited_sources": ("report_max_cited_sources", int),
                "figures": ("report_figures", dict)},
 }
 PATHS = {"output_root", "cache_dir", "cwd", "code_task_config", "local_document"}
@@ -98,7 +102,7 @@ def research_defaults(
                 explicit_destinations.add(dest)
             if type(value) is not expected or (expected is list and any(type(item) is not str for item in value)):
                 raise ValueError(f"Invalid type for {section}.{name}: expected {expected.__name__}")
-            if expected is int and dest not in {"additional_attempts", "additional_no_progress"} and value < (0 if dest in {"max_review_iterations", "max_section_tokens", "max_research_iterations", "process_invocations", "process_wall_seconds"} else 1):
+            if expected is int and dest not in {"additional_attempts", "additional_no_progress"} and value < (0 if dest in {"max_review_iterations", "max_section_tokens", "report_max_cited_sources", "max_research_iterations", "process_invocations", "process_wall_seconds"} else 1):
                 raise ValueError(f"Invalid value for {section}.{name}: {value}")
             if dest == "interaction" and value not in {"assisted", "checkpoints", "autonomous"}:
                 raise ValueError("research.interaction must be assisted, checkpoints or autonomous")
@@ -120,8 +124,12 @@ def research_defaults(
             raise ValueError("continuation.remaining must map resource names to numeric amounts")
     if "outputs" in defaults and (not defaults["outputs"] or set(defaults["outputs"]) - {"summary", "report", "experiments", "bug_fix"}):
         raise ValueError("task.outputs must contain summary, report, experiments and/or bug_fix")
-    if defaults.get("task_kind", "auto") not in {"auto", "survey", "bug_fix", "measurement"}:
-        raise ValueError("task.kind must be auto, survey, bug_fix or measurement")
+    if defaults.get("task_kind", "auto") not in {"auto", "survey", "bug_fix", "measurement", "reproduction"}:
+        raise ValueError("task.kind must be auto, survey, bug_fix, measurement or reproduction")
+    if defaults.get("task_kind") == "reproduction" and (
+        "experiments" not in defaults.get("outputs", []) or set(defaults.get("outputs", [])) - {"experiments", "report"}
+    ):
+        raise ValueError("task.kind=reproduction requires experiments and optionally report in task.outputs")
     if defaults.get("task_kind") == "bug_fix" and "outputs" in defaults and set(defaults["outputs"]) != {"bug_fix"}:
         raise ValueError("task.kind=bug_fix requires task.outputs = [\"bug_fix\"] or an omitted outputs field")
     if defaults.get("task_kind") == "measurement" and defaults.get("outputs") != ["experiments"]:

@@ -2,6 +2,15 @@
 
 [中文版本](CLI_REFERENCE_zh.md)
 
+## Guided entry
+
+`simple-ar start` asks for an implemented function (`survey` / `bug_fix`) and
+task inputs, saves normal TOML, and delegates to `research-session`.
+Options: `--kind`, `--goal`, `--document` (repeatable), `--sources materials|search`, `--fulltext`, `--max-cited-sources N` (optional survey source bound),
+`--project`, `--validate`, `--allow` (repeatable), `--model`, `--interaction`,
+`--output-root`, `--prepare-only`, `--yes`. See [configuration](CONFIG_REFERENCE.md#guided-setup)
+for defaults, scope and continuation. It does not call external Agents.
+
 This page is a command lookup for SimpleAutoResearch. It intentionally focuses
 on command syntax, options, outputs, and short operational notes.
 
@@ -24,10 +33,12 @@ not silently translated to the canonical application.
 
 | Command | Purpose |
 | --- | --- |
+| `simple-ar start` | Guided survey/code-fix setup; saves editable configuration and enters the same research session. |
 | `simple-ar research-session` | Canonical entry for a bounded task-driven session; the accepted plan selects applicable research and execution steps. |
 | `simple-ar research-session-continue` | Retry one failed canonical explicit experiment. |
 | `simple-ar research-session-migrate` | Create a canonical successor from a read-only `session_manifest.v1`. |
 | `simple-ar research-report` | Generate and audit a report from a completed research session. |
+| `simple-ar report-export` | Convert assembled report artifacts into a new editable ACM manuscript; optional local TeX compilation. |
 | `simple-ar research-brief` | Segmented/development interface for an evidence-backed research brief. |
 | `simple-ar status` | Print status for a research run or code-task run. |
 | `simple-ar tools ...` | Export tool schemas, call run-local tools, or serve read-only tools over MCP stdio. |
@@ -37,6 +48,39 @@ not silently translated to the canonical application.
 | `simple-ar code-task ...` | Work with an existing codebase or a greenfield code task in an isolated editable workspace. |
 
 ## Research Commands
+
+### Prepared reproduction
+
+Prepared paper-conclusion checks use `research-session --config examples/conformal_reproduction/research.toml`
+after the preparation in that case's README. `--task-kind reproduction` requires local source
+materials and an explicit fixed protocol; it is not an autonomous environment/code discovery tool.
+
+### `simple-ar report-export`
+
+```bash
+uv run simple-ar report-export --report-dir PATH_TO_REPORT_ATTEMPT --output runs/acm-draft --compile
+```
+
+The input directory must contain `report_body.md` with its source citation keys,
+and `references.bib` when cited. Pandoc converts this existing text; no model or
+experiment is rerun. Local figures inside the report directory are copied;
+SVG figures require `rsvg-convert`. Remote image URLs are not fetched.
+`--title` supplies a publication-facing title. Existing output directories are
+retained; choose a new one for each export.
+
+`source.md` and TeX use the exported figure paths, so the directory can be moved.
+Editable SVG sources are kept alongside converted figures. Links to external
+local evidence become labels, with their original targets recorded in `export.json`;
+datasets and source artifacts are not automatically copied or redistributed.
+
+The output is a single-column `acmart` manuscript demonstration with editable
+`main.tex`, `body.tex`, bibliography, figures, and `export.json`. This does not
+select a conference's submission options or certify the report's claims.
+Pandoc is required. `--compile` additionally needs `pdflatex`, `bibtex`, and
+the acmart TeX packages; it records `build.log` and returns a nonzero status
+when compilation is unavailable or fails, keeping the generated source.
+Compilation currently uses pdfLaTeX; non-Latin scripts may require adapting
+the editable project to another engine and fonts.
 
 
 ### `simple-ar research-brief` (segmented/development interface)
@@ -103,6 +147,12 @@ unchanged; a supplied new goal, output set, local document, or execution configu
 explicit revision. The application keeps attempt history and reuses only measurements whose
 command, result schema, protocol, preparation lineage, and protected assets still match; other
 dependent steps are replanned. Changing task kind still requires a new session.
+
+If a worker was killed before persisting its result, stop that worker and resume
+with `--session-root PATH --recover-interrupted --model env`. This closes the
+orphaned attempt in the same budget and retries its step, retaining earlier
+evidence and valid report checkpoints. Apply input/configuration changes in a
+separate resume. Ordinary API failures with a persisted result use normal resume.
 For a model-backed session, pass `--model env` (using the configured
 `SIMPLE_AR_MODEL`) or `--model NAME` on every resume. An omitted model fails
 before state changes instead of silently replacing model work with deterministic work.

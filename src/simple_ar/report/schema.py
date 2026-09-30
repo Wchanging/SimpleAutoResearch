@@ -83,6 +83,9 @@ class ReportRuntimeConfig(ReportModel):
     # the run when configured. A positive value is an explicit expert limit.
     max_section_tokens: int = 0
     max_section_sources: int = 8
+    # Optional user-specified bound on distinct cited sources in the final
+    # document. Zero keeps source selection evidence-driven and unbounded here.
+    max_cited_sources: int = Field(default=0, ge=0)
     source_strategy: Literal["full", "batch_refine"] = "full"
     source_batch_size: int = 10
     max_source_batches: int = 0
@@ -369,6 +372,9 @@ class ReportIterationRecord(ReportModel):
     used_sources: list[str] = Field(default_factory=list)
     findings: list[ReviewerFinding] = Field(default_factory=list)
     tool_results: list[ReportToolResult] = Field(default_factory=list)
+    # Optional for historical checkpoints; retain candidates not adopted.
+    draft: ReportSectionDraft | None = None
+    adopted: bool | None = None
 
 
 class AgentReportResult(ReportModel):

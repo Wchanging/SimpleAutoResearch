@@ -10,6 +10,7 @@ from simple_ar.report.agent import run_report_agent
 from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.schema import ReportContext, ReportMemory, ReportRuntimeConfig, ReportTemplateBundle
 from simple_ar.report.tool_gateway import ReportToolGateway
+from simple_ar.research.documents.ingest import DocumentBundle
 
 
 @dataclass(frozen=True)
@@ -53,9 +54,13 @@ def run_report_writing_capability(*, context: CapabilityContext, request: Report
         context.store.write_json(checkpoint_ref.path, {"snapshot_id": snapshot["snapshot_id"], "completed": completed,
             "source_attempt": context.attempt.attempt_id, "resume_ref": reused_ref.to_dict() if reused_ref else None},
             kind=checkpoint_ref.kind, schema=checkpoint_ref.schema)
+    document_refs = [ref for ref in context.inputs if ref.schema == "document_bundle.v1"]
+    if len(document_refs) > 1:
+        raise ValueError("Report backtracking requires one unambiguous document bundle.")
+    documents = DocumentBundle.from_handoff_dict(context.read_input_json(document_refs[0])) if document_refs else None
     result = run_report_agent(client=request.llm_client, context=request.report_context, memory=memory,
                               config=request.config, template=request.template,
-                              gateway=ReportToolGateway(request.report_context),
+                              gateway=ReportToolGateway(request.report_context, documents=documents),
                               emit=request.emit, completed_checkpoint=completed,
                               checkpoint_sink=save_checkpoint)
     artifacts = (source, checkpoint_ref) if context.store.resolve(checkpoint_ref).is_file() else (source,)

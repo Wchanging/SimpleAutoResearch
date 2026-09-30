@@ -2,6 +2,39 @@
 
 [中文版本](CONFIG_REFERENCE_zh.md)
 
+## Guided setup
+
+Online setup reads abstracts and supplied local materials by default. Add
+`--fulltext` with `--sources search` to explicitly allow remote full-text retrieval
+and PDF downloads using the existing document pipeline. Availability and extraction
+remain best-effort; missing full text is recorded, not treated as read. Local
+materials mode never enables network retrieval through this option.
+
+`simple-ar start` offers `survey` and `bug_fix`, generating ordinary research
+TOML and (for code) CodeTask TOML plus task text. The same default/TOML/explicit
+CLI precedence applies; this is not a second configuration schema.
+
+```bash
+simple-ar start --kind survey --goal "Compare uncertainty estimation methods" --sources search --prepare-only
+```
+
+`--sources materials` requires repeatable `--document PATH` and disallows online
+search. `bug_fix` requires `--project`, `--validate` and repeatable `--allow` edit
+patterns. Defaults: isolated copy, current Python, 300-second validation timeout,
+one repair, protected tests and `.env`. The command is authorized execution, not
+an OS sandbox. Edit generated CodeTask TOML for custom environment/scope/timeouts.
+
+Inputs are saved under `--output-root` (default `runs/assistant`); asset paths
+are absolute and output `sessions` resolves relative to the generated research
+TOML. Setup never modifies the original project or copies credentials into config.
+API totals remain unlimited unless configured.
+
+`--prepare-only` makes no API/process calls. `--yes` accepts setup only;
+`--interaction` still controls execution decisions (default `checkpoints`).
+Missing non-interactive input fails instead of waiting. Declining the final
+confirmation retains saved inputs. After execution begins, resume the printed
+session via `research-session --session-root PATH --model env`, not another `start`.
+
 ## Global `.env`
 
 `.env` is loaded by the LLM integration for credentials, endpoint, model and
@@ -32,8 +65,14 @@ File-relative paths resolve from the TOML directory; command argv remains litera
 
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
-| `[task]` | `goal`, `kind`, `outputs`, `output_root`, `selected_idea_id` | `goal` is required for a new session. `kind` defaults to `auto` and accepts `auto`, `survey`, `bug_fix`, `measurement`. `outputs` is optional except that `measurement` requires `outputs = ["experiments"]`. Explicit outputs use `summary`, `report`, `experiments`, and/or `bug_fix`. `output_root` defaults to `runs/research-session`; `selected_idea_id` is optional and must select an existing grounded candidate. |
-| `[model]` | `name`, `max_output_tokens` | A file config defaults `name` to `env`, which reads `SIMPLE_AR_MODEL`; `name = ""` selects deterministic processing. `max_output_tokens` is optional. Credentials stay in the environment. |
+| `[task]` | `goal`, `kind`, `outputs`, `output_root`, `selected_idea_id` | `goal` is required for a new session. `kind` defaults to `auto` and accepts `auto`, `survey`, `bug_fix`, `measurement`, `reproduction`. `outputs` is optional except that `measurement` requires `["experiments"]` and `reproduction` requires `["experiments"]` or `["experiments", "report"]`. Other explicit outputs use `summary`, `report`, `experiments`, and/or `bug_fix`. `output_root` defaults to `runs/research-session`; `selected_idea_id` is optional and must select an existing grounded candidate. |
+| `[model]` | `name`, `feasibility_review_model`, `max_output_tokens` | A file config defaults `name` to `env`, which reads `SIMPLE_AR_MODEL`; `name = ""` selects deterministic processing. Optional `feasibility_review_model` routes only the source-backed implementation feasibility audit to another model on the same provider and session budget; it is saved for resume and cannot be changed within an existing session. `max_output_tokens` is optional. Credentials stay in the environment. |
+
+An independent feasibility review can challenge a candidate's mechanism before
+CodeTask or training. It is still model judgment, not an executable proof of
+the method or an improvement claim. If it is omitted, the main model performs
+the review. Use the same `feasibility_review_model` on resume (or omit it to
+reuse the saved choice).
 | `[budget]` | `total_tokens`, `llm_requests`, `process_invocations`, `process_wall_seconds` | Token/request caps are optional for a new session (omitted means no cap for that dimension). Process values default from the task shape; set them explicitly when execution is requested. Resume keeps the saved ledger and does not reset usage. |
 
 ### Research inputs and behavior
@@ -41,7 +80,7 @@ File-relative paths resolve from the TOML directory; command argv remains litera
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
 | `[research]` | `providers`, `queries`, `max_results`, `max_chunks`, `max_pdf_pages`, `read_max_shortlist`, `idea_limit`, `cache_dir` | Lists are optional; CLI defaults are `max_results = 10`, `max_chunks = 300`, `idea_limit = 3`. `max_pdf_pages` is an optional positive local-PDF extraction ceiling (default `20`); changing it requires a new session because existing extracted evidence is frozen. `read_max_shortlist` is optional (default: all papers up to 24); explicitly supplied papers are retained within this reading limit, and an over-limit request fails visibly. `cache_dir` is optional and is not a safe resume-change because it is not persisted. |
-| `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `materials_only` | All default false. `materials_only = true` requires/uses `[assets].papers` and disables search; it does not disable model reading. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
+| `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `max_fulltext_documents`, `max_pdf_mb`, `materials_only` | These switches default false and optional caps are unset. `materials_only = true` requires/uses `[assets].papers` and disables search; it does not disable model reading. Guided `start --fulltext --sources search` enables PDF cache retention with a 4-document, 20 MiB-per-PDF limit; expert TOML may adjust the positive caps. Remote PDFs require both PDF permission and cache retention. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
 | `[research]` | `max_iterations`, `interaction` | `max_iterations` defaults to `1`; `0` stops after the first analysis. `interaction` defaults to `checkpoints` for a new CLI session and accepts `assisted`, `checkpoints`, or `autonomous`. Critical facts and permissions block every mode. |
 | `[assets]` | `papers` | Optional list of local Markdown/text/PDF paths. Paths resolve from the TOML directory and are read-only inputs. |
 
@@ -58,7 +97,7 @@ on disk. Parser failures remain diagnostics, not invented paper content.
 | `[execution]` | `primary_metric`, `metrics`, `metric_directions` | Optional measurement schema; directions use `higher`, `lower`, `resource`, or `ignore`. |
 | `[execution]` | `pairs`, `seeds`, `seed_flag`, `seed_count` | Optional explicit comparison inputs. `pairs` contains unique integer `seed` plus literal `baseline_command` and `candidate_command`; compact seed expansion requires a literal command and explicit seed flag/count. Natural-language seed requests are not parsed. |
 | `[execution]` | `baseline_policy`, `baseline_ref`, `protocol` | Policy is `run`, `skip`, or `reuse`; `reuse` requires a passed current-session artifact whose command, schema, protocol conditions, protected assets and preparation lineage match. `protocol` uses the existing experiment contract and does not certify data contents. |
-| `[report]` | `template`, `reviewer`, `max_review_iterations`, `document_review`, `max_section_tokens`, `figures` | `template` defaults to `auto`; `reviewer` defaults to `llm`; review iterations default to `1`. Optional `document_review = true` adds one bounded cross-section review and up to two targeted revisions; it is off until validated on real long-form work. `max_section_tokens = 0` omits a per-call output cap. Figures are deterministic by default; set `[report.figures].enabled = false` or `mode = "off"` for text-only output. |
+| `[report]` | `template`, `reviewer`, `max_review_iterations`, `document_review`, `max_section_tokens`, `max_cited_sources`, `figures` | `template` defaults to `auto`; `reviewer` defaults to `llm`; review iterations default to `1`. Optional `document_review = true` adds one bounded cross-section review and up to two targeted revisions; it is off until validated on real long-form work. `max_section_tokens = 0` omits a per-call output cap. Optional positive `max_cited_sources` bounds distinct final citations without truncating the search/reading pool; the writer sees the bound, and final audit fails if the document exceeds it. Omit it for no source-count cap. Figures are deterministic by default; set `[report.figures].enabled = false` or `mode = "off"` for text-only output. |
 
 Explicit `outputs` cannot be combined with `--with-report`/`--no-report`. Report structure
 selection never overrides measured facts or certifies scientific success. Changed
@@ -72,6 +111,17 @@ baseline comparison. It requires `outputs = ["experiments"]`, an explicit
 `execution.command`, and finite process limits. Use `auto`/research for an
 evidence-driven candidate or a comparative experiment; a measurement is not
 proof of a scientific improvement.
+
+`task.kind = "reproduction"` is a **prepared, fixed-protocol** path: read supplied local
+papers, synthesize the source evidence, execute the declared command, analyze its
+measurements, and optionally write a reproduction report. Set `research.materials_only = true`,
+provide `assets.papers`, `execution.command`, and `execution.protocol` with at least
+`hypothesis`, `dataset`, and `expected_outcome`. Use `baseline_policy = "skip"`
+and a finite process timeout. This mode does not propose innovations, edit code,
+expand seeds, or install/discover a missing environment. Paired comparisons and
+CodeTask use the ordinary research path. Report `template = "reproduction"` preserves
+the distinction between a published result, an adapted check, and local observations.
+See [the complete CPU-only case](../examples/conformal_reproduction/README.md).
 
 Advanced experiments may either use `[[execution.pairs]]` rows with a unique integer
 `seed`, `baseline_command` and `candidate_command` (literal argv arrays), or declare
@@ -109,8 +159,20 @@ semantics; those aliases are not research-session execution policies.
 `[execution.protocol]` uses the existing research experiment contract: dataset_refs,
 split_spec, metric_specs, comparison_conditions and protected_assets, optionally
 contract_id/hypothesis. Protected file paths are relative to the experiment cwd,
-not the TOML directory; shared data may use absolute paths. No seed interpolation
-or extra scheduler is introduced. Grant process budgets for every matrix run.
+not the TOML directory; shared data may use absolute paths. Each protected asset
+needs a unique `asset_id` and a file `path`. The existing before/after check
+detects changes during execution. Only explicitly listed files are checked;
+this does not verify an entire dataset directory or establish scientific
+validity. For example:
+
+```toml
+[[execution.protocol.protected_assets]]
+asset_id = "evaluator"
+path = "evaluate.py"
+```
+
+No seed interpolation or extra scheduler is introduced. Grant process budgets
+for every matrix run.
 Use either literal `execution.command` plus `cwd`, or `execution.code_task_config`
 for one prepared code boundary; the two descriptions are mutually exclusive.
 Direct command argv uses the process `PATH`. A referenced CodeTask config applies

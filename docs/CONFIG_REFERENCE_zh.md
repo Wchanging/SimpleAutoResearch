@@ -2,6 +2,33 @@
 
 [English version](CONFIG_REFERENCE.md)
 
+引导入口在线调研默认读取摘要和已提供的本地材料。加入 `--fulltext --sources search`
+才允许远程全文抓取/PDF 下载；仍沿用现有材料流水线，获取失败会记录，不能当成读过全文。
+本地材料模式不通过此选项开启网络。
+
+## 引导设置
+
+`simple-ar start` 支持 `survey` 和 `bug_fix`，生成普通研究 TOML；代码任务额外生成
+CodeTask TOML 和任务说明。沿用默认值、TOML、显式 CLI 的覆盖关系，不新增配置体系。
+
+```bash
+simple-ar start --kind survey --goal "比较不确定性估计方法" --sources search --prepare-only
+```
+
+`--sources materials` 需要可重复的 `--document PATH`，禁止在线搜索。
+`bug_fix` 需要 `--project`、`--validate` 和可重复的 `--allow` 编辑范围；默认复制工作区、
+当前 Python、300 秒验证超时、一次修复，保护测试和 `.env`。复制不是 OS 沙箱，执行
+验证命令仍需授权；自定义环境、范围和时限可修改生成的 CodeTask TOML。
+
+输入保存到 `--output-root`（默认 `runs/assistant`）；资产路径为绝对路径，产物目录
+`sessions` 相对生成的研究 TOML 解析。设置过程不改原项目，不把凭据写进配置。
+API 总额仍默认无限制。
+
+`--prepare-only` 不调用模型/进程。`--yes` 只确认启动，执行期仍遵循 `--interaction`
+（默认 `checkpoints`）。非交互缺输入就报错，不挂住等待；最后拒绝执行会保留配置。
+开始执行后按打印的路径使用 `research-session --session-root PATH --model env` 续跑，
+不要再次 `start` 创建新任务。
+
 研究任务使用 `simple-ar research-session --config PATH`。可直接从
 [综述案例](../examples/survey/README.md)开始；更多配置项在下文说明，不再作为额外案例混放。
 CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
@@ -29,8 +56,10 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
-| `[task]` | `goal`、`kind`、`outputs`、`output_root`、`selected_idea_id` | 新 session 必须有 `goal`。`kind` 默认 `auto`，可为 `auto`、`survey`、`bug_fix`、`measurement`；`measurement` 必须写 `outputs = ["experiments"]`。其他任务的 `outputs` 可省略，显式值使用 `summary`、`report`、`experiments`、`bug_fix`。`output_root` 默认 `runs/research-session`；`selected_idea_id` 可选，必须指向已有且有依据的候选。 |
-| `[model]` | `name`、`max_output_tokens` | 文件配置默认 `name = "env"`，读取 `.env` 的 `SIMPLE_AR_MODEL`；`name = ""` 选择不调用 LLM 的确定性处理。`max_output_tokens` 可省略；凭据始终留在环境中。 |
+| `[task]` | `goal`、`kind`、`outputs`、`output_root`、`selected_idea_id` | 新 session 必须有 `goal`。`kind` 默认 `auto`，可为 `auto`、`survey`、`bug_fix`、`measurement`、`reproduction`；`measurement` 必须写 `["experiments"]`，`reproduction` 必须写 `["experiments"]` 或 `["experiments", "report"]`。其他任务的 `outputs` 可省略，显式值使用 `summary`、`report`、`experiments`、`bug_fix`。`output_root` 默认 `runs/research-session`；`selected_idea_id` 可选，必须指向已有且有依据的候选。 |
+| `[model]` | `name`、`feasibility_review_model`、`max_output_tokens` | 文件配置默认 `name = "env"`，读取 `.env` 的 `SIMPLE_AR_MODEL`；`name = ""` 选择不调用 LLM 的确定性处理。可选 `feasibility_review_model` 仅让另一模型审核源码支持的实现可行性，仍使用同一服务商与会话预算；选择会随会话保存，恢复时不可更改。`max_output_tokens` 可省略；凭据始终留在环境中。 |
+
+独立可行性审查可在 CodeTask 或训练前质疑方案机制；它仍是模型判断，不能替代可执行的机制验证或改进证据。省略时由主模型审查；续接时可省略该字段以沿用存档选择。
 | `[budget]` | `total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds` | 新 session 的 token/request 上限可省略（该维度不设框架上限）；进程值按任务形态在入口推导，要求执行时应显式设置。恢复沿用已存账本，不清零用量。 |
 
 ### 研究输入与行为
@@ -38,7 +67,7 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
 | `[research]` | `providers`、`queries`、`max_results`、`max_chunks`、`max_pdf_pages`、`read_max_shortlist`、`idea_limit`、`cache_dir` | 列表可省略；CLI 默认 `max_results = 10`、`max_chunks = 300`、`idea_limit = 3`。`max_pdf_pages` 是正整数，限制本地 PDF 最多提取页数（默认 `20`）；更改后应创建新会话，不能把已冻结的阅读证据当成新版本。`read_max_shortlist` 可选，显式提供的论文优先保留；若数量超过上限则显式报错。`cache_dir` 可选，未持久化，不能作为安全的恢复变更。 |
-| `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`materials_only` | 默认均为 false。`materials_only = true` 要求/使用 `[assets].papers` 并禁用 search，但仍允许模型阅读；全文获取失败时保留 abstract-only/unavailable 状态。 |
+| `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`max_fulltext_documents`、`max_pdf_mb`、`materials_only` | 开关默认 false，可选上限默认不设。`materials_only = true` 要求/使用 `[assets].papers` 并禁用 search，但仍允许模型阅读。引导入口的 `--fulltext --sources search` 会允许缓存 PDF，默认最多 4 份、每份 20 MiB；专家可在 TOML 中调整正整数上限。远程 PDF 需要下载许可与缓存许可；获取失败仍明确标注只读摘要或不可用。 |
 | `[research]` | `max_iterations`、`interaction` | `max_iterations` 默认 `1`，`0` 表示首轮分析后停止。`interaction` 新 CLI 默认 `checkpoints`，可选 `assisted`、`checkpoints`、`autonomous`；硬事实和权限缺口在任何模式下都是阻塞。 |
 | `[assets]` | `papers` | 可选的本地 Markdown/text/PDF 路径列表；相对路径以 TOML 所在目录解析，作为只读输入。 |
 
@@ -55,13 +84,23 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 | `[execution]` | `primary_metric`、`metrics`、`metric_directions` | 可选测量 schema；方向为 `higher`、`lower`、`resource` 或 `ignore`。 |
 | `[execution]` | `pairs`、`seeds`、`seed_flag`、`seed_count` | 可选的显式比较输入。`pairs` 每行包含唯一整数 `seed` 与 literal `baseline_command`/`candidate_command`；compact seed 必须有 literal command 和显式 seed flag/count，不解析自然语言 seed。 |
 | `[execution]` | `baseline_policy`、`baseline_ref`、`protocol` | policy 为 `run`、`skip` 或 `reuse`；`reuse` 要求当前 session 中通过且命令、schema、协议条件、保护资产和准备 lineage 都匹配的产物。`protocol` 复用已有实验合同，但不证明数据内容。 |
-| `[report]` | `template`、`reviewer`、`max_review_iterations`、`document_review`、`max_section_tokens`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，review iteration 默认 `1`。可选 `document_review = true` 增加一次有界整稿审查和最多两处定向修订；在真实长文验证前默认关闭。`max_section_tokens = 0` 取消单次输出上限；图表默认使用确定性图表，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
+| `[report]` | `template`、`reviewer`、`max_review_iterations`、`document_review`、`max_section_tokens`、`max_cited_sources`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，review iteration 默认 `1`。可选 `document_review = true` 增加一次有界整稿审查和最多两处定向修订；在真实长文验证前默认关闭。`max_section_tokens = 0` 取消单次输出上限；可选正整数 `max_cited_sources` 限制最终报告的不同引用数，不提前截断检索/阅读候选，超出则终审失败；省略即不设此上限。图表默认使用确定性图表，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
 
 单条固定命令只写 `seed_flag` 会记录当前 seed，但不授权增加新 seed。若希望先只运行 seed 0、以后允许按证据决定是否补测，可同时写 `seeds = [0]` 和 `seed_flag = "--seed"`；这不会默认多跑种子。补测仍须分析提出理由、运行同种子的 baseline/candidate 配对、通过剩余进程预算检查并由既定交互模式接受。
+
+`[[execution.protocol.protected_assets]]` 中每个文件须有唯一 `asset_id` 和 `path`。运行前后会检查这些文件是否发生改动。相对路径按实验 `cwd` 解析；只核对显式列出的文件，不递归校验整个数据集，也不因此证明科研结论正确。
 
 显式 `outputs` 不能与 `--with-report`/`--no-report` 同时使用。报告结构选择不能覆盖
 测量事实或证明科研成功；恢复时变更搜索/摄取设置若与存档不符会被拒绝，显式报告变更只
 失效 writer/report/audit 产物，不重跑研究或测量。已有前缀可用 `research-report` 补齐报告。
+
+`task.kind = "reproduction"` 是**已准备好环境与命令的固定协议复现**：读取本地论文、
+综合来源证据、执行声明的命令、分析实测值，可选复现报告。要求 `research.materials_only = true`、
+`assets.papers`、`execution.command`，以及至少包含 `hypothesis`、`dataset`、`expected_outcome`
+的 `execution.protocol`；使用 `baseline_policy = "skip"` 和有限进程超时。
+它不提出创新、不改代码、不扩种子，也不自动安装或寻找缺失环境。配对对照和 CodeTask
+仍使用普通研究路径。报告使用 `template = "reproduction"`，明确区分原论文结果、改编检查和本地实测。
+完整低开销案例见 [conformal_reproduction](../examples/conformal_reproduction/README.md)。
 
 `task.kind = "measurement"` 仅用于原样运行并分析一条已提供的命令，不做文献检索、
 候选设计、CodeTask 改码或 baseline 对照。它要求 `outputs = ["experiments"]`、

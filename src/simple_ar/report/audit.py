@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from itertools import count
 from typing import Any, Mapping
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
-from simple_ar.report.projection import _declared_report_metrics
+from simple_ar.report.projection import _declared_report_metrics, _verified_experiment_evidence
 from simple_ar.report.schema import (
     FACTUAL_REVIEW_FINDING_TYPES,
     CitationAudit,
@@ -65,9 +66,14 @@ def build_report_audit(
         list(memory.reviewer_findings)
         + _mechanical_findings(findings)
         + _reader_facing_handle_findings(report_body)
+        + _source_scope_findings(report_body, context)
     )
     status = _overall_status([citation.status, metric.status, claim.status])
-    if any(finding.severity == "critical" for finding in reviewer_findings):
+    if any(
+        finding.severity == "critical"
+        or (finding.severity == "major" and finding.type in FACTUAL_REVIEW_FINDING_TYPES)
+        for finding in reviewer_findings
+    ):
         status = "failed"
     elif any(
         finding.severity == "major"
@@ -87,6 +93,21 @@ def build_report_audit(
             "Semantic support of final prose is unchecked; metric visibility and section review do not prove final conclusions.",
         ],
     )
+
+
+def _source_scope_findings(report_body: str, context: ReportContext) -> list[ReviewerFinding]:
+    """Enforce an explicit user delivery bound, not a default source quota."""
+    raw_limit = context.survey_contract.get("max_cited_sources")
+    if isinstance(raw_limit, bool) or not isinstance(raw_limit, int) or raw_limit < 1:
+        return []
+    cited = set(CITATION_PATTERN.findall(report_body))
+    if len(cited) <= raw_limit:
+        return []
+    return [ReviewerFinding(
+        finding_id="source-scope-exceeded", type="delivery_scope", severity="critical",
+        message=f"Report cites {len(cited)} distinct sources; the requested maximum is {raw_limit}.",
+        suggested_action="Select the strongest supported sources and revise the report; do not delete citations without revising their claims.",
+    )]
 
 
 def _reader_facing_handle_findings(report_body: str) -> list[ReviewerFinding]:
@@ -245,11 +266,10 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
     # A generated figure's filename (for example, paired-1.svg) is not a
     # reported numeric result even when its alt text names a metric.
     visibility_body = re.sub(r"(?m)^[ \t]*!\[[^\]\r\n]*\]\([^\r\n]*\)[ \t]*$", "", report_body)
-    lower = visibility_body.lower()
     matched: list[str] = []
     unmatched: list[str] = []
     for metric in metrics:
-        if _metric_is_visible(visibility_body, lower, metric):
+        if _metric_is_visible(visibility_body, metric):
             matched.append(metric.metric_id)
         else:
             unmatched.append(metric.metric_id)
@@ -258,7 +278,10 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
     if unmatched:
         warnings.append("Some experiment metrics were not visible with their values in the report body.")
         status = "warning"
-    table_errors = _measurement_table_errors(report_body, context)
+    table_errors = [
+        *_measurement_table_errors(report_body, context),
+        *_verified_experiment_table_errors(report_body, context),
+    ]
     if table_errors:
         warnings.extend(table_errors)
         status = "failed"
@@ -297,6 +320,49 @@ def _measurement_table_errors(report_body: str, context: ReportContext) -> list[
         if tuple(row) not in expected:
             errors.append(f"Measurement table row {line_number} does not match its source, metric, value, unit, condition and origin.")
     return errors
+
+
+def _verified_experiment_table_errors(report_body: str, context: ReportContext) -> list[str]:
+    """Check rendered experiment tables against the same frozen evidence used to create them.
+
+    This is a consistency check for our structured tables, not a semantic
+    review of arbitrary prose or a guarantee that the source measurements are
+    scientifically valid. Reports without these tables remain auditable as
+    prose-only reports; a present but altered table cannot pass by repeating
+    its numbers elsewhere in the document.
+    """
+    if context.report_mode != "experiment" or not context.metric_sources:
+        return []
+    expected = _markdown_tables(_verified_experiment_evidence(context))
+    actual = _markdown_tables(report_body)
+    errors: list[str] = []
+    for header, expected_rows in expected.items():
+        if header not in actual:
+            if re.search(r"(?im)^#{1,6}\s+Verified Experiment Metrics\s*$", report_body):
+                errors.append(f"Verified experiment table is missing: {header[0]}.")
+            continue
+        if Counter(actual[header]) != Counter(expected_rows):
+            errors.append(f"Verified experiment table differs from persisted evidence: {header[0]}.")
+    return errors
+
+
+def _markdown_tables(body: str) -> dict[tuple[str, ...], list[tuple[str, ...]]]:
+    """Index simple Markdown tables by header without trusting their numbers."""
+    tables: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
+    header: tuple[str, ...] | None = None
+    for line in body.splitlines():
+        if not line.strip().startswith("|"):
+            header = None
+            continue
+        cells = tuple(part.strip() for part in line.strip().strip("|").split("|"))
+        if header is None:
+            header = cells
+            tables.setdefault(header, [])
+        elif all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            continue
+        else:
+            tables[header].append(cells)
+    return tables
 
 
 def _claim_audit(memory: ReportMemory) -> ClaimAudit:
@@ -344,28 +410,37 @@ def _mechanical_findings(messages: list[str]) -> list[ReviewerFinding]:
 
 
 
-def _metric_is_visible(report_body: str, lower_report: str, metric: Any) -> bool:
-    """Check a metric using readable names as well as machine identifiers."""
+def _metric_is_visible(report_body: str, metric: Any) -> bool:
+    """Require a metric name and its value in the same prose line or table row."""
 
     names = _metric_name_variants(str(metric.name))
-    if not any(_contains_phrase(lower_report, name) for name in names):
-        return False
     value_variants = _metric_value_variants(metric.value)
-    if any(_contains_phrase(lower_report, value_text.lower()) for value_text in value_variants):
-        return True
     expected_numeric = {
         numeric
         for value_text in value_variants
         if (numeric := _numeric_token_key(value_text)) is not None
     }
-    if not expected_numeric:
-        return False
-    citation_free = CITATION_PATTERN.sub("", report_body)
-    return any(
-        (numeric := _numeric_token_key(value_text)) is not None
-        and numeric in expected_numeric
-        for value_text in NUMBER_PATTERN.findall(citation_free)
-    )
+    for line in report_body.splitlines():
+        if not any(_contains_phrase(line.lower(), name) for name in names):
+            continue
+        # Numeric metric names (for example pass@1) are labels, not measured
+        # values. Remove only the matched label before looking for a number.
+        values_line = line
+        for name in sorted(names, key=len, reverse=True):
+            values_line = re.sub(
+                rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
+                " ", values_line, flags=re.IGNORECASE,
+            )
+        if any(_contains_phrase(values_line.lower(), value_text.lower()) for value_text in value_variants):
+            return True
+        citation_free = CITATION_PATTERN.sub("", values_line)
+        if any(
+            (numeric := _numeric_token_key(value_text)) is not None
+            and numeric in expected_numeric
+            for value_text in NUMBER_PATTERN.findall(citation_free)
+        ):
+            return True
+    return False
 
 
 def _report_metric_sources(context: ReportContext) -> list[Any]:

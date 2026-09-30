@@ -13,12 +13,7 @@ from simple_ar.report.document_plan import visual_plan_for_renderer
 from simple_ar.report.schema import ReportDocumentPlan, ReportFigureConfig
 
 
-_DEFAULT_PAIRED_METRICS = (
-    "accuracy",
-    "forgetting",
-    "average_incremental_accuracy",
-    "backward_transfer",
-)
+_DEFAULT_PAIRED_FIGURE_LIMIT = 4
 
 
 class ReportFigureRecord(BaseModel):
@@ -45,7 +40,6 @@ class _FigureSpec:
     title: str
     anchor_patterns: tuple[str, ...]
     section_keywords: tuple[str, ...]
-    fallback_items: tuple[str, ...]
     caption: str
 
 
@@ -55,23 +49,20 @@ _FIGURE_SPECS: tuple[_FigureSpec, ...] = (
         title="Conceptual taxonomy map",
         anchor_patterns=("foundations and taxonomy", "taxonomy", "organizing axes"),
         section_keywords=("taxonomy", "axis", "family", "foundation", "class"),
-        fallback_items=("Foundations", "Methods", "Applications", "Evaluation", "Challenges"),
         caption="Figure: a compact taxonomy map derived from the survey structure and comparison tables.",
     ),
     _FigureSpec(
         figure_id="system-construction-flow",
-        title="System construction flow",
+        title="System components overview",
         anchor_patterns=("system construction", "method", "architecture", "construction"),
         section_keywords=("role", "coordination", "grounding", "retrieval", "verification", "memory"),
-        fallback_items=("Task", "Decomposition", "Specialized agents", "Grounding", "Synthesis", "Validation"),
-        caption="Figure: a high-level construction flow summarizing recurring system components.",
+        caption="Figure: components named in this section; placement does not establish execution order or causal relationships.",
     ),
     _FigureSpec(
         figure_id="evaluation-landscape",
         title="Evaluation landscape",
         anchor_patterns=("evaluation and benchmarks", "evaluation", "benchmarks"),
         section_keywords=("benchmark", "metric", "dataset", "baseline", "cost", "failure"),
-        fallback_items=("Datasets", "Baselines", "Metrics", "Cost", "Robustness", "Reproducibility"),
         caption="Figure: an evaluation landscape distilled from the benchmark and metric discussion.",
     ),
     _FigureSpec(
@@ -79,7 +70,6 @@ _FIGURE_SPECS: tuple[_FigureSpec, ...] = (
         title="Challenges and future directions",
         anchor_patterns=("challenges and open problems", "future directions", "open problems"),
         section_keywords=("challenge", "gap", "limitation", "risk", "future", "direction"),
-        fallback_items=("Coverage", "Faithfulness", "Efficiency", "Robustness", "Safety", "Transfer"),
         caption="Figure: challenge and future-direction map grounded in the survey's open-problem sections.",
     ),
 )
@@ -104,14 +94,9 @@ def add_paired_measurement_figures(*, report_markdown: str, report_dir: Path,
     figures, blocks = [], []
     ordered_groups = list(groups.items())
     if config.max_figures <= 0:
-        preferred = {
-            name: index for index, name in enumerate(_DEFAULT_PAIRED_METRICS)
-        }
-        ordered_groups.sort(key=lambda item: (
-            preferred.get(item[0][1], len(preferred)),
-            item[0][1],
-        ))
-        limit = min(len(ordered_groups), len(_DEFAULT_PAIRED_METRICS))
+        # Keep the evidence producer's metric order; no domain-specific metric
+        # names should displace the actual task's measurements.
+        limit = min(len(ordered_groups), _DEFAULT_PAIRED_FIGURE_LIMIT)
     else:
         limit = config.max_figures
     for index, ((group_id, name, unit), pairs) in enumerate(ordered_groups):
@@ -217,7 +202,9 @@ def maybe_add_report_figures(
             continue
         items = _figure_items(section["body"], spec)
         if len(items) < 3:
-            items = list(spec.fallback_items)
+            if emit is not None:
+                emit(f"Skipped {title}: fewer than three grounded labels in the section.")
+            continue
         path = figures_dir / f"{spec.figure_id}.svg"
         write_text(path, _render_svg(title, items[:8]))
         rel_path = f"figures/{path.name}"
@@ -325,12 +312,17 @@ def _figure_items(
 
 def _table_first_column_items(text: str) -> list[str]:
     items: list[str] = []
+    in_body = False
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped.startswith("|") or "---" in stripped:
+        if not stripped.startswith("|"):
+            in_body = False
             continue
         cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-        if cells and cells[0] and cells[0].lower() not in {"axis", "challenge", "direction", "domain / use case"}:
+        if cells and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+            in_body = True
+            continue
+        if in_body and cells and cells[0]:
             items.append(cells[0])
     return items
 
@@ -396,30 +388,19 @@ def _render_svg(title: str, items: list[str]) -> str:
         f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff"/>',
         f'<text class="title" x="{width // 2}" y="48" text-anchor="middle">{html.escape(title)}</text>',
     ]
-    center_points: list[tuple[int, int]] = []
     for idx, item in enumerate(items):
         row = idx // columns
         col = idx % columns
         x = start_x + col * (card_w + gap_x)
         y = 86 + row * (card_h + gap_y)
         cx = x + card_w // 2
-        cy = y + card_h // 2
-        center_points.append((cx, cy))
         parts.append(f'<rect class="node" x="{x}" y="{y}" rx="10" ry="10" width="{card_w}" height="{card_h}"/>')
         parts.append(f'<text class="index" x="{x + 18}" y="{y + 24}">{idx + 1:02d}</text>')
         for line_no, line in enumerate(_wrap_text(item, max_chars=26)[:2]):
             parts.append(
                 f'<text class="label" x="{cx}" y="{y + 42 + line_no * 22}" text-anchor="middle">{html.escape(line)}</text>'
             )
-    for idx in range(len(center_points) - 1):
-        x1, y1 = center_points[idx]
-        x2, y2 = center_points[idx + 1]
-        if abs(y1 - y2) < 5:
-            parts.append(f'<path d="M{x1 + card_w // 2 - 8} {y1} L{x2 - card_w // 2 + 8} {y2}" stroke="#94a3b8" stroke-width="1.2" fill="none" marker-end="url(#arrow)"/>')
-    parts.insert(
-        2,
-        '<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/></marker></defs>',
-    )
+    # A list of labels is not evidence for arrows or a causal/temporal chain.
     parts.append("</svg>")
     return "\n".join(parts) + "\n"
 

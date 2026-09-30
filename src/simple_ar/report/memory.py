@@ -93,7 +93,14 @@ def _section_plan(template_markdown: str, context: ReportContext) -> list[Report
                 goal=f"{context.hypothesis_markdown} {goal}",
                 contract={}, budget=budget,
             )
-            section_handles = list(dict.fromkeys([*section_handles, *motivated, *ranked]))[:budget]
+            # A small window must not starve source attribution. Method/background
+            # sections need the paper first; results need the measured artifact
+            # first. Verified local metrics remain available separately in prompts.
+            paper_first = goal.startswith("Ground prose")
+            papers = list(dict.fromkeys([*motivated, *ranked]))
+            ordered = ([*papers[:1], *section_handles, *papers[1:]] if paper_first
+                       else [*section_handles, *papers])
+            section_handles = list(dict.fromkeys(ordered))[:budget]
         draft_order = draft_order_map.get(_heading_key(heading), index)
         sections.append(
             ReportSectionPlan(
@@ -101,6 +108,10 @@ def _section_plan(template_markdown: str, context: ReportContext) -> list[Report
                 heading=heading,
                 goal=goal,
                 evidence_handles=section_handles,
+                min_citations=int(goal.startswith("Ground prose") and any(
+                    handle.handle in section_handles and handle.citation_key
+                    for handle in context.source_handles
+                )),
                 final_order=index,
                 draft_order=draft_order,
             )
@@ -230,6 +241,10 @@ def _fallback_headings(report_mode: str) -> list[str]:
 
 def _section_goal(heading: str, report_mode: str) -> str:
     lowered = heading.lower()
+    # Mixed headings such as "Target Method And Claimed Result" describe the
+    # source method, not exclusively a locally measured result.
+    if any(term in lowered for term in ("method", "related", "background", "introduction")):
+        return "Ground prose in paper ids, briefs, chunks, and synthesis evidence."
     if "result" in lowered or "experiment" in lowered:
         return "Use only recorded metrics and experiment artifacts; avoid unstaged performance claims."
     if "related" in lowered or "evidence" in lowered or "method" in lowered or "benchmark" in lowered:

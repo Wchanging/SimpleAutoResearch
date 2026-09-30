@@ -128,6 +128,20 @@ class LiteratureTests(unittest.TestCase):
         self.assertEqual(paper.published, "2025")
         self.assertEqual(paper.categories, ["ACL"])
         self.assertEqual(paper.doi, "10.1234/s2")
+        self.assertEqual(paper.fulltext_url, "https://arxiv.org/pdf/2501.00001.pdf")
+
+    def test_semantic_scholar_prefers_explicit_open_pdf_and_ignores_untrusted_scheme(self) -> None:
+        with_pdf = _s2_paper_from_row({
+            "paperId": "open", "title": "Open study",
+            "externalIds": {"ArXiv": "2501.00001"},
+            "openAccessPdf": {"url": "https://example.org/study.pdf"},
+        })
+        self.assertEqual(with_pdf.fulltext_url, "https://example.org/study.pdf")
+        unsafe = _s2_paper_from_row({
+            "paperId": "unsafe", "title": "Unknown source",
+            "openAccessPdf": {"url": "file:///etc/passwd"},
+        })
+        self.assertIsNone(unsafe.fulltext_url)
 
 
 if __name__ == "__main__":

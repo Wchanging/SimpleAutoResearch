@@ -13,6 +13,7 @@ class GetPaperBriefArgs(BaseModel):
 
 class GetNeighborChunksArgs(BaseModel):
     handle: str = Field(description="Chunk source handle from the current run.")
+    chunk_id: str = Field(default="", description="Optional persisted chunk id from evidence_passages; anchors the neighborhood.")
     before: int = Field(default=1, ge=0, le=3)
     after: int = Field(default=1, ge=0, le=3)
 
@@ -36,7 +37,7 @@ class ToolOutput(BaseModel):
 
 
 def report_tool_specs() -> list[ReportToolSpec]:
-    """Return V2.4 report tool contracts."""
+    """Return the shared read-only report tool contracts."""
     return [
         _spec(
             "get_paper_brief",
@@ -45,7 +46,7 @@ def report_tool_specs() -> list[ReportToolSpec]:
         ),
         _spec(
             "get_neighbor_chunks",
-            "Return a bounded chunk handle summary for source backtracking.",
+            "Read persisted source passages around a cited chunk. Without stored text, return explicitly labeled metadata only.",
             GetNeighborChunksArgs,
         ),
         _spec(

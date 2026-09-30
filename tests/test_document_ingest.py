@@ -7,15 +7,34 @@ from unittest.mock import patch
 
 from simple_ar.core.artifacts import write_jsonl
 from simple_ar.literature.models import Paper
+from simple_ar.literature.semantic_scholar_client import _paper_from_row as semantic_scholar_paper
 from simple_ar.research.evidence.reader import ReadRequest, read_documents
 from simple_ar.research.contracts import DocumentRecord, SourcePlan, TextChunk
 from simple_ar.research.documents.fulltext import build_fulltext_manifest
 from simple_ar.research.documents.ingest import build_document_bundle
+from simple_ar.research.documents.records import build_document_records
 from simple_ar.research.sources.base import build_source_plan
 from simple_ar._legacy.documents import load_search_document_bundle
 
 
 class DocumentIngestTests(unittest.TestCase):
+    def test_provider_open_pdf_flows_from_search_metadata_to_fetch_plan(self) -> None:
+        paper = semantic_scholar_paper({
+            "paperId": "s2-open", "title": "A study with an open PDF",
+            "openAccessPdf": {"url": "https://example.org/study.pdf"},
+        })
+        plan = SourcePlan(
+            queries=["study"], require_fulltext=True, allow_pdf_download=True,
+            budget={"max_fulltext_documents": 4, "max_pdf_mb": 20, "keep_raw_pdf": True},
+        )
+        records = build_document_records(papers=[paper], source_plan=plan)
+        manifest = build_fulltext_manifest(records=records, source_plan=plan, cache_dir=None)
+        hint = manifest["documents"][0]["hints"][0]
+        self.assertEqual(hint["kind"], "pdf")
+        self.assertEqual(hint["status"], "selected")
+        self.assertEqual(hint["url"], "https://example.org/study.pdf")
+        self.assertEqual(manifest["budget"]["max_pdf_mb"], 20)
+
     def test_remote_fulltext_reuses_a_valid_cache_entry(self) -> None:
         class Response:
             headers = {"Content-Type": "application/pdf"}

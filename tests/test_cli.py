@@ -24,6 +24,109 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_fixed_protocol_does_not_claim_candidate_lineage_is_missing(self):
+        from simple_ar.cli.research_view import method_validation_line
+        for kind in ("measurement", "reproduction"):
+            view = SimpleNamespace(work_plan={"task": {"kind": kind}})
+            self.assertIsNone(method_validation_line(view))
+
+    def test_unrun_matrix_is_not_displayed_as_an_experiment_artifact(self):
+        from simple_ar.cli.research_view import _artifact_rows, method_validation_line
+
+        TEST_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
+            root = Path(directory)
+            store = ArtifactStore(root)
+            pending = store.write_json("experiment-set.json", {
+                "schema_version": "experiment_set.v1",
+                "pairs": [{"seed": 0, "baseline": None, "candidate": None}],
+            }, kind="experiment_set")
+            view = SimpleNamespace(session_root=root, state_refs={"matrix_results": pending}, work_plan={})
+            self.assertEqual(_artifact_rows(view), [])
+            self.assertIsNone(method_validation_line(view))
+
+    def test_feasibility_review_model_is_session_config_not_global_env(self):
+        from simple_ar.cli.research_config import research_defaults
+
+        TEST_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
+            path = Path(directory) / "research.toml"
+            path.write_text('[task]\ngoal = "Review a method"\n[model]\nname = "author"\n'
+                            'feasibility_review_model = "reviewer"\n', encoding="utf-8")
+            defaults = research_defaults(["research-session", "--config", str(path)])
+            self.assertEqual(defaults["feasibility_review_model"], "reviewer")
+            args = build_parser(research_defaults=defaults).parse_args(
+                ["research-session", "--config", str(path)])
+            self.assertEqual(args.feasibility_review_model, "reviewer")
+
+    def test_rich_completion_uses_measured_implementation_not_stale_initial_patch(self):
+        from simple_ar.cli.research_view import ResearchConsole, method_validation_line
+
+        TEST_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
+            root = Path(directory)
+            store = ArtifactStore(root)
+            initial = store.write_json("initial.json", {"method_validation": {"status": "未检查"}},
+                                       kind="implementation_result")
+            repaired = store.write_json("repaired.json", {"method_validation": {
+                "status": "有执行证据支持", "reason": "A bounded observation was recorded.",
+            }}, kind="implementation_result")
+            old_result = store.write_json("old.json", {"implementation_ref": initial.to_dict()},
+                                          kind="experiment_result")
+            latest_result = store.write_json("latest.json", {"implementation_ref": repaired.to_dict()},
+                                             kind="experiment_result")
+            view = SimpleNamespace(
+                work_plan={"accepted_plan": {"steps": [
+                    {"capability": "experiment", "state_name": "experiment", "action": "experiment"},
+                    {"capability": "experiment", "state_name": "experiment_repair_1", "action": "experiment_repair_1"},
+                ]}},
+                session_root=root, status="completed", next_action=None,
+                status_reason="", attempts=(),
+                state_refs={"experiment": old_result, "experiment_repair_1": latest_result},
+            )
+            self.assertEqual(method_validation_line(view), "Candidate method evidence: 有执行证据支持.")
+            stream = io.StringIO()
+            ResearchConsole(Console(file=stream, width=140)).finish(view)
+            self.assertIn("Candidate method evidence: 有执行证据支持.", stream.getvalue())
+            view.state_refs.pop("experiment_repair_1")
+            self.assertEqual(method_validation_line(view), "Candidate method evidence: not independently checked.")
+
+    def test_paired_completion_rejects_stale_or_mixed_method_lineage(self):
+        from simple_ar.cli.research_view import method_validation_line
+
+        TEST_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as directory:
+            root = Path(directory)
+            store = ArtifactStore(root)
+            initial = store.write_json("initial.json", {"method_validation": {"status": "未检查"}})
+            repaired = store.write_json("repaired.json", {"method_validation": {"status": "checked"}})
+            first = store.write_json("first.json", {"implementation_ref": repaired.to_dict()})
+            second = store.write_json("second.json", {"implementation_ref": repaired.to_dict()})
+            collection = store.write_json("collection.json", {
+                "implementation_ref": initial.to_dict(),
+                "pairs": [{"candidate": first.to_dict()}, {"candidate": second.to_dict()}],
+            })
+            view = SimpleNamespace(work_plan={}, session_root=root, state_refs={"matrix_results": collection})
+            self.assertIn("collection lineage mismatch", method_validation_line(view))
+            collection = store.write_json("collection-matched.json", {
+                "implementation_ref": repaired.to_dict(),
+                "pairs": [{"candidate": first.to_dict()}, {"candidate": second.to_dict()}],
+            })
+            view.state_refs["matrix_results"] = collection
+            self.assertEqual(method_validation_line(view), "Candidate method evidence: checked.")
+            other = store.write_json("other.json", {"implementation_ref": initial.to_dict()})
+            mixed = store.write_json("collection-mixed.json", {
+                "implementation_ref": repaired.to_dict(),
+                "pairs": [{"candidate": first.to_dict()}, {"candidate": other.to_dict()}],
+            })
+            view.state_refs["matrix_results"] = mixed
+            self.assertIn("mixed candidate implementations", method_validation_line(view))
+            no_candidate = store.write_json("collection-baseline-only.json", {
+                "implementation_ref": None, "pairs": [{"candidate": None}],
+            })
+            view.state_refs["matrix_results"] = no_candidate
+            self.assertIsNone(method_validation_line(view))
+
     def test_rich_completion_distinguishes_session_and_report_audit_status(self):
         from simple_ar.cli.research_view import ResearchConsole, report_audit_line
 
