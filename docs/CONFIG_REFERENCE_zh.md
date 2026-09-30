@@ -8,7 +8,7 @@
 
 ## 引导设置
 
-`simple-ar start` 支持 `survey` 和 `bug_fix`，生成普通研究 TOML；代码任务额外生成
+`simple-ar start` 支持 `survey`、`bug_fix` 和准备好的 `reproduction`，生成普通研究 TOML；代码任务额外生成
 CodeTask TOML 和任务说明。沿用默认值、TOML、显式 CLI 的覆盖关系，不新增配置体系。
 
 ```bash
@@ -19,6 +19,23 @@ simple-ar start --kind survey --goal "比较不确定性估计方法" --sources 
 `bug_fix` 需要 `--project`、`--validate` 和可重复的 `--allow` 编辑范围；默认复制工作区、
 当前 Python、300 秒验证超时、一次修复，保护测试和 `.env`。复制不是 OS 沙箱，执行
 验证命令仍需授权；自定义环境、范围和时限可修改生成的 CodeTask TOML。
+
+固定协议复现需提供本地论文、要检查的结论、数据/条件偏离、判断标准及指标。
+环境、数据和命令必须已准备好；引导不会自动安装、发明方法或训练 baseline。例如：
+
+```bash
+simple-ar start --kind reproduction --goal "检查论文的覆盖率结论" \
+  --document paper.pdf --hypothesis "已知权重在协变量偏移下保持覆盖率" \
+  --dataset "已准备的合成适配数据" --expected-outcome "比较覆盖率与标称 0.9" \
+  --metric coverage --cwd ./prepared-project --timeout-sec 300 --prepare-only \
+  --command python run.py --seed 7
+```
+
+`--command` 必须放最后，其后全是进程参数，不是引导选项，也不经过 shell 解释。
+交互时用 JSON 参数列表输入命令。默认当前目录/环境、一次执行、300 秒时限，生成复现报告并
+进行全文审阅；API 累计额度仍不设限。`--metric` 可重复，第一项为主指标；命令必须按现有执行器
+支持的方式输出指标（例如 `coverage: 0.91`）。更复杂的结果格式、协议条件或明确增加资源额度，
+可在执行前编辑生成的 TOML。这是论文结论检查，不是自动准备环境或完整论文复现。
 
 输入保存到 `--output-root`（默认 `runs/assistant`）；资产路径为绝对路径，产物目录
 `sessions` 相对生成的研究 TOML 解析。设置过程不改原项目，不把凭据写进配置。

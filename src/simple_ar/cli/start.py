@@ -17,8 +17,8 @@ from simple_ar.core.console import print_line
 
 
 def add_start_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("start", help="Set up a survey or code fix without writing configuration files.")
-    parser.add_argument("--kind", choices=("survey", "bug_fix"))
+    parser = subparsers.add_parser("start", help="Set up a survey, code fix, or prepared reproduction without writing TOML.")
+    parser.add_argument("--kind", choices=("survey", "bug_fix", "reproduction"))
     parser.add_argument("--goal", help="Describe the question or desired fix in your own words.")
     parser.add_argument("--document", action="append", default=[], type=Path)
     parser.add_argument("--sources", choices=("materials", "search"), help="Use only supplied documents, or allow online search.")
@@ -27,11 +27,18 @@ def add_start_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--project", type=Path, help="Existing code project; edits are made in an isolated copy.")
     parser.add_argument("--validate", help="Explicit validation command, for example: python -m unittest discover -s tests.")
     parser.add_argument("--allow", action="append", default=[], help="Editable project-relative path/glob; repeat as needed.")
+    parser.add_argument("--hypothesis", help="Prepared reproduction: the published conclusion to check.")
+    parser.add_argument("--dataset", help="Prepared reproduction: data and any accepted adaptation.")
+    parser.add_argument("--expected-outcome", help="Prepared reproduction: comparison criteria, not invented results.")
+    parser.add_argument("--metric", action="append", default=[], help="Prepared reproduction: metric emitted by the command; repeat as needed.")
+    parser.add_argument("--cwd", type=Path, help="Prepared reproduction: existing execution directory; defaults to the current directory.")
+    parser.add_argument("--timeout-sec", type=int, help="Prepared reproduction: one process limit in seconds; defaults to 300.")
     parser.add_argument("--model", default="env", help="Default: use the model connection from .env.")
     parser.add_argument("--interaction", choices=("assisted", "checkpoints", "autonomous"), default="checkpoints")
     parser.add_argument("--output-root", type=Path, default=Path("runs/assistant"))
     parser.add_argument("--prepare-only", action="store_true", help="Save inspectable input files without model or process calls.")
     parser.add_argument("--yes", action="store_true", help="Accept the displayed task summary; does not broaden execution authority.")
+    parser.add_argument("--command", dest="run_argv", nargs=argparse.REMAINDER, help="Prepared reproduction: explicit argv. Put this option last; no shell interpretation.")
 
 
 def _answer(prompt: str, current: str | None, *, interactive: bool) -> str:
@@ -61,18 +68,73 @@ def _command(arguments: list[str]) -> str:
     return shlex.join(arguments)
 
 
+def _literature_rows(args: argparse.Namespace, sources: str, documents: list[Path]) -> list[str]:
+    return [f"materials_only = {'true' if sources == 'materials' else 'false'}",
+            f"use_fulltext = {'true' if args.fulltext else 'false'}",
+            f"allow_pdf_download = {'true' if args.fulltext else 'false'}",
+            f"keep_raw_pdf = {'true' if args.fulltext else 'false'}",
+            *(["max_fulltext_documents = 4", "max_pdf_mb = 20"] if args.fulltext else []),
+            "", "[assets]", f"papers = {_array([str(path) for path in documents])}"]
+
+
+def _code_task_files(goal: str, project: Path, validation: str, allowed: list[str]) -> dict[str, str]:
+    return {
+        "task.md": goal + "\n",
+        "code_task.toml": "[code_task]\n" + f"code_root = {_quote(str(project))}\n"
+        'task_file = "{config_dir}/task.md"\noutput_root = "{config_dir}/sessions"\n'
+        '\n[workspace]\nmode = "copy"\n\n[environment]\nmode = "current"\n'
+        + "\n[edit_scope]\n" + f"allowed_patterns = {_array(allowed)}\n"
+        + 'protected_patterns = ["tests/**", "**/tests/**", "test_*.py", "**/test_*.py", ".env", ".env.*"]\n'
+        + "\n[benchmark]\n" + f"command = {_quote(validation)}\n"
+        + '\n[execute]\nuse_llm = true\nbaseline_policy = "skip"\ntimeout_sec = 300\nrepair_rounds = 1\n',
+    }
+
+
+def _reproduction_rows(args: argparse.Namespace, *, interactive: bool) -> list[str]:
+    protocol = {key: _answer(prompt, getattr(args, key), interactive=interactive) for key, prompt in (
+        ("hypothesis", "Published conclusion / 要检查的论文结论"),
+        ("dataset", "Data and adaptation / 数据及条件偏离"),
+        ("expected_outcome", "Comparison criteria / 预期及判断标准"),
+    )}
+    argv = args.run_argv
+    if argv is None:
+        raw = _answer('Command argv as JSON / 命令参数列表（如 ["python", "run.py"]）', None, interactive=interactive)
+        argv = json.loads(raw)
+    if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item.strip() for item in argv):
+        raise ValueError("Reproduction requires a nonempty command argument list of nonempty strings.")
+    metrics = args.metric or [_answer("Emitted metric / 命令实际输出的指标名", None, interactive=interactive)]
+    if any(not value.strip() for value in metrics) or len(set(metrics)) != len(metrics):
+        raise ValueError("Metric names must be nonempty and distinct.")
+    cwd = (args.cwd or Path.cwd()).expanduser().resolve()
+    if not cwd.is_dir():
+        raise ValueError(f"Execution directory not found: {cwd}")
+    timeout = args.timeout_sec if args.timeout_sec is not None else 300
+    if timeout < 1:
+        raise ValueError("--timeout-sec must be positive.")
+    print_line("\n".join(f"{key}: {value}" for key, value in protocol.items()))
+    print_line(f"Execution: {_command(argv)}\nDirectory: {cwd}\nOne invocation; timeout: {timeout}s; metrics: {', '.join(metrics)}")
+    print_line("Uses the current environment, not an OS sandbox. No automatic installs, baseline training, or method changes are authorized.")
+    return ["", "[execution]", f"command = {_array(argv)}", f"cwd = {_quote(str(cwd))}",
+            f"timeout_sec = {timeout}", 'baseline_policy = "skip"', f"primary_metric = {_quote(metrics[0])}",
+            f"metrics = {_array(metrics)}", "", "[execution.protocol]",
+            *[f"{key} = {_quote(value)}" for key, value in protocol.items()],
+            f"metrics = {_array(metrics)}", "", "[budget]", "process_invocations = 1",
+            f"process_wall_seconds = {timeout}"]
+
+
 def prepare_start(args: argparse.Namespace) -> Path | None:
     """Collect bounded user choices and write one canonical, editable input set."""
     interactive = sys.stdin.isatty()
-    print_line("Available now: survey (literature/direction report), bug_fix (isolated code change and validation).")
-    print_line("Reproduction, standalone figures and paper export are not yet offered by this guided entry.")
-    kind = _answer("Function / 功能 [survey / bug_fix]", args.kind, interactive=interactive)
-    if kind not in {"survey", "bug_fix"}:
-        raise ValueError("Choose survey or bug_fix.")
+    print_line("Available now: survey (literature/direction report), bug_fix (isolated code change), reproduction (prepared paper-conclusion check).")
+    print_line("Standalone figures/writing and autonomous reproduction preparation are not yet offered by this guided entry.")
+    kind = _answer("Function / 功能 [survey / bug_fix / reproduction]", args.kind, interactive=interactive)
+    if kind not in {"survey", "bug_fix", "reproduction"}:
+        raise ValueError("Choose survey, bug_fix or reproduction.")
     goal = _answer("Goal / 目标", args.goal, interactive=interactive)
     documents = [path.expanduser().resolve() for path in args.document]
-    if kind == "survey" and interactive and not documents and args.sources is None:
-        supplied = input("Local document path / 本地材料（可留空在线检索）: ").strip()
+    if kind in {"survey", "reproduction"} and interactive and not documents and args.sources is None:
+        prompt = "Local document path / 本地材料" + ("（必需）" if kind == "reproduction" else "（可留空在线检索）")
+        supplied = input(prompt + ": ").strip()
         if supplied:
             documents.append(Path(supplied).expanduser().resolve())
     for path in documents:
@@ -82,18 +144,29 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
     validation = None
     allowed = list(args.allow)
     sources = args.sources
-    if kind == "survey":
+    reproduction_rows: list[str] = []
+    if kind != "reproduction" and any((args.run_argv is not None, args.hypothesis, args.dataset,
+            args.expected_outcome, args.metric, args.cwd is not None, args.timeout_sec is not None)):
+        raise ValueError("Execution/protocol options require --kind reproduction; use --validate for bug_fix.")
+    if kind in {"survey", "reproduction"}:
         if args.max_cited_sources is not None and args.max_cited_sources < 1:
             raise ValueError("--max-cited-sources must be positive when specified.")
         if args.project or args.validate or allowed:
-            raise ValueError("survey does not accept project editing or validation options; choose bug_fix.")
-        sources = _answer("Source scope / 来源 [materials / search]", sources, interactive=interactive)
+            raise ValueError(f"{kind} does not accept project editing or validation options; choose bug_fix.")
+        if kind == "reproduction":
+            if sources not in {None, "materials"} or args.fulltext:
+                raise ValueError("Prepared reproduction uses supplied documents only; online preparation is not supported by this entry.")
+            sources = "materials"
+        else:
+            sources = _answer("Source scope / 来源 [materials / search]", sources, interactive=interactive)
         if sources not in {"materials", "search"}:
             raise ValueError("Source scope must be materials or search.")
         if sources == "materials" and not documents:
             raise ValueError("materials requires at least one --document; no online search will be inferred.")
         if args.fulltext and sources != "search":
             raise ValueError("--fulltext enables remote retrieval and requires --sources search; local documents are already read in materials mode.")
+        if kind == "reproduction":
+            reproduction_rows = _reproduction_rows(args, interactive=interactive)
     else:
         if documents or sources or args.fulltext or args.max_cited_sources is not None:
             raise ValueError("bug_fix does not consume literature inputs or a search scope.")
@@ -112,7 +185,8 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
         print_line(f"Project: {project}\nEdit scope: {', '.join(allowed)}\nValidation: {validation}")
         print_line("The validation command is authorized to execute in a copy using the current Python environment; copying is not an OS sandbox.")
     else:
-        print_line(f"Sources: {sources}; documents: {len(documents)}. No code execution requested.")
+        print_line(f"Sources: {sources}; documents: {len(documents)}. " +
+                   ("One declared reproduction command requested." if kind == "reproduction" else "No code execution requested."))
         if args.max_cited_sources is not None:
             print_line(f"Final report source limit: {args.max_cited_sources} distinct cited source(s).")
         if sources == "search":
@@ -122,31 +196,22 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
     # Persist before the final confirmation: an EOF/decline here loses no inputs.
     root = new_research_session_root(args.output_root, goal)
     config = root / "research.toml"
+    outputs = {"survey": ["report"], "bug_fix": ["bug_fix"], "reproduction": ["experiments", "report"]}
     rows = ["[task]", f"goal = {_quote(goal)}", f"kind = {_quote(kind)}",
-            f"outputs = {_array(['report'] if kind == 'survey' else ['bug_fix'])}",
+            f"outputs = {_array(outputs[kind])}",
             'output_root = "sessions"', "", "[model]", f"name = {_quote(args.model)}", "",
             "[research]", f"interaction = {_quote(args.interaction)}"]
-    if kind == "survey":
-        rows.extend([f"materials_only = {'true' if sources == 'materials' else 'false'}",
-                     f"use_fulltext = {'true' if args.fulltext else 'false'}",
-                     f"allow_pdf_download = {'true' if args.fulltext else 'false'}",
-                     f"keep_raw_pdf = {'true' if args.fulltext else 'false'}",
-                     *(["max_fulltext_documents = 4", "max_pdf_mb = 20"] if args.fulltext else []),
-                     "", "[assets]", f"papers = {_array([str(path) for path in documents])}"])
-        if args.max_cited_sources is not None:
-            rows.extend(["", "[report]", f"max_cited_sources = {args.max_cited_sources}"])
+    if kind in {"survey", "reproduction"}:
+        rows.extend(_literature_rows(args, sources, documents))
+        if args.max_cited_sources is not None or kind == "reproduction":
+            rows.extend(["", "[report]"])
+            if args.max_cited_sources is not None:
+                rows.append(f"max_cited_sources = {args.max_cited_sources}")
+        if kind == "reproduction":
+            rows.extend(['template = "reproduction"', "document_review = true", *reproduction_rows])
     else:
-        (root / "task.md").write_text(goal + "\n", encoding="utf-8")
-        (root / "code_task.toml").write_text(
-            "[code_task]\n" + f"code_root = {_quote(str(project))}\n"
-            'task_file = "{config_dir}/task.md"\noutput_root = "{config_dir}/sessions"\n'
-            '\n[workspace]\nmode = "copy"\n\n[environment]\nmode = "current"\n'
-            + "\n[edit_scope]\n" + f"allowed_patterns = {_array(allowed)}\n"
-            + 'protected_patterns = ["tests/**", "**/tests/**", "test_*.py", "**/test_*.py", ".env", ".env.*"]\n'
-            + "\n[benchmark]\n" + f"command = {_quote(validation or '')}\n"
-            + '\n[execute]\nuse_llm = true\nbaseline_policy = "skip"\ntimeout_sec = 300\nrepair_rounds = 1\n',
-            encoding="utf-8",
-        )
+        for name, text in _code_task_files(goal, project, validation, allowed).items():
+            (root / name).write_text(text, encoding="utf-8")
         rows.extend(["", "[execution]", 'code_task_config = "code_task.toml"'])
     config.write_text("\n".join(rows) + "\n", encoding="utf-8")
     # Validate through the existing parser, not an independent wizard schema.

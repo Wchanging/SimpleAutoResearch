@@ -139,6 +139,75 @@ class StartTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0].task_kind, "survey")
             self.assertEqual(run.call_args.args[0].outputs, ["report"])
 
+    def test_prepared_reproduction_uses_existing_config_and_preserves_argv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "source with spaces.md"
+            paper.write_text("# Published conclusion\n", encoding="utf-8")
+            config = self.prepare("--kind", "reproduction", "--goal", "Check a published conclusion",
+                "--document", str(paper), "--hypothesis", "Published claim, not a new method",
+                "--dataset", "User-prepared adapted data", "--expected-outcome", "Compare coverage with 0.9",
+                "--metric", "coverage", "--metric", "mc_error", "--cwd", directory, "--timeout-sec", "12",
+                "--max-cited-sources", "1", "--output-root", str(root / "runs"), "--prepare-only",
+                "--command", "python", "a script.py", "--label", "one value")
+            values = research_defaults(["research-session", "--config", str(config)])
+            self.assertEqual(values["task_kind"], "reproduction")
+            self.assertEqual(values["outputs"], ["experiments", "report"])
+            self.assertEqual(values["command_argv"], ["python", "a script.py", "--label", "one value"])
+            self.assertEqual(values["cwd"], str(root.resolve()))
+            self.assertEqual(values["execution_details"]["baseline_policy"], "skip")
+            self.assertEqual(values["execution_details"]["protocol"]["dataset"], "User-prepared adapted data")
+            self.assertEqual(values["process_invocations"], 1)
+            self.assertEqual(values["process_wall_seconds"], 12)
+            self.assertEqual(values["report_template"], "reproduction")
+            self.assertTrue(values["report_document_review"])
+            self.assertEqual(values["report_max_cited_sources"], 1)
+            self.assertNotIn("total_tokens", values)
+            self.assertFalse(values["research_allow_pdf_download"])
+            self.assertFalse((config.parent / "code_task.toml").exists())
+
+    def test_invalid_reproduction_and_cross_function_options_create_no_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paper = Path(directory) / "paper.md"
+            paper.write_text("source", encoding="utf-8")
+            output = Path(directory) / "runs"
+            base = ["--kind", "reproduction", "--goal", "Check", "--document", str(paper),
+                "--hypothesis", "Claim", "--dataset", "Data", "--expected-outcome", "Criterion",
+                "--metric", "coverage", "--output-root", str(output), "--prepare-only"]
+            for flags in (["--sources", "search"], ["--fulltext"], ["--timeout-sec", "0"],
+                          ["--cwd", str(Path(directory) / "missing")], ["--metric", "coverage"],
+                          ["--project", directory]):
+                with self.subTest(flags=flags), self.assertRaises(ValueError):
+                    self.prepare(*base, *flags, "--command", "python", "run.py")
+                self.assertFalse(output.exists())
+            for command in ([], [""]):
+                with self.subTest(command=command), self.assertRaises(ValueError):
+                    self.prepare(*base, "--command", *command)
+                self.assertFalse(output.exists())
+            with self.assertRaisesRegex(ValueError, "Missing input"):
+                self.prepare("--kind", "reproduction", "--goal", "Check", "--document", str(paper),
+                    "--output-root", str(output), "--prepare-only")
+            with self.assertRaisesRegex(ValueError, "require --kind reproduction"):
+                self.prepare("--kind", "survey", "--goal", "Read", "--sources", "search", "--prepare-only",
+                    "--output-root", str(output), "--command", "python", "run.py")
+            self.assertFalse(output.exists())
+
+    def test_interactive_reproduction_asks_for_protocol_not_a_research_algorithm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paper = Path(directory) / "paper.md"
+            paper.write_text("source", encoding="utf-8")
+            args = build_parser().parse_args(["start", "--kind", "reproduction", "--goal", "Check",
+                "--document", str(paper), "--output-root", directory, "--prepare-only"])
+            with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", side_effect=[
+                    "Published claim", "Existing data", "Value near 0.9", '["python", "run.py"]', "coverage",
+                    ]), contextlib.redirect_stdout(io.StringIO()):
+                config = prepare_start(args)
+            values = research_defaults(["research-session", "--config", str(config)])
+            self.assertEqual(values["command_argv"], ["python", "run.py"])
+            self.assertEqual(values["timeout_sec"], 300)
+            self.assertEqual(values["metric"], ["coverage"])
+            self.assertTrue(values["research_materials_only"])
+
 
 if __name__ == "__main__":
     unittest.main()

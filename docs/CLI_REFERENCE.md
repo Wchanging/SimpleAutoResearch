@@ -4,12 +4,17 @@
 
 ## Guided entry
 
-`simple-ar start` asks for an implemented function (`survey` / `bug_fix`) and
+`simple-ar start` asks for an implemented function (`survey` / `bug_fix` / prepared `reproduction`) and
 task inputs, saves normal TOML, and delegates to `research-session`.
-Options: `--kind`, `--goal`, `--document` (repeatable), `--sources materials|search`, `--fulltext`, `--max-cited-sources N` (optional survey source bound),
+Options: `--kind`, `--goal`, `--document` (repeatable), `--sources materials|search`, `--fulltext`, `--max-cited-sources N` (optional report source bound),
 `--project`, `--validate`, `--allow` (repeatable), `--model`, `--interaction`,
 `--output-root`, `--prepare-only`, `--yes`. See [configuration](CONFIG_REFERENCE.md#guided-setup)
 for defaults, scope and continuation. It does not call external Agents.
+
+Prepared reproduction additionally accepts `--hypothesis`, `--dataset`, `--expected-outcome`,
+repeatable `--metric`, `--cwd`, `--timeout-sec` and `--command ARGV...` (last).
+Local documents and an already prepared execution environment are required; it does not
+discover implementations or install dependencies. Other kinds reject these execution options.
 
 This page is a command lookup for SimpleAutoResearch. It intentionally focuses
 on command syntax, options, outputs, and short operational notes.
@@ -33,7 +38,7 @@ not silently translated to the canonical application.
 
 | Command | Purpose |
 | --- | --- |
-| `simple-ar start` | Guided survey/code-fix setup; saves editable configuration and enters the same research session. |
+| `simple-ar start` | Guided survey/code-fix/prepared-reproduction setup; saves editable configuration and enters the same research session. |
 | `simple-ar research-session` | Canonical entry for a bounded task-driven session; the accepted plan selects applicable research and execution steps. |
 | `simple-ar research-session-continue` | Retry one failed canonical explicit experiment. |
 | `simple-ar research-session-migrate` | Create a canonical successor from a read-only `session_manifest.v1`. |

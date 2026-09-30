@@ -16,11 +16,16 @@ def new_research_session_root(output_root: str | Path, topic: str) -> Path:
     slug = _slug(topic)
     candidate = parent / f"{stamp}-{slug}"
     suffix = 2
-    while candidate.exists():
-        candidate = parent / f"{stamp}-{slug}-{suffix:02d}"
-        suffix += 1
-    candidate.mkdir()
-    return candidate
+    while True:
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            # mkdir is the reservation, not an exists() check followed by a
+            # race-prone create. Concurrent starters cannot claim the same root.
+            candidate = parent / f"{stamp}-{slug}-{suffix:02d}"
+            suffix += 1
+        else:
+            return candidate
 
 
 def _slug(value: str) -> str:

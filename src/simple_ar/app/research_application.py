@@ -1048,9 +1048,7 @@ class ResearchApplication:
                 task_text=self.brief.request_text,
                 contract=self._execution_contract(),
             )
-            inputs = self._input_refs("runtime_config") if self._task_kind() in {"measurement", "reproduction"} else self._input_refs("design", "runtime_config")
-            if self._task_kind() == "reproduction":
-                inputs = (*inputs, *self._input_refs("read", "synthesis"))
+            inputs = self._experiment_input_refs()
             baseline_ref = self.controller.manifest.state_refs.get("baseline")
             if baseline_ref is not None:
                 inputs = (*inputs, baseline_ref)
@@ -1104,22 +1102,24 @@ class ResearchApplication:
         from simple_ar.report.schema import SourceHandle
 
         refs = self.controller.manifest.state_refs
+        documents = self._load_documents()
+        search = self._load_search(documents=documents)
+        synthesis = self._load_synthesis()
+        read = self._load_read(documents=documents)
         if not set(self.brief.requested_outputs) & {"experiment", "experiments"}:
             from simple_ar.report.projection import build_literature_report_inputs
             context, memory = build_literature_report_inputs(
-                topic=self.brief.objective or self.brief.request_text, brief=self._load_synthesis(),
-                search=self._load_search(), documents=self._load_documents(), brief_ref=refs["synthesis"],
+                topic=self.brief.objective or self.brief.request_text, brief=synthesis,
+                search=search, documents=documents, brief_ref=refs["synthesis"],
             )
-            return attach_report_read_evidence(context, memory, documents=self._load_documents(),
-                                               read=self._load_read(), read_ref=refs["read"])
+            return attach_report_read_evidence(context, memory, documents=documents,
+                                               read=read, read_ref=refs["read"])
         analysis_ref = self._latest_analysis_ref() or refs["analysis"]
         design_ref = self._implementation_design_ref() if "design" in refs else None
         design = ResearchDesignResult.from_handoff_dict(self.controller.store.read_json(design_ref)) if design_ref else None
         analysis = AnalysisHandoff.from_handoff_dict(self.controller.store.read_json(analysis_ref))
         if "matrix_results" in refs and analysis.execution_ref == refs["matrix_results"]:
             from simple_ar.report.projection import attach_paired_report_measurements
-            if analysis.execution_ref != refs["matrix_results"]:
-                raise ResearchApplicationError("Analyze the measurement collection before writing its report.")
             collection = self._state_payload("matrix_results")
             evidence_ref = self.controller.store.ref(Path(analysis_ref.path).parent / "paired_analysis.json",
                 kind="experiment_set_analysis", schema="experiment_set_analysis.v1", producer="research.analysis")
@@ -1127,8 +1127,8 @@ class ResearchApplication:
             # Comparisons stay in results as interpreted evidence; measured ledger
             # entries below come from their own canonical artifacts, not this projection.
             context, memory = build_research_report_inputs(
-                topic=self._experiment_report_topic(), brief=self._load_synthesis(),
-                search=self._load_search(), documents=self._load_documents(),
+                topic=self._experiment_report_topic(), brief=synthesis,
+                search=search, documents=documents,
                 execution={"status": evidence["status"], "metrics": {}}, analysis=analysis.analysis,
                 brief_ref=refs["synthesis"], execution_ref=refs["matrix_results"], analysis_ref=analysis_ref,
                 design=design, design_ref=design_ref)
@@ -1161,8 +1161,8 @@ class ResearchApplication:
                 current_ref=analysis.execution_ref, include_prior_metrics=False,
             )
             memory.source_handles = list(context.source_handles)
-            return attach_report_read_evidence(context, memory, documents=self._load_documents(),
-                                               read=self._load_read(), read_ref=refs["read"])
+            return attach_report_read_evidence(context, memory, documents=documents,
+                                               read=read, read_ref=refs["read"])
         if analysis.execution_ref != self.latest_experiment_ref():
             raise ResearchApplicationError("Analyze the latest measurement before creating report inputs.")
         execution = dict(self.controller.store.read_json(analysis.execution_ref))
@@ -1178,8 +1178,8 @@ class ResearchApplication:
             diagnosis = self.controller.store.read_json(diagnosis_ref)
             execution["failure_diagnosis"] = self._compact_failure_diagnosis(diagnosis)
         context, memory = build_research_report_inputs(
-            topic=self._experiment_report_topic(), brief=self._load_synthesis(),
-            search=self._load_search(), documents=self._load_documents(), execution=execution,
+            topic=self._experiment_report_topic(), brief=synthesis,
+            search=search, documents=documents, execution=execution,
             analysis=analysis.analysis, brief_ref=refs["synthesis"], execution_ref=analysis.execution_ref,
             analysis_ref=analysis_ref, design=design, design_ref=design_ref,
         )
@@ -1224,8 +1224,8 @@ class ResearchApplication:
             context, memory, self._report_experiment_observations(),
             current_ref=analysis.execution_ref,
         )
-        return attach_report_read_evidence(context, memory, documents=self._load_documents(),
-                                           read=self._load_read(), read_ref=refs["read"])
+        return attach_report_read_evidence(context, memory, documents=documents,
+                                           read=read, read_ref=refs["read"])
 
     def _report_experiment_observations(self) -> list[tuple[str, ArtifactRef, Mapping[str, Any]]]:
         refs = self.controller.manifest.state_refs
@@ -1709,11 +1709,7 @@ class ResearchApplication:
                 self.controller.pause(str(exc))
                 self._persist_application_views()
                 return False
-            inputs = self._input_refs("runtime_config") if self._task_kind() in {"measurement", "reproduction"} else self._input_refs("design", "runtime_config")
-            if self._task_kind() == "reproduction":
-                inputs += self._input_refs("read", "synthesis")
-            if "preparation" in self.controller.manifest.state_refs:
-                inputs += self._input_refs("preparation")
+            inputs = self._experiment_input_refs()
             if action.startswith("matrix_candidate_") and "implementation" in self.controller.manifest.state_refs:
                 revision = int(action.split("_r")[1].split("_")[0]) if "_r" in action else 0
                 inputs += self._input_refs(f"matrix_repair_{revision}" if revision else "implementation")
@@ -4715,6 +4711,16 @@ class ResearchApplication:
         except KeyError as exc:
             raise ResearchApplicationError(f"Missing application input artifact: {exc.args[0]}") from exc
 
+    def _experiment_input_refs(self) -> tuple[ArtifactRef, ...]:
+        """Share protocol/source provenance between initial runs and explicit retries."""
+        kind = self._task_kind()
+        names = ["runtime_config"] if kind in {"measurement", "reproduction"} else ["design", "runtime_config"]
+        if kind == "reproduction":
+            names.extend(("read", "synthesis"))
+        if "preparation" in self.controller.manifest.state_refs:
+            names.append("preparation")
+        return self._input_refs(*names)
+
     def _plan_config(self) -> dict[str, object]:
         config, local_documents = self._execution_config(), self._local_documents()
         if local_documents:
@@ -4974,17 +4980,19 @@ class ResearchApplication:
     def _load_plan(self) -> ResearchPlanResult:
         return ResearchPlanResult.from_handoff_dict(self._state_payload("plan"))
 
-    def _load_search(self) -> SearchResult:
+    def _load_search(self, *, documents: DocumentBundle | None = None) -> SearchResult:
         if "search" in self.controller.manifest.state_refs:
             return SearchResult.from_handoff_dict(self._state_payload("search"))
         from simple_ar.research.sources.capability import provided_materials_result
-        return provided_materials_result(self._load_documents().records)
+        return provided_materials_result((documents if documents is not None else self._load_documents()).records)
 
     def _load_documents(self) -> DocumentBundle:
         return DocumentBundle.from_handoff_dict(self._state_payload("documents"))
 
-    def _load_read(self) -> ReadResult:
-        return ReadResult.from_handoff_dict(self._state_payload("read"), bundle=self._load_documents())
+    def _load_read(self, *, documents: DocumentBundle | None = None) -> ReadResult:
+        return ReadResult.from_handoff_dict(
+            self._state_payload("read"), bundle=documents if documents is not None else self._load_documents(),
+        )
 
     def _load_synthesis(self) -> SynthesisResult:
         return SynthesisResult.from_handoff_dict(self._state_payload("synthesis"))

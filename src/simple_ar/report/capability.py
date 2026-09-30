@@ -1,7 +1,7 @@
 """Explicit report assembly capability.
 
-The legacy report stage still owns LLM planning, writing, and review.  This
-module exposes only the stable downstream boundary: section drafts become one
+The report writing capability owns LLM planning, writing, and review. This
+module exposes only the downstream boundary: section drafts become one
 report artifact, with optional deterministic figure rendering.  It does not
 choose sections, call an LLM, or run an audit.
 """

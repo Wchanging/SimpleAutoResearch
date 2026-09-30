@@ -24,6 +24,32 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_code_task_init_same_second_reuses_unique_directory_owner(self):
+        from datetime import datetime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            (project / "module.py").write_text("value = 1\n", encoding="utf-8")
+            task = root / "task.md"
+            task.write_text("Inspect the module.\n", encoding="utf-8")
+            outputs = root / "runs"
+            args = ["code-task", "init", "--code-root", str(project), "--task-file", str(task),
+                    "--workspace-mode", "copy", "--output-root", str(outputs), "--name", "same task"]
+            with patch("simple_ar.app.session_roots.datetime") as clock, contextlib.redirect_stdout(io.StringIO()):
+                clock.now.return_value = datetime(2026, 9, 30, 12, 0, 0)
+                main(args)
+                first = next(outputs.iterdir())
+                original_manifest = (first / "manifest.json").read_bytes()
+                main(args)
+            runs = sorted(outputs.iterdir())
+            self.assertEqual(len(runs), 2)
+            self.assertEqual([path.name for path in runs],
+                             ["20260930-120000-same-task", "20260930-120000-same-task-02"])
+            self.assertEqual((first / "manifest.json").read_bytes(), original_manifest)
+            self.assertTrue(all((path / "code_task/workspace/module.py").is_file() for path in runs))
+
     def test_fixed_protocol_does_not_claim_candidate_lineage_is_missing(self):
         from simple_ar.cli.research_view import method_validation_line
         for kind in ("measurement", "reproduction"):

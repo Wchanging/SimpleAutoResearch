@@ -10,7 +10,7 @@ and PDF downloads using the existing document pipeline. Availability and extract
 remain best-effort; missing full text is recorded, not treated as read. Local
 materials mode never enables network retrieval through this option.
 
-`simple-ar start` offers `survey` and `bug_fix`, generating ordinary research
+`simple-ar start` offers `survey`, `bug_fix` and prepared `reproduction`, generating ordinary research
 TOML and (for code) CodeTask TOML plus task text. The same default/TOML/explicit
 CLI precedence applies; this is not a second configuration schema.
 
@@ -23,6 +23,27 @@ search. `bug_fix` requires `--project`, `--validate` and repeatable `--allow` ed
 patterns. Defaults: isolated copy, current Python, 300-second validation timeout,
 one repair, protected tests and `.env`. The command is authorized execution, not
 an OS sandbox. Edit generated CodeTask TOML for custom environment/scope/timeouts.
+
+For prepared reproduction, supply local papers, the published conclusion, data/adaptation,
+comparison criteria and metric names. The environment, data and executable must already be
+ready. Setup does not install dependencies, invent a method or run a baseline. For example:
+
+```bash
+simple-ar start --kind reproduction --goal "Check the paper's coverage conclusion" \
+  --document paper.pdf --hypothesis "Known weights retain coverage under covariate shift" \
+  --dataset "Prepared synthetic adaptation" --expected-outcome "Compare coverage with nominal 0.9" \
+  --metric coverage --cwd ./prepared-project --timeout-sec 300 --prepare-only \
+  --command python run.py --seed 7
+```
+
+Put `--command` last: everything after it is process argv, not setup options, and is
+not interpreted by a shell. Interactive setup asks for argv as a JSON list. Defaults:
+current working directory/environment, one invocation, 300 seconds, reproduction report
+with whole-document review; API totals remain unset. `--metric` is repeatable; the first
+is primary. The command must emit metrics supported by the existing executor (for example
+`coverage: 0.91`). Edit the generated TOML for richer result schemas, accepted protocol
+details or explicit additional capacity before execution. This is a conclusion check,
+not an automatic full-paper reproduction.
 
 Inputs are saved under `--output-root` (default `runs/assistant`); asset paths
 are absolute and output `sessions` resolves relative to the generated research

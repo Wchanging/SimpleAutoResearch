@@ -96,7 +96,7 @@ No hand-written configuration is needed for a first custom task:
 uv run simple-ar start
 ```
 
-Choose `survey` or `bug_fix`, describe the goal and source/edit scope. The short
+Choose `survey`, `bug_fix` or prepared `reproduction`, describe the goal and source/edit scope. The short
 guided setup saves ordinary TOML under `runs/assistant/`, then uses the same
 resumable session. Use `--prepare-only` to save without API calls. This is not
 yet free-form conversation, external Agent execution or arbitrary paper reproduction.

@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shlex
 import shutil
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -1378,21 +1376,6 @@ def _print_clean(args: argparse.Namespace) -> None:
 
 
 
-def _new_run_dir(output_root: Path, topic: str) -> Path:
-    """Generate a unique timestamped directory path for a new run."""
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    slug = _slugify(topic)
-    return output_root / f"{timestamp}-{slug}"
-
-
-def _slugify(text: str) -> str:
-    """Convert text into a URL and folder-friendly slug string."""
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
-    return slug[:50] or "research"
-
-
-
-
 def _print_status(run_dir: Path) -> None:
     session_manifest_path = run_dir / "session_manifest.json"
     if session_manifest_path.exists():
@@ -1789,8 +1772,10 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     name = options.name or (
         f"code-task-{code_root.resolve().name}" if code_root is not None else "greenfield-code-task"
     )
-    run_dir = _new_run_dir(Path(options.output_root), name)
+    from simple_ar.app.session_roots import new_research_session_root
+
     try:
+        run_dir = new_research_session_root(Path(options.output_root), name)
         result = initialize_code_task(
             run_dir=run_dir,
             code_root=code_root,

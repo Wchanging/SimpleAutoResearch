@@ -6,11 +6,15 @@
 
 ## 引导入口
 
-`simple-ar start` 询问已实现功能（`survey` / `bug_fix`）及任务输入，保存普通 TOML，
+`simple-ar start` 询问已实现功能（`survey` / `bug_fix` / 准备好的 `reproduction`）及任务输入，保存普通 TOML，
 再交给 `research-session`。选项：`--kind`、`--goal`、可重复的 `--document`、
 `--sources materials|search`、`--fulltext`、调研可选 `--max-cited-sources N`（最终引用来源上限）、`--project`、`--validate`、可重复的 `--allow`、
 `--model`、`--interaction`、`--output-root`、`--prepare-only`、`--yes`。
 默认值、权限和续跑见[配置说明](CONFIG_REFERENCE_zh.md#引导设置)。不调用外部 Agent。
+
+固定协议复现还支持 `--hypothesis`、`--dataset`、`--expected-outcome`、可重复的 `--metric`、
+`--cwd`、`--timeout-sec` 和必须放最后的 `--command ARGV...`。需要本地材料和已经准备好的环境；
+不自动寻找实现或安装依赖。其他功能拒绝这些执行选项，避免错误扩大任务范围。
 
 本文是 SimpleAutoResearch 的命令速查手册，只关注命令语法、参数、产物和少量边界说明。
 
@@ -30,7 +34,7 @@ session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使
 
 | 命令 | 用途 |
 | --- | --- |
-| `simple-ar start` | 引导设置调研/代码修复，保存可编辑配置并进入同一 research-session。 |
+| `simple-ar start` | 引导设置调研/代码修复/固定协议复现，保存可编辑配置并进入同一 research-session。 |
 | `simple-ar research-session` | 有界任务驱动 session 的正式入口；accepted plan 选择适用的研究与执行步骤。 |
 | `simple-ar research-session-continue` | 重试 canonical 显式实验中的技术失败。 |
 | `simple-ar research-session-migrate` | 从只读的 `session_manifest.v1` 创建 canonical 后继 session。 |

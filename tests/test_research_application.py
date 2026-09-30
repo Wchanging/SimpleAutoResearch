@@ -24,6 +24,24 @@ from simple_ar.research.implementation import ImplementationRequest
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_experiment_inputs_share_provenance_without_requiring_fake_design(self):
+        from simple_ar.core.capabilities import ArtifactRef
+
+        for kind, expected in (("research", ["design", "runtime_config", "preparation"]),
+                               ("measurement", ["runtime_config", "preparation"]),
+                               ("reproduction", ["runtime_config", "read", "synthesis", "preparation"])):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                app = create_session(ResearchBrief(request_text="Check the accepted inputs."), root=Path(tmp) / "session")
+                refs = {name: ArtifactRef(f"{name}.json") for name in expected}
+                app.controller.manifest.state_refs.update(refs)
+                with patch.object(app, "_task_kind", return_value=kind):
+                    self.assertEqual(app._experiment_input_refs(), tuple(refs[name] for name in expected))
+                    del app.controller.manifest.state_refs["preparation"]
+                    self.assertEqual(app._experiment_input_refs(), tuple(refs[name] for name in expected[:-1]))
+                    del app.controller.manifest.state_refs["runtime_config"]
+                    with self.assertRaisesRegex(ResearchApplicationError, "runtime_config"):
+                        app._experiment_input_refs()
+
     def test_survey_source_bound_and_user_request_reach_report_without_truncating_search(self):
         from simple_ar.report.schema import ReportContext, ReportMemory
 
@@ -317,7 +335,13 @@ class ResearchApplicationTests(unittest.TestCase):
             result = app.controller.store.read_json(measurement)
             self.assertEqual(result["experiment_contract"]["hypothesis"], protocol["hypothesis"])
             self.assertEqual(result["metrics"]["observed"], 0.7)
-            context, _ = app.report_inputs()
+            with patch.object(app, "_load_documents", wraps=app._load_documents) as documents, \
+                    patch.object(app, "_load_synthesis", wraps=app._load_synthesis) as synthesis, \
+                    patch.object(app, "_load_read", wraps=app._load_read) as read:
+                context, _ = app.report_inputs()
+            documents.assert_called_once()
+            synthesis.assert_called_once()
+            read.assert_called_once()
             self.assertEqual(context.hypothesis_markdown, protocol["hypothesis"])
             self.assertEqual(context.experiment_plan["dataset"], protocol["dataset"])
             self.assertTrue(context.papers)
