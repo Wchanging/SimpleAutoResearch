@@ -1046,6 +1046,12 @@ When adding report behavior:
   strings;
 - keep Writer execution in `writing.py` and assembly in `capability.py`.
 
+Source lookup is retrieval, not a semantic verdict. A passing review with pending
+context requests must consume the fetched results and be rejudged before adoption;
+unresolved requests remain a visible verification gap. Preserve tool results in
+checkpoints and format-recovery prompts, prioritize recent evidence when bounding
+context, and do not introduce a separate source index or task-specific paper rules.
+
 `app/research_report.py` now only reads historical evidence; it no longer runs a
 Writer or appends fixed report/audit attempts. `app/research_application.py`
 owns session decisions and `cli/main.py` owns user-facing dispatch. Keep those

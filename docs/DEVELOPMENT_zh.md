@@ -762,6 +762,10 @@ src/simple_ar/report/
 - 模板和审查标准放在 `templates/report/`，不要硬编码成长 prompt；
 - Writer 执行放在 `writing.py`，报告组装放在 `capability.py`。
 
+来源定位不是语义判定。通过但仍请求证据的审阅，必须消费补读结果并再判才能采纳；
+未解决请求保留为可见核查缺口。检查点与格式恢复 prompt 不能丢取回的证据，
+上下文限额优先保留最近结果；不增加第二套来源索引或论文/任务特判。
+
 `app/research_report.py` 现仅投影历史证据，不再执行 Writer 或固定 report/audit attempt。
 `app/research_application.py` 负责 session 决策，`cli/main.py` 负责用户入口分发；二者职责应保持分开。
 优先删除重复状态和执行 owner，而不是把复杂度分散到更多文件。

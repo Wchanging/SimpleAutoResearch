@@ -76,7 +76,7 @@ def review_document(
                           "severity": "info|minor|major|critical", "message": "specific cross-section issue",
                           "section_id": "same target section", "suggested_action": "bounded correction"}],
             "revision_instructions": ["specific change to this section without changing measured facts"],
-            "context_requests": [{"tool_name": "get_paper_brief|get_metric_source|get_code_task_result|get_neighbor_chunks|get_synthesis_brief",
+            "context_requests": [{"tool_name": "get_paper_brief|get_metric_source|get_code_task_result|get_neighbor_chunks|search_source_chunks|get_synthesis_brief",
                                   "arguments": {}, "caller": "document_reviewer"}],
         }]},
     }, ensure_ascii=False)

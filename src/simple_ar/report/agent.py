@@ -179,6 +179,11 @@ def run_report_agent(
         iterations = [ReportIterationRecord.model_validate(row) for row in completed_checkpoint["iterations"]]
         all_findings = [ReviewerFinding.model_validate(row) for row in completed_checkpoint["reviewer_findings"]]
         all_tool_results = [ReportToolResult.model_validate(row) for row in completed_checkpoint["tool_results"]]
+        # Reuse the persisted results as the read-call ledger. Resuming must
+        # not silently grant another full tool allowance.
+        for name in gateway.call_counts:
+            gateway.call_counts[name] = max(gateway.call_counts[name],
+                sum(row.tool_name == name for row in all_tool_results))
         expected = [section.section_id for section in _draft_sequence(current.section_plan)]
         if [section.section_id for section in sections] != expected[:len(sections)]:
             raise ValueError("Report checkpoint sections do not match the planned draft sequence.")
@@ -272,7 +277,7 @@ def run_report_agent(
             pending_draft = draft
             checkpoint()
             review_context = next((row.tool_results for row in reversed(iterations)
-                if row.section_id == section.section_id and row.action == "revise"), [])
+                if row.section_id == section.section_id and row.action in {"revise", "review_context"}), [])
             # A review pass is always recorded. Each allowed correction then
             # receives another review, so max_review_iterations means actual
             # review -> revise cycles rather than extra reviews without edits.
@@ -293,8 +298,22 @@ def run_report_agent(
                     extra_context=review_context,
                 )
                 tool_results = _run_context_requests(gateway, review, config)
-                review_context = tool_results
                 all_tool_results.extend(tool_results)
+                if review.context_requests and not _needs_revision(review):
+                    # A pass that asks for missing evidence is provisional.
+                    # Rejections already go through revise -> verify with the
+                    # fetched evidence, so they do not need an extra review.
+                    iterations.append(_iteration(section_index, section, "review_context", review.verdict,
+                        draft.used_sources, findings=review.findings, tool_results=tool_results))
+                    all_findings.extend(review.findings)
+                    checkpoint()
+                    if tool_results:
+                        review = _review_section_with_recovery(client=client, context=context, template=template,
+                            memory=current, section=section, draft=draft, config=config,
+                            label=f"report-reviewer-{section.section_id}{label_suffix}-evidence", emit=emit,
+                            extra_context=[*review_context, *tool_results])
+                    review = _mark_pending_evidence(review)
+                review_context = tool_results
                 section_findings.extend(review.findings)
                 all_findings.extend(review.findings)
                 iterations.append(
@@ -408,17 +427,38 @@ def _edit_whole_document(
     """Revise at most two sections against the assembled report, retaining failed reviews."""
     plans = {plan.section_id: plan for plan in memory.section_plan}
     by_id = {draft.section_id: index for index, draft in enumerate(sections)}
+
+    def checked_document_reviews(label: str) -> list[ReportSectionReview]:
+        def call(review_label: str) -> list[ReportSectionReview]:
+            return review_document(client=client, template=template, memory=memory,
+                sections=_final_sequence(memory.section_plan, sections), config=config,
+                execution_summary=_compact_execution_results(context.results),
+                execution_evidence=report_execution_evidence(context), supplementary_evidence=all_tool_results,
+                metric_summary=_prompt_metrics(memory, detail="summary"),
+                source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind in {"paper", "material"}],
+                label=review_label)
+
+        reviews = call(label)
+        provisional = [row for row in reviews if row.context_requests and not _needs_revision(row)]
+        if not provisional:
+            return reviews
+        fetched = []
+        for review in provisional:
+            results = _run_context_requests(gateway, review, config)
+            fetched.extend(results)
+            iterations.append(_iteration(len(iterations) + 1, plans[review.section_id], "document_context",
+                review.verdict, sections[by_id[review.section_id]].used_sources,
+                findings=review.findings, tool_results=results))
+            all_findings.extend(review.findings)
+        all_tool_results.extend(fetched)
+        checkpoint()
+        if fetched:
+            return [_mark_pending_evidence(row) for row in call(label + "-evidence")]
+        return [_mark_pending_evidence(row) if row in provisional else row for row in reviews]
+
     try:
         _emit(emit, "Reviewer checking whole-document coherence.")
-        reviews = review_document(
-            client=client, template=template, memory=memory,
-            sections=_final_sequence(memory.section_plan, sections), config=config,
-            execution_summary=_compact_execution_results(context.results),
-            execution_evidence=report_execution_evidence(context),
-            supplementary_evidence=all_tool_results,
-            metric_summary=_prompt_metrics(memory, detail="summary"),
-            source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind in {"paper", "material"}],
-        )
+        reviews = checked_document_reviews("report-document-reviewer")
     except (LLMError, ValidationError, ValueError) as exc:
         finding = ReviewerFinding(
             finding_id="document-review-unavailable", type="document_review_unavailable",
@@ -464,6 +504,20 @@ def _edit_whole_document(
                 label=f"report-document-verifier-{plan.section_id}", emit=emit,
                 extra_context=tool_results,
             )
+            if verification.context_requests:
+                fetched = _run_context_requests(gateway, verification, config)
+                tool_results.extend(fetched)
+                all_tool_results.extend(fetched)
+                if fetched:
+                    iterations.append(_iteration(len(iterations) + 1, plan, "document_context",
+                        verification.verdict, revised.used_sources, tool_results=fetched))
+                    checkpoint()
+                if fetched and not _needs_revision(verification):
+                    verification = _review_section_with_recovery(client=client, context=context, template=template,
+                        memory=memory, section=plan, draft=revised, config=strict,
+                        label=f"report-document-verifier-{plan.section_id}-evidence", emit=emit,
+                        extra_context=tool_results)
+                verification = _mark_pending_evidence(verification)
             all_findings.extend(verification.findings)
             iterations.append(_iteration(len(iterations) + 1, plan, "document_verify",
                 verification.verdict, revised.used_sources, findings=verification.findings))
@@ -504,16 +558,7 @@ def _edit_whole_document(
     if adopted_revision:
         try:
             _emit(emit, "Reviewer rechecking whole-document coherence after revision.")
-            verification_reviews = review_document(
-                client=client, template=template, memory=memory,
-                sections=_final_sequence(memory.section_plan, sections), config=config,
-                execution_summary=_compact_execution_results(context.results),
-                execution_evidence=report_execution_evidence(context),
-                supplementary_evidence=all_tool_results,
-                metric_summary=_prompt_metrics(memory, detail="summary"),
-                source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind in {"paper", "material"}],
-                label="report-document-verifier",
-            )
+            verification_reviews = checked_document_reviews("report-document-verifier")
             for review in verification_reviews:
                 plan = plans[review.section_id]
                 unresolved = review.findings or ([ReviewerFinding(
@@ -1104,6 +1149,7 @@ def _draft_section(
             previous_draft=previous_draft,
             review=review,
             draft_mode=draft_mode,
+            extra_context=extra_context,
         )
     else:
         prompt = _writer_prompt(
@@ -1231,7 +1277,9 @@ def _review_section_with_recovery(
     extra_context: list[ReportToolResult] | None = None,
 ) -> ReportSectionReview:
     evidence_suffix = json.dumps({"extra_tool_context": [row.model_dump(mode="json")
-                                for row in (extra_context or [])[:6]]}, ensure_ascii=False) if extra_context else ""
+                                for row in (extra_context or [])[-6:]],
+                                "extra_tool_context_omitted": max(0, len(extra_context or []) - 6)},
+                                ensure_ascii=False) if extra_context else ""
     for attempt in range(2):
         try:
             return _review_section(
@@ -1363,7 +1411,8 @@ def _writer_prompt(
             previous_draft=previous_draft if include_previous_draft else None,
             review=review,
         ),
-        "extra_tool_context": [result.model_dump(mode="json") for result in extra_context[:6]],
+        "extra_tool_context": [result.model_dump(mode="json") for result in extra_context[-6:]],
+        "extra_tool_context_omitted": max(0, len(extra_context) - 6),
         "style_rules": [
             "Write as a long-form academic synthesis for the user topic, not as documentation of the SimpleAutoResearch pipeline.",
             "Do not include pipeline/debug internals. In experiment/reproduction setup, preserve meaningful commands and declared limits needed to repeat the work, distinguishing them from verified method behavior. Survey prose need not include commands.",
@@ -1410,6 +1459,7 @@ def _writer_recovery_prompt(
     previous_draft: ReportSectionDraft | None,
     review: ReportSectionReview | None,
     draft_mode: str,
+    extra_context: list[ReportToolResult] | None = None,
 ) -> str:
     """Build a small, schema-first retry after a Writer output mismatch.
 
@@ -1446,6 +1496,8 @@ def _writer_recovery_prompt(
         "visual_requirements": section_visuals,
         "length_requirement": _section_length_requirement(section),
         "source_handles": _handles_for_section(memory, section),
+        "extra_tool_context": [row.model_dump(mode="json") for row in (extra_context or [])[-6:]],
+        "extra_tool_context_omitted": max(0, len(extra_context or []) - 6),
         "previous_draft": (
             {
                 "draft_markdown": previous_draft.draft_markdown,
@@ -1536,11 +1588,13 @@ def _reviewer_prompt(
             "allowed_tools": [
                 "get_paper_brief",
                 "get_neighbor_chunks",
+                "search_source_chunks",
                 "get_metric_source",
                 "get_synthesis_brief",
                 "get_code_task_result",
             ],
             "only_request_tools_when_evidence_is_insufficient": True,
+            "search_source_chunks_arguments": {"handle": "one allowed source handle", "query": "specific claim or condition"},
             "prefer_get_paper_brief_arguments": {"citation_key": "P1"},
         },
         "review_focus": [
@@ -2034,6 +2088,17 @@ def _normalize_tool_call(call: dict[str, Any], index: int) -> dict[str, Any]:
     item.setdefault("caller", "reviewer")
     item.setdefault("trace_id", f"review-tool-{index:03d}")
     return item
+
+
+def _mark_pending_evidence(review: ReportSectionReview) -> ReportSectionReview:
+    """Pending evidence is neither a verified pass nor proof of a false claim."""
+    if not review.context_requests:
+        return review
+    finding = ReviewerFinding(finding_id=f"{review.section_id}-source-verification-incomplete",
+        type="source_verification_incomplete", severity="major", section_id=review.section_id,
+        message="Reviewer still requires source evidence after the bounded lookup, or source backtracking is unavailable. No complete source verification was performed.",
+        suggested_action="Qualify/remove the unresolved claim or provide the missing source material.")
+    return review.model_copy(update={"verdict": "revise_required", "findings": [*review.findings, finding]})
 
 
 def _run_context_requests(

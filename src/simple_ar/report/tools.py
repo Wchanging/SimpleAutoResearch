@@ -22,6 +22,12 @@ class GetMetricSourceArgs(BaseModel):
     metric_id: str = Field(description="Metric id such as metric:accuracy.")
 
 
+class SearchSourceChunksArgs(BaseModel):
+    handle: str = Field(description="Registered paper/material handle; never a filesystem path.")
+    query: str = Field(min_length=1, max_length=500, description="Specific phrase, result, condition or contradiction to locate in retained source text.")
+    limit: int = Field(default=3, ge=1, le=5)
+
+
 class GetSynthesisBriefArgs(BaseModel):
     query: str = Field(default="", description="Optional theme, claim, or gap query.")
 
@@ -48,6 +54,11 @@ def report_tool_specs() -> list[ReportToolSpec]:
             "get_neighbor_chunks",
             "Read persisted source passages around a cited chunk. Without stored text, return explicitly labeled metadata only.",
             GetNeighborChunksArgs,
+        ),
+        _spec(
+            "search_source_chunks",
+            "Locate query-matching passages in one registered source's persisted text, including passages absent from the initial summary. Lexical matches are not semantic support; no match is not proof of absence from the original.",
+            SearchSourceChunksArgs,
         ),
         _spec(
             "get_metric_source",

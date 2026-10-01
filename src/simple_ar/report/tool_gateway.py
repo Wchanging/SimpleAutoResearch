@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from simple_ar.report.retrieval import ReportSourceResolver
+from simple_ar.report.retrieval import ReportSourceResolver, rank_source_chunks, source_query_terms
 from simple_ar.research.documents.ingest import DocumentBundle
 from simple_ar.report.schema import ReportContext, ReportToolCall, ReportToolResult, ReportToolSpec
 from simple_ar.report.tools import (
@@ -11,6 +12,7 @@ from simple_ar.report.tools import (
     GetNeighborChunksArgs,
     GetPaperBriefArgs,
     GetSynthesisBriefArgs,
+    SearchSourceChunksArgs,
     report_tool_specs,
 )
 
@@ -62,6 +64,25 @@ class ReportToolGateway:
 
     def _dispatch(self, call: ReportToolCall) -> ReportToolResult:
         name = call.tool_name
+        if name == "search_source_chunks":
+            args = SearchSourceChunksArgs.model_validate(call.arguments)
+            handle = self.resolver.get(args.handle)
+            if handle is None:
+                return ReportToolResult(tool_name=name, status="not_found", summary="Registered source handle not found.")
+            if self.documents is None:
+                return ReportToolResult(tool_name=name, status="not_found",
+                    summary="Persisted text unavailable; no source search was performed.",
+                    content={"search_performed": False}, source_handles=[handle.handle])
+            document_id = str(handle.metadata.get("document_id") or handle.paper_id)
+            chunks = [row for row in self.documents.chunks if row.document_id == document_id]
+            selected = rank_source_chunks(chunks, args.query, limit=args.limit)
+            return ReportToolResult(tool_name=name, status="ok" if selected else "not_found",
+                summary="Lexical matches in retained text; reread neighboring passages before judging support." if selected else
+                    "No lexical match in retained text. This is not proof that the original source omits the claim.",
+                content={"search_performed": True, "search_scope": "persisted_extracted_text",
+                    "query": args.query, "document_chunk_count": len(chunks),
+                    "semantic_verification": "not_performed",
+                    "chunks": _chunk_views(selected, query=args.query)}, source_handles=[handle.handle])
         if name == "get_paper_brief":
             args = GetPaperBriefArgs.model_validate(call.arguments)
             if args.handle:
@@ -101,16 +122,7 @@ class ReportToolGateway:
                 # A fixed output window, centered on the actual cited passage.
                 # Keep ingest order; never cross into another paper or open an arbitrary path.
                 selected = chunks[max(0, index - args.before):index + args.after + 1]
-                remaining = 4800
-                rows = []
-                for chunk in selected:
-                    limit = remaining // (len(selected) - len(rows))
-                    text = chunk.text[:limit]
-                    remaining -= len(text)
-                    rows.append({"chunk_id": chunk.chunk_id, "document_id": chunk.document_id,
-                        "text": text, "total_characters": len(chunk.text), "truncated": len(text) < len(chunk.text),
-                        "source_path": chunk.source_path, "page": chunk.page, "line_start": chunk.line_start,
-                        "line_end": chunk.line_end, "extraction_status": chunk.metadata.get("extraction_status", "unknown")})
+                rows = _chunk_views(selected)
                 return ReportToolResult(tool_name=name, summary=f"Read {len(rows)} persisted passages around {anchor}.",
                     content={"source_kind": "persisted_extracted_text", "anchor_chunk_id": anchor,
                              "chunks": rows, "document_chunk_count": len(chunks)}, source_handles=[handle.handle])
@@ -162,6 +174,28 @@ class ReportToolGateway:
                 },
             )
         return ReportToolResult(tool_name=name, status="blocked", summary="Unhandled report tool.")
+
+
+def _chunk_views(chunks, *, query: str = "") -> list[dict[str, Any]]:
+    """Bound output and expose exact offsets within each persisted chunk."""
+    remaining = 4800
+    rows = []
+    terms = source_query_terms(query)
+    for chunk in chunks:
+        limit = remaining // (len(chunks) - len(rows))
+        exact = re.search(re.escape(query.strip()), chunk.text, re.I) if query.strip() else None
+        matches = [(len(hits), -len(term), hits[0].start()) for term in sorted(terms)
+                   if (hits := list(re.finditer(re.escape(term), chunk.text, re.I)))]
+        anchor = exact.start() if exact else (min(matches)[2] if matches else 0)
+        start = min(max(0, anchor - limit // 3), max(0, len(chunk.text) - limit))
+        text = chunk.text[start:start + limit]
+        remaining -= len(text)
+        rows.append({"chunk_id": chunk.chunk_id, "document_id": chunk.document_id,
+            "text": text, "character_start": start, "character_end": start + len(text),
+            "total_characters": len(chunk.text), "truncated": len(text) < len(chunk.text),
+            "source_path": chunk.source_path, "page": chunk.page, "line_start": chunk.line_start,
+            "line_end": chunk.line_end, "extraction_status": chunk.metadata.get("extraction_status", "unknown")})
+    return rows
 
 
 def _tool_handle_view(handle: Any) -> dict[str, Any]:

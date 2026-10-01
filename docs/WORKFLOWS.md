@@ -103,6 +103,16 @@ candidate assessment/design still uses research synthesis. Reading notes remain
 model interpretations; report Writer, section Reviewer and document Reviewer receive
 the same bounded, identified source passages and source-access status. Truncation
 is explicit, and absence from an excerpt is not absence from the paper.
+Reviewers can locate omitted passages with `search_source_chunks` over the registered
+source's saved extracted text, then request neighboring chunks. This is bounded lexical
+retrieval, not semantic verification or a fresh download; an unmatched query is not proof
+that the original source lacks the information. A passing review that also requests
+evidence is provisional: the fetched evidence is saved and the same draft is rechecked
+once before acceptance. Still-pending requests become an explicit source-verification
+gap, including when backtracking is disabled or exhausted. Section and document reviews
+use the existing tool/revision budgets; recent tool results take priority in bounded prompts,
+with omissions recorded. Resume reconstructs consumed tool calls from saved results instead
+of resetting the allowance. No-request reviews do not gain an extra model call.
 Reading notes receive the user task focus separately from source evidence. Default excerpts
 retain an ingest-sized chunk; smaller windows mark further clipping. Note identities and
 declared references are checked against their owning document. This prevents misattribution,
