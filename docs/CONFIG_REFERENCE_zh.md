@@ -2,6 +2,10 @@
 
 [English version](CONFIG_REFERENCE.md)
 
+首次使用从[引导设置](#引导设置)开始；完整字段表是可选专家参考。`.env` 保存全局连接，
+任务 TOML 保存案例输入和执行限制。阅读/修订范围及证据限制见[工作流](WORKFLOWS_zh.md)，
+不另增配置层；启用审阅不代表科学结论已核实。
+
 ## 已有材料写作
 
 `start --kind writing --goal "说明已有结果和局限" --material notes.md --prepare-only`
@@ -14,7 +18,9 @@
 写作导入的 JSON/数据文件各限 20 MiB；缺项或数值不一致会在写作前失败。
 复算不证明采集或科学主张；原始表格应先使用 `data_analysis`，不能直接冒充分析包。
 
-默认 `report.template = "analysis_report"`；`"experiment"` 请求论文体草稿，而不授权实验。
+默认 `report.template = "material_report"`，整理已有材料，不要求不存在的实验或失败目标；
+`"analysis_report"` 保留为目标未达成/不确定的实验分析，`"experiment"` 请求论文体草稿，而不授权实验。
+已保存的显式模板继续有效；已经开始写作的自动模板沿用原输入快照的解析结果，不因升级重选。
 引导写作默认开启 `report.document_review = true`。执行配置、在线搜索及研究创新不属于此任务。
 提取后的文本随会话保存，恢复不重新读取修改过的原文件；更换材料应明确修订或新建任务。
 提供的结果仍是外部陈述，不能称为本次独立测量；缺证据和缺书目信息必须保留，审阅通过不保证论文正确。
@@ -60,8 +66,9 @@ API 总额仍默认无限制。
 
 `--prepare-only` 不调用模型/进程。`--yes` 只确认启动，执行期仍遵循 `--interaction`
 （默认 `checkpoints`）。非交互缺输入就报错，不挂住等待；最后拒绝执行会保留配置。
-开始执行后按打印的路径使用 `research-session --session-root PATH --model env` 续跑，
-不要再次 `start` 创建新任务。
+开始执行后按打印的路径使用 `research-session --session-root PATH --model MODEL` 续跑，
+保留设置时选定的模型（默认 `env`），不要再次 `start` 创建新任务。
+数据分析引导保存 `model.name = ""`，其续跑命令省略 `--model`。
 
 研究任务使用 `simple-ar research-session --config PATH`。可直接从
 [综述案例](../examples/survey/README.md)开始；更多配置项在下文说明，不再作为额外案例混放。
@@ -106,7 +113,7 @@ value_unit = "秒"
 
 ## 研究 TOML：分区与默认值
 
-研究入口的 `report.template` 默认 `auto`：仅调研且最多只有一份可引用来源时，使用简短的单来源证据审阅；多来源才使用综述结构，不凭单篇材料虚构方法谱系或跨论文结论。实验任务依据分析中的目标判断选择实验论文、复现报告或简短实验分析报告。执行 `passed` 不等于科研目标达成；目标不明、未达成或因轮次限制停止时，默认不写成成功论文。显式 `source_review`、`survey`、`experiment`、`reproduction`、`analysis_report` 或自定义模板优先，但不能覆盖测量事实。旧会话保存的显式模板不会被新默认值更换；需要时通过现有报告配置续接改为 `auto`。结构自动选择不代表论文语义质量已验收。
+研究入口的 `report.template` 默认 `auto`：仅调研且最多只有一份可引用来源时，使用简短的单来源证据审阅；多来源才使用综述结构，不凭单篇材料虚构方法谱系或跨论文结论。独立供材写作自动选 `material_report`，具体恢复语义见上文。实验任务依据分析中的目标判断选择实验论文、复现报告或简短实验分析报告。执行 `passed` 不等于科研目标达成；目标不明、未达成或因轮次限制停止时，默认不写成成功论文。显式 `source_review`、`survey`、`material_report`、`experiment`、`reproduction`、`analysis_report` 或自定义模板优先，但不能覆盖测量事实。旧会话保存的显式模板不会被新默认值更换；需要时通过现有报告配置续接改为 `auto`。结构自动选择不代表论文语义质量已验收。
 
 新研究会话不设置 `budget.total_tokens`、`budget.llm_requests` 时，框架不限制 API 总 token 和请求次数；
 需要限制时设置正整数。无限额仍记录用量，不等于免费调用或无限重试。

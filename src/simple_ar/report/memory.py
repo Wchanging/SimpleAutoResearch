@@ -267,6 +267,9 @@ def _fallback_headings(report_mode: str) -> list[str]:
 
 def _section_goal(heading: str, report_mode: str) -> str:
     lowered = heading.lower()
+    if report_mode == "supplied_materials":
+        return ("Use supplied papers and materials, attributing source assertions and distinguishing "
+                "checked computation from unverified conditions. Do not imply new local experiments.")
     # Mixed headings such as "Target Method And Claimed Result" describe the
     # source method, not exclusively a locally measured result.
     if any(term in lowered for term in ("method", "related", "background", "introduction")):

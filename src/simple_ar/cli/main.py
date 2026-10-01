@@ -554,7 +554,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
     experiment_requested = task_kind != "bug_fix" and (execution is not None or bool(outputs and "experiments" in outputs))
     if task_text.strip():
         request_text += "\n\n## Implementation task\n\n" + task_text.strip()
-    writing_template = args.report_template if "report_template" in getattr(args, "_explicit_resume_destinations", set()) else "analysis_report"
+    from simple_ar.report.templates import MATERIAL_REPORT_TEMPLATE
+    writing_template = args.report_template if "report_template" in getattr(args, "_explicit_resume_destinations", set()) else MATERIAL_REPORT_TEMPLATE
     report_config: dict[str, object] = {
         "mode": "experiment" if experiment_requested else "research_only",
         "template": ("reproduction" if task_kind == "reproduction" and args.report_template == "experiment" else args.report_template) if experiment_requested else (

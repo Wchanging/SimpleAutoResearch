@@ -14,7 +14,7 @@ from simple_ar.app.research_brief import (
     ResearchBriefSessionRequest,
     run_research_brief_session,
 )
-from simple_ar.cli import main
+from simple_ar.cli.main import main
 
 
 class ResearchBriefApplicationTests(unittest.TestCase):

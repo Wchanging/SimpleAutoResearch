@@ -24,6 +24,32 @@ from simple_ar.research.implementation import ImplementationRequest
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_writing_auto_template_keeps_started_snapshot_across_default_change(self):
+        from simple_ar.report.schema import ReportRuntimeConfig
+        from simple_ar.report.templates import load_report_template_bundle
+        from simple_ar.report.writing import ReportWritingRequest
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            material = root / "notes.md"
+            material.write_text("# Notes\nOne supplied observation.\n", encoding="utf-8")
+            app = create_session(ResearchBrief(request_text="Explain notes", requested_outputs=("report",),
+                asset_requests=({"locator": str(material), "role": "material"},)), root=root / "session",
+                services=ResearchApplicationServices(config={"research_task_kind": "writing"}))
+            app.advance(max_actions=2)
+            report_context, memory, _, _, _ = app._report_writing_parts()
+            config = ReportRuntimeConfig(template="analysis_report")
+            template = load_report_template_bundle(report_mode="supplied_materials", config=config)
+            memory.template = "analysis_report"
+            request = ReportWritingRequest(report_context, memory, config, template, object())
+            # Simulate an old writer that froze the resolved default then failed.
+            with patch("simple_ar.report.writing.run_report_agent", side_effect=LLMError("Interrupted")):
+                app._execute("report_write", "writer", request, ())
+            restored = load_session(root / "session")
+            self.assertEqual(restored._report_writing_parts()[3].name, "analysis_report")
+            with patch.object(restored, "_effective_config", return_value={**restored._effective_config(),
+                    "report": {"template": "experiment"}}):
+                self.assertEqual(restored._report_writing_parts()[3].name, "experiment")
+
     def test_writing_uses_frozen_material_and_resumes_without_research_or_processes(self):
         from simple_ar.report.schema import AgentReportResult, ReportSectionDraft, ReportToolCall
         from simple_ar.report.agent import _prompt_handle_view
@@ -50,7 +76,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 self.assertEqual(context.papers, [])
                 self.assertEqual(context.metric_sources, [])
                 self.assertEqual(context.synthesis_markdown, "")
-                self.assertEqual(kwargs["template"].name, "analysis_report")
+                self.assertEqual(kwargs["template"].name, "material_report")
                 handle = memory.source_handles[0]
                 self.assertEqual(_prompt_handle_view(handle)["metadata"]["evidence_role"], "user_supplied_unverified")
                 result = kwargs["gateway"].call(ReportToolCall(tool_name="get_neighbor_chunks", arguments={"handle": handle.handle}))

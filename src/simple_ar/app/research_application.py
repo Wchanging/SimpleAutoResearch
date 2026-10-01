@@ -4198,7 +4198,7 @@ class ResearchApplication:
     def _report_writing_parts(self):
         from simple_ar.report.schema import ReportRuntimeConfig
         from simple_ar.report.templates import (
-            load_report_template_bundle, resolve_experiment_delivery, resolve_research_only_delivery,
+            MATERIAL_REPORT_TEMPLATE, load_report_template_bundle, resolve_experiment_delivery, resolve_research_only_delivery,
         )
 
         report_context, memory = self.report_inputs()
@@ -4242,7 +4242,20 @@ class ResearchApplication:
             memory.key_decisions.append(json.dumps(delivery, ensure_ascii=False))
         elif report_context.report_mode == "supplied_materials":
             if config.template in {"", "auto"}:
-                config = config.model_copy(update={"template": "analysis_report"})
+                template_name = MATERIAL_REPORT_TEMPLATE
+                # A default is chosen once, not reinterpreted on upgrade after
+                # writing has started. Reuse the existing input snapshot; no
+                # separate migration state or second source of configuration.
+                for attempt in reversed(self.controller.list_attempts()):
+                    if attempt.capability != "report_write":
+                        continue
+                    snapshot_path = Path("attempts") / attempt.attempt_id / "report_inputs.json"
+                    if self.controller.store.exists(snapshot_path):
+                        saved_template = self.controller.store.read_json(snapshot_path).get("config", {}).get("template")
+                        if saved_template and saved_template != "auto":
+                            template_name = saved_template
+                        break
+                config = config.model_copy(update={"template": template_name})
             memory.template = config.template
         template = load_report_template_bundle(report_mode=report_context.report_mode, config=config)
         return report_context, memory, config, template, delivery

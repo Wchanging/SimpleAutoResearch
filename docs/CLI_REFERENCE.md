@@ -2,6 +2,12 @@
 
 [中文版本](CLI_REFERENCE_zh.md)
 
+Use `start` for the five supported structured task choices; `research-session`
+executes and resumes the saved task. `report-export` exports existing reporting
+artifacts. Low-level commands below are expert interfaces, not mandatory steps
+for every function. See [usage](USAGE.md) for the shortest path and
+[workflow boundaries](WORKFLOWS.md) for what completed/audited results mean.
+
 ## Guided entry
 
 `simple-ar start` asks for an implemented function (`survey` / `bug_fix` / prepared `reproduction` / `writing` / `data_analysis`) and
@@ -17,7 +23,7 @@ Local documents and an already prepared execution environment are required; it d
 discover implementations or install dependencies. Other kinds reject these execution options.
 
 Material-based writing accepts repeatable `--material` for drafts, notes or result descriptions,
-optional `--document` for bibliographic sources, and `--template` (default `analysis_report`;
+optional `--document` for bibliographic sources, and `--template` (default `material_report`;
 `experiment` requests a paper-style draft). Inputs can be local Markdown/text/PDF,
 or a completed `table_analysis.v1` `analysis.json` with its adjacent copied data.
 The latter is rechecked and its SVGs attached; raw table JSON is not accepted here.
@@ -25,6 +31,10 @@ It extracts these inputs then writes, reviews, assembles and audits; it does not
 synthesize a research direction or execute an experiment. Supplied results are not independently
 verified measurements. Use `research-session --task-kind writing --topic "Explain my results" --material PATH --model env`
 for the same path without the setup wizard; its template option is `--report-template`.
+`analysis_report` remains the explicit failed/uncertain-experiment report. The material
+default does not require a baseline, failed objective or experiment continuation decision.
+New setup saves no model for `data_analysis`; its printed resume command omits `--model`.
+Model-backed setup preserves the chosen model in the resume hint rather than always using `env`.
 
 This page is a command lookup for SimpleAutoResearch. It intentionally focuses
 on command syntax, options, outputs, and short operational notes.
@@ -797,7 +807,7 @@ to continue. In non-interactive shells it stops cleanly at the gate unless
 auto-continue those primitive prompts. Use `--yes` in normal execute mode only
 when automated approval is intentional, and `--no-review-inline` when you want
 the older stop-and-rerun behavior. Full workflow walkthroughs live in
-[Usage And Configuration](USAGE.md#recommended-path-toml-execute).
+[Usage And Configuration](USAGE.md#recommended-path-toml--execute).
 
 When LLM work planning or patch planning returns malformed JSON, execute stops
 with `llm_planning_failed` and does not write an offline fallback plan. Rerun

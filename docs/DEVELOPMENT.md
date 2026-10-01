@@ -6,6 +6,11 @@ This document is for contributors who want to extend SimpleAutoResearch. For com
 
 ## Project Shape
 
+The console script and Python callers use `simple_ar.cli.main:main` (Python:
+`from simple_ar.cli.main import main`). Do not re-export that function as the
+same-named package attribute: importing the child module replaces it. After an
+entry-point change, reinstall with `uv sync --inexact` before using `--no-sync`.
+
 SimpleAutoResearch is file-first with persisted session state:
 
 - capabilities read and write concrete artifacts;
@@ -114,15 +119,16 @@ simple-ar status / inspect / search-artifacts
   -> historical artifact readers (no old workflow execution)
 ```
 
-`research-session` is the formal user entrypoint and owns the bounded
-research sequence. With an explicit command or CodeTask it continues through
-experiment, analysis, report, and audit; without either it provides the
-literature-only summary/report path and creates no execution request. The
+`research-session` is the shared user execution entrypoint; `start` prepares
+its ordinary task configuration. Inputs select a literature, code-repair,
+descriptive-analysis, material-writing or prepared-reproduction path. A command
+does not force every research action, and absence of a command does not force a
+literature survey. The application validates applicable inputs and permissions. The
 segmented commands remain useful for
 development, diagnostics, and persisted handoff continuation, but are not a
 parallel product workflow. `simple-ar run/resume` is retired; its flags are not
-silently translated. New capability work belongs under `research/`, `experiment/`,
-or `report/`. The old stage layer is deleted; historical consumers are read-only
+silently translated. New domain work belongs under `research/`, `code_task/`,
+`experiment/`, `result_analysis/` or `report/`. The old stage layer is deleted; historical consumers are read-only
 and current experiment/report behavior is owned by the modules described below.
 
 The current tree uses read cards and `evidence_pack_from_read()` for the shared
@@ -176,9 +182,12 @@ important because it prevents domain policy from leaking into the core.
 | --- | --- | --- | --- |
 | Core runtime | `simple_ar.core` | artifact references, attempt lineage, bounded decisions, profiles, transition validation, and the shared resource ledger | domain schemas, provider calls, code edits, retries, or selecting the best result |
 | Sources, documents, and evidence | `research.sources`, `research.documents`, `research.evidence` | provider/parser ports, document bundles, cards, chunks, and provenance-aware handoffs | workflow scheduling, provider-specific policy in core, or copying full text into every handoff |
+| Saved-text retrieval | `research.store.retrieval` | shared lexical ranking, source order when known, actual excerpt windows | semantic truth, paper identity or a new index; report imports remain thin compatibility |
 | Synthesis | `research.synthesis`, `research.brief` | evidence-derived directions, research contracts, and the smallest literature-to-idea composition | claiming novelty, choosing an experiment automatically, or calling a model implicitly |
 | Experiment and analysis | `research.experiment`, `research.analysis`, existing `experiment.execution` | explicit run requests, canonical results, metric comparison, and result evidence status | code generation, repair policy, retry policy, or deciding the next research stage |
+| Supplied tables and data figures | `result_analysis.table`, `result_analysis.figures` | shared parsing/preflight, descriptive arithmetic, declared coordinate rendering and rebuildable packages | inferring row meaning, scientific validity or arbitrary statistical/code execution |
 | Report and audit | `report.projection`, `report.capability`, `report.audit`, `report.writing` | evidence projection, explicit section assembly, optional figure rendering, citation/metric audit, and legacy report compatibility | hiding missing evidence, inventing figures, or replacing the legacy writer/reviewer without a migration contract |
+| Writing context and revision | `report.narrative`, existing `report.agent`/`editor` | adopted-prose projections, original correction contracts, candidate verification and existing checkpoint/allowance consumption | a second memory store, rejected prose as adopted fact, or unlimited re-review |
 | Application and benchmarks | `app`, `cli`, `code_task`, and benchmark adapters | user-facing orchestration, legacy projections, code-task policy, and external evaluator integration | becoming a dependency of the core runtime or changing canonical capability semantics for one benchmark |
 
 When a feature appears to span two rows, keep the coordination in the

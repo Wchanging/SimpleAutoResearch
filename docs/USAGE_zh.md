@@ -4,6 +4,25 @@
 
 本文说明如何安装、配置和运行 SimpleAutoResearch。它是面向用户的实践指南；工作流概念和产物结构见 [工作流与产物](WORKFLOWS_zh.md)，完整命令表见 [CLI 参考](CLI_REFERENCE_zh.md)，TOML 字段见 [配置参考](CONFIG_REFERENCE_zh.md)。
 
+## 从一个功能开始
+
+安装后执行 `uv run simple-ar start`，可以选择五类结构化引导：
+
+| 功能 | 需要提供 | 执行边界 |
+| --- | --- | --- |
+| `survey` | 问题/范围，可选论文 | 在线或供材阅读，再写报告；需要模型 |
+| `bug_fix` | 项目、允许路径、验证命令 | 受限修改与实际验证；需准备依赖 |
+| `reproduction` | 论文、已准备环境、固定协议/命令 | 指定结论复现，不自动准备环境/数据 |
+| `writing` | 笔记/草稿或完成的分析包，可选论文 | 材料到报告/草稿，不默认检索或实验 |
+| `data_analysis` | 表格、字段、行/值含义和单位 | 描述统计或已有柱状/折线/散点值；无需 API |
+
+`--prepare-only` 只保存配置，不执行。这不是自由聊天入口。无 API 首次体验可执行
+`uv run simple-ar research-session --config examples/data-curves/research.toml`。
+已保存分析包可以用于后续写作；排版导出是单独的 `report-export`，见 [CLI](CLI_REFERENCE_zh.md)。
+
+任务 TOML 保存项目实际配置，`.env` 仅放全局凭据/模型/传输设置；普通用户不必填写下面
+所有高级选项。详见[引导设置](CONFIG_REFERENCE_zh.md#引导设置)。
+
 ## 环境要求
 
 - Python 3.12 或更高版本。
@@ -12,10 +31,10 @@
 
 ## 安装
 
-克隆仓库：
+克隆当前预览分支，与 [README](../README_zh.md) 一致：
 
 ```bash
-git clone https://github.com/Wchanging/SimpleAutoResearch.git
+git clone --branch feat/v2.9-task-driven-research https://github.com/Wchanging/SimpleAutoResearch.git
 cd SimpleAutoResearch
 ```
 
@@ -45,29 +64,17 @@ PowerShell：
 Copy-Item .env.example .env
 ```
 
-支持的配置：
+最小模型连接示例，须替换为服务商实际设置：
 
 ```bash
 OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=https://api.openai.com/v1
-SIMPLE_AR_MODEL=gpt-4o-mini
-SIMPLE_AR_LLM_BACKEND=openai
-SIMPLE_AR_LLM_API=responses
-SIMPLE_AR_LLM_STREAM=false
-SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
-SIMPLE_AR_LLM_REASONING_EFFORT=
-SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_TIMEOUT_SEC=180
-SIMPLE_AR_MAX_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
-SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
-SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
-SIMPLE_AR_JSON_RESPONSE_FORMAT=auto
-SIMPLE_AR_INPUT_PRICE_PER_1M=
-SIMPLE_AR_OUTPUT_PRICE_PER_1M=
+OPENAI_BASE_URL=https://your-provider.example/v1
+SIMPLE_AR_MODEL=your_model_id
+SIMPLE_AR_LLM_API=chat
+SIMPLE_AR_LLM_STREAM=true
 ```
 
-说明：
+传输与恢复说明（按需查阅的高级参考）：
 
 - `OPENAI_API_KEY` 是 LLM 模式必需项。
 - `OPENAI_BASE_URL` 可以指向 OpenAI，也可以指向第三方 OpenAI 兼容 `/v1` 接口。
@@ -109,12 +116,14 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 | --- | --- | --- |
 | 在线综述 | `[task] outputs=["report"]`、`[research] providers=[...]`；`research-session --config survey.toml` | 不启动实验进程或代码项目 |
 | 分析已有论文/笔记 | 增加 `[research] materials_only=true` 与 `[assets].papers=[...]` | 不执行网络检索或伪造检索结果 |
+| 使用笔记/结果写作 | `[task] kind="writing"`、`outputs=["report"]`、`[assets].materials=[...]`、`[model] name="env"` | 不重做综合/检索/实验；分析 JSON 必须是完成的支持格式分析包 |
+| 描述/绘制已有数据 | `start --kind data_analysis` 或[数据曲线案例](../examples/data-curves/README.md) | 不调用模型，不推断统计结论、平滑或认证科学有效性 |
 | 修复已有项目 | `[task] kind="bug_fix"` 加 `[execution] code_task_config="code_task.toml"`；运行研究配置 | 不自动引入文献或 baseline |
 | 复现/测量已有脚本 | `[execution] command=["python","measure.py"]`、`cwd`、指标与有限进程预算 | 不自动发现仓库或扩展种子 |
 | 改进已有研究项目 | `[task] kind="auto"` 配 `execution.code_task_config`、保护资产、benchmark 和 protocol；参见[持续学习案例](../examples/continual_learning/README.md) | 不安装依赖、下载数据或宣称科研成功 |
 | 独立代码任务 | `simple-ar code-task init --config code_task.toml`，再执行 `code-task execute` | 不进入研究报告生命周期 |
 
-下面是四个彼此独立、可以直接保存的完整研究 TOML 文件；不要把它们的分区拼接到同一个文件。
+下面是四个高级、彼此独立的完整研究 TOML 示例；不要把它们的分区拼接到同一个文件。
 相对路径均以该 TOML 文件所在目录为基准。
 
 ### 1. 仅分析供材（不检索）

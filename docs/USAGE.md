@@ -8,6 +8,28 @@ It is the practical user guide; workflow concepts and artifact details live in
 [CLI Reference](CLI_REFERENCE.md), and TOML fields live in
 [Configuration Reference](CONFIG_REFERENCE.md).
 
+## Start with one function
+
+After installation, `uv run simple-ar start` offers five structured choices:
+
+| Function | Bring | Execution boundary |
+| --- | --- | --- |
+| `survey` | Question/scope; optional papers | Search or supplied-material reading, then report; model needed |
+| `bug_fix` | Project, allowed paths, validation command | Bounded edits and actual validation; prepared dependencies |
+| `reproduction` | Paper, ready environment, fixed protocol/command | Specified conclusion only; no automatic environment/data preparation |
+| `writing` | Notes/draft or completed analysis package; optional papers | Existing material to report/draft; no implied search or experiment |
+| `data_analysis` | Table, selected fields, row/value meanings and units | Descriptive statistics or supplied bar/line/scatter values; no API |
+
+`--prepare-only` saves task configuration without execution. This is not a
+free-form chat. For a first no-API run, use
+`uv run simple-ar research-session --config examples/data-curves/research.toml`.
+Saved analysis packages can then become writing material. Export is a separate
+`report-export` command; see [CLI](CLI_REFERENCE.md).
+
+The task TOML is the effective configuration for each project. `.env` only holds
+global credentials/model/transport settings. Ordinary use need not set every
+advanced option below. See [guided setup](CONFIG_REFERENCE.md#guided-setup).
+
 ## Requirements
 
 - Python 3.12 or newer.
@@ -16,10 +38,10 @@ It is the practical user guide; workflow concepts and artifact details live in
 
 ## Installation
 
-Clone the repository:
+Clone the current preview branch (also shown in the [README](../README.md)):
 
 ```bash
-git clone https://github.com/Wchanging/SimpleAutoResearch.git
+git clone --branch feat/v2.9-task-driven-research https://github.com/Wchanging/SimpleAutoResearch.git
 cd SimpleAutoResearch
 ```
 
@@ -49,29 +71,17 @@ On PowerShell:
 Copy-Item .env.example .env
 ```
 
-Supported settings:
+Minimum model connection example; replace values with your provider's settings:
 
 ```bash
 OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=https://api.openai.com/v1
-SIMPLE_AR_MODEL=gpt-4o-mini
-SIMPLE_AR_LLM_BACKEND=openai
-SIMPLE_AR_LLM_API=responses
-SIMPLE_AR_LLM_STREAM=false
-SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
-SIMPLE_AR_LLM_REASONING_EFFORT=
-SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_TIMEOUT_SEC=180
-SIMPLE_AR_MAX_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
-SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
-SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
-SIMPLE_AR_JSON_RESPONSE_FORMAT=auto
-SIMPLE_AR_INPUT_PRICE_PER_1M=
-SIMPLE_AR_OUTPUT_PRICE_PER_1M=
+OPENAI_BASE_URL=https://your-provider.example/v1
+SIMPLE_AR_MODEL=your_model_id
+SIMPLE_AR_LLM_API=chat
+SIMPLE_AR_LLM_STREAM=true
 ```
 
-Notes:
+Transport and recovery notes (optional expert reference):
 
 - `OPENAI_API_KEY` is required for LLM mode.
 - `OPENAI_BASE_URL` can point to OpenAI or a third-party OpenAI-compatible `/v1` endpoint.
@@ -151,12 +161,14 @@ need to write an internal stage list. Use these supported shapes:
 | --- | --- | --- |
 | Online survey | `[task] outputs=["report"]`, `[research] providers=[...]`; `research-session --config survey.toml` | No experiment process or code project |
 | Analyse supplied papers/notes | Add `[research] materials_only=true` and `[assets].papers=[...]` | No web search or fabricated search result |
+| Write from notes/results | `[task] kind="writing"`, `outputs=["report"]`, `[assets].materials=[...]`, `[model] name="env"` | No new synthesis, search or experiment; analysis JSON must be a completed supported package |
+| Describe/plot supplied data | `start --kind data_analysis` or the [data curves case](../examples/data-curves/README.md) | No model calls, arbitrary inference, smoothing or scientific validation |
 | Repair an existing project | `[task] kind="bug_fix"` plus `[execution] code_task_config="code_task.toml"`; run the research config | No literature or baseline unless the task explicitly supplies it |
 | Reproduce or measure an existing script | `[execution] command=["python","measure.py"], cwd="/abs/project", primary_metric="accuracy"` and a finite process budget | No automatic repository discovery or seed expansion |
 | Improve an existing research project | Use `[task] kind="auto"` with `execution.code_task_config`, protected assets, benchmark and protocol; the [continual-learning case](../examples/continual_learning/README.md) is the prepared example | No dependency install, dataset download, or scientific success claim |
 | Independent code work | `simple-ar code-task init --config code_task.toml` then `simple-ar code-task execute ...` | No research report lifecycle |
 
-The following are four independent complete research TOML files. Save each as a
+The following are four advanced, independent complete research TOML examples. Save each as a
 file before running it; do not concatenate the sections. Relative paths resolve
 from that file's directory.
 

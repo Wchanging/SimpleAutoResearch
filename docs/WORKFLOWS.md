@@ -141,6 +141,10 @@ prose is allowed; preserving supported facts and qualifications matters more tha
 word count. Checkpoints retain correction requests and editor candidates: resume reuses
 them and consumed correction/source-call allowances rather than generating a fresh allowance.
 These checks are model-assisted, not certification of every important claim or paper quality.
+Whole-document editing can select at most two section targets. Each target uses
+the existing `max_review_iterations` allowance, including rejected candidates.
+Saved iterations preserve consumed allowance and original findings/instructions;
+resuming cannot create a third target or reset correction attempts.
 Known publication dates, DOI and author-list coverage notes survive document handoff
 and share one metadata projection for writing, references, BibTeX and `citation_map.json`.
 Missing details are displayed rather than inferred. Provider metadata is not independent
@@ -151,6 +155,10 @@ Reading a byline does not automatically replace metadata.
 `get_paper_brief` returns recorded metadata alongside saved front matter, even if
 the indexed chunk cap omitted that header. It does not open live file paths or
 guess missing headers in old saved bundles; truncation and missing text stay explicit.
+For a filename-only local source, a reading note's title proposal can become the
+report display title only if it occurs in that same source's saved, bounded front
+matter. Original records are unchanged. The citation map exposes title provenance;
+unknown authors/date/DOI remain unknown. This is not identity/version validation.
 Reading notes receive the user task focus separately from source evidence. Default excerpts
 retain an ingest-sized chunk; smaller windows mark further clipping. Note identities and
 declared references are checked against their owning document. This prevents misattribution,

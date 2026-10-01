@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_json, write_text
-from simple_ar.cli import main
+from simple_ar.cli.main import main
 from simple_ar.code_task import (
     PatchValidationError,
     analyze_code_task_failure,

@@ -10,7 +10,8 @@ class ReportTemplateError(RuntimeError):
     """Raised when a report template or criteria file cannot be loaded."""
 
 
-BUILTIN_TEMPLATE_NAMES = {"source_review", "survey", "survey_long", "experiment", "reproduction", "analysis_report"}
+MATERIAL_REPORT_TEMPLATE = "material_report"
+BUILTIN_TEMPLATE_NAMES = {"source_review", "survey", "survey_long", "experiment", "reproduction", "analysis_report", MATERIAL_REPORT_TEMPLATE}
 
 
 def resolve_research_only_delivery(config, *, source_count: int):
@@ -94,6 +95,8 @@ def load_report_template_bundle(
 def _resolve_template_name(report_mode: str, value: str) -> str:
     text = str(value or "").strip()
     if text in {"", "auto"}:
+        if report_mode == "supplied_materials":
+            return MATERIAL_REPORT_TEMPLATE
         return "experiment" if report_mode == "experiment" else "survey"
     if text in BUILTIN_TEMPLATE_NAMES:
         return text

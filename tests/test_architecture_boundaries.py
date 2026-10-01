@@ -17,7 +17,9 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         probe = (
             "import sys; import simple_ar.cli; "
             "assert 'simple_ar.cli.main' not in sys.modules; "
-            "assert callable(simple_ar.cli.main)"
+            "from simple_ar.cli.main import main; "
+            "import simple_ar.cli.parser; "
+            "assert callable(main)"
         )
         completed = subprocess.run(
             [sys.executable, "-c", probe],

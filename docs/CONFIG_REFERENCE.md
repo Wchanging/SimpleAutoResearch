@@ -2,6 +2,12 @@
 
 [中文版本](CONFIG_REFERENCE_zh.md)
 
+For a first task, use [guided setup](#guided-setup); the full field tables are
+optional expert reference. `.env` holds global connections, while task TOML
+holds case-specific inputs and execution limits. Reading/revision bounds and
+their evidence limits are described in [workflows](WORKFLOWS.md), not new
+configuration layers. Do not interpret a configured review as verified science.
+
 ## Guided setup
 
 Online setup reads abstracts and supplied local materials by default. Add
@@ -54,7 +60,9 @@ API totals remain unlimited unless configured.
 `--interaction` still controls execution decisions (default `checkpoints`).
 Missing non-interactive input fails instead of waiting. Declining the final
 confirmation retains saved inputs. After execution begins, resume the printed
-session via `research-session --session-root PATH --model env`, not another `start`.
+session via `research-session --session-root PATH --model MODEL`, not another `start`.
+Use the model selected at setup (`env` by default); data-analysis setup saves
+`model.name = ""` and its resume command omits `--model`.
 
 ## Writing from supplied material
 
@@ -72,7 +80,11 @@ This verifies the calculation, not data collection or scientific claims.
 Raw tables are not automatically treated as verified experiment results. Execution configuration
 is rejected. Extracted text is persisted and reused on resume; search, synthesis and experiments
 are not prerequisites. Supplied results remain unverified external assertions.
-Guided writing defaults to `report.template = "analysis_report"` and `report.document_review = true`.
+Guided writing defaults to `report.template = "material_report"` and `report.document_review = true`.
+This explains supplied material without requiring an experiment or a failed objective.
+`analysis_report` remains available for unmet/uncertain experiment goals. Explicit saved
+templates are retained; a started writing task with an automatic default reuses its
+resolved template from the existing input snapshot on resume.
 Use `template = "experiment"` for an honest paper-style draft; missing evidence remains explicit.
 Local bibliographic metadata may be incomplete; authors, dates and venues must not be invented.
 
@@ -122,7 +134,9 @@ conditions belong to the research TOML or its referenced CodeTask TOML.
 
 `report.template` defaults to `auto`: literature tasks with at most one citable
 source use a concise single-source evidence review, while multi-source tasks
-use a survey. An explicit `source_review`, `survey`, or custom template wins;
+use a survey. Supplied-material writing automatically selects `material_report`,
+with the continuation semantics described above. An explicit `source_review`,
+`survey`, `material_report`, or custom template wins;
 automatic selection never invents a comparison absent from the sources. Experimental
 tasks select a paper, reproduction report or concise analysis report using the
 analysis goal judgment. Execution `passed` is not scientific success. Unmet or

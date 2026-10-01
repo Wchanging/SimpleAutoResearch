@@ -6,6 +6,10 @@
 
 ## 项目形态
 
+控制台脚本与 Python 调用统一使用 `simple_ar.cli.main:main`，即
+`from simple_ar.cli.main import main`。不要在包上同名转发函数，导入子模块会覆盖该属性。
+入口改变后先用 `uv sync --inexact` 重新安装，再使用 `--no-sync`；保留共享环境额外科学包。
+
 SimpleAutoResearch 现在以文件产物和持久化 session state 为中心：
 
 - capability 读取和写入具体 artifact；
@@ -99,13 +103,13 @@ simple-ar status / inspect / search-artifacts
   -> 历史产物读取（不启动旧流程）
 ```
 
-`research-session` 是正式用户入口，负责有界的 research 流程。提供明确命令或
-CodeTask 时继续完成 `research_design -> experiment -> analysis -> report -> report_audit`；
-两者都省略时提供 literature-only 的 summary/report 路径，且不创建 execution 请求。
+`research-session` 是共享执行入口，`start` 为它准备普通任务配置。按实际输入选择文献、代码修复、
+描述分析、材料写作或准备好的复现路径。有命令不代表必须走全套科研动作，无命令也不代表
+必须做文献综述；应用层校验实际需要的输入与权限。
 `research-brief`
 仍保留，但只用于分段调试、已有 handoff 接续和库级组合，不与完整主线
 并列作为产品入口。`simple-ar run/resume` 已退出，不静默转换旧参数。新的 capability 应
-放在 `research/`、`experiment/` 或 `report/` 中。旧阶段层已删除；历史消费者只读，当前
+放在 `research/`、`code_task/`、`experiment/`、`result_analysis/` 或 `report/` 中。旧阶段层已删除；历史消费者只读，当前
 实验和报告行为由下文模块负责。
 
 当前树通过 read cards 和 `evidence_pack_from_read()` 统一承担阅读到综合的证据交接，不增加第二份
@@ -151,9 +155,12 @@ facade、registry 分支和 projection 应直接删除，不继续保留“以�
 | --- | --- | --- | --- |
 | Core runtime | `simple_ar.core` | 产物引用、attempt lineage、有界决策、profile、转移校验和共享资源账本 | 领域 schema、provider 调用、代码编辑、重试或选择最佳结果 |
 | Sources、documents、evidence | `research.sources`、`research.documents`、`research.evidence` | provider/parser port、文档 bundle、cards、chunks 和带 provenance 的 handoff | workflow 调度、把 provider 专属策略塞进 core，或把全文复制进每份 handoff |
+| 保存原文检索 | `research.store.retrieval` | 共享词面排序、已知来源顺序、真实文本窗口 | 语义真伪、论文身份或新索引；report 仅保留薄兼容导入 |
 | Synthesis | `research.synthesis`、`research.brief` | 基于证据的方向、研究契约和最小的文献到想法组合 | 自动宣称创新性、自动选择实验或隐式调用模型 |
 | Experiment 与 analysis | `research.experiment`、`research.analysis`、现有 `experiment.execution` | 显式运行请求、规范化结果、指标比较和结果证据状态 | 代码生成、repair 策略、重试策略或决定下一研究阶段 |
+| 供材表格与数据图 | `result_analysis.table`、`result_analysis.figures` | 共享解析/预检、描述计算、显式坐标绘图和可重建分析包 | 猜行语义、认证科学有效性、任意统计/代码执行 |
 | Report 与 audit | `report.projection`、`report.capability`、`report.audit`、`report.writing` | 证据投影、显式章节组装、可选图表渲染、引用/指标审计和旧报告兼容 | 隐藏缺失证据、凭空生成图表，或没有迁移契约就替换旧 writer/reviewer |
+| 写作上下文与修订 | `report.narrative`、既有 `report.agent`/`editor` | 已采用正文投影、原修改契约、候选验证、既有检查点/额度消费 | 第二套记忆、把拒绝稿当事实或无界反复审阅 |
 | Application 与 benchmark | `app`、`cli`、`code_task` 和 benchmark adapter | 面向用户的编排、旧 projection、code-task 策略和外部评测接入 | 成为 core runtime 的依赖，或为了单个 benchmark 改变通用 capability 语义 |
 
 如果一个功能看起来跨越两行，应把协调放在 application 或显式 adapter 中，

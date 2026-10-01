@@ -20,7 +20,7 @@ dependencies = [
 examples = ["scikit-learn>=1.8.0"]
 
 [project.scripts]
-simple-ar = "simple_ar.cli:main"
+simple-ar = "simple_ar.cli.main:main"
 simple-ar-checks = "simple_ar.app.dev_checks:main"
 
 [build-system]

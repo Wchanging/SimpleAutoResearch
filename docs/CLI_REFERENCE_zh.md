@@ -2,17 +2,23 @@
 
 [English version](CLI_REFERENCE.md)
 
+`start` 提供五类已支持的结构化任务选择；`research-session` 执行/恢复保存任务，
+`report-export` 导出已有报告。下面的底层命令是专家接口，不是每个功能都必须走的步骤。
+最短路径见[使用指南](USAGE_zh.md)，completed/审计的含义见[工作流边界](WORKFLOWS_zh.md)。
+
 ## 已有材料直接写作
 
 `simple-ar start --kind writing --goal "写一份诚实的分析报告" --material notes.md`
 使用已有草稿、笔记或结果说明；可重复 `--material`，论文来源另用 `--document`。
 输入支持本地 Markdown、文本及 PDF；`--material` 还可接收已完成的 `table_analysis.v1`
 `analysis.json`（同目录保留数据副本），复算后附带可编辑图；不接受原始表格 JSON。
-默认 `analysis_report`，用 `--template experiment`
+默认 `material_report`，用 `--template experiment`
 请求论文体草稿。材料提取后直接写作、审阅、装配和审计，不搜索、不造研究综合、不执行实验。
 用户提供的数字与方法不等于本会话独立验证；审计状态也不等于发表质量。
 高级入口为 `research-session --task-kind writing --topic "说明已有结果" --material PATH --model env`，模板选项为
 `--report-template`。恢复仍使用已打印的 session-root，不重新启动引导。
+`analysis_report` 仍可显式选择，用于目标未达成/不确定的实验分析；材料报告不要求不存在的
+baseline、失败目标或实验继续决策。模型会话的引导续跑提示保留实际选定模型。
 
 `start --fulltext --sources search` 明确允许远程全文抓取与 PDF 下载；不加时使用摘要和已提供的本地材料，启动前会显示该范围。全文获取失败不会冒充全文阅读。
 
@@ -28,7 +34,7 @@
 物理上限 `--data-max-mb 20`、`--data-max-figures 100`，超出报错而非丢数据，可明确调整。
 高级入口同样支持这些参数及 `--task-kind data_analysis`、输出 `data_analysis`。
 支持 UTF-8 CSV/TSV、同构 JSON records；即便配置了全局模型也不调用 API。
-按打印的 session-root 恢复；改变已固化的列/聚合设置需要新任务。更多见[工作流](WORKFLOWS_zh.md#已有数据分析与绘图无需模型)。
+新引导保存空模型配置，续跑提示不要求 `--model`。按打印的 session-root 恢复；改变已固化的列/聚合设置需要新任务。更多见[工作流](WORKFLOWS_zh.md#已有数据分析与绘图无需模型)。
 
 ## 引导入口
 
@@ -670,7 +676,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 并可搭配 `--yes` 自动继续这些 primitive prompts。普通 execute 模式下的 `--yes`
 会自动批准审核门，只应在你明确想自动审批 plan/proposal 时使用。使用
 `--no-review-inline` 可恢复“停住、下次再跑”的旧行为。完整运行流程见
-[使用与配置](USAGE_zh.md#推荐路径toml-execute)。
+[使用与配置](USAGE_zh.md#推荐路径toml--execute)。
 
 如果 LLM work-plan 或 patch-plan 返回了无法解析的 JSON，`execute` 会停在
 `llm_planning_failed`，并且不会写入 offline fallback plan。此时直接重跑同一条

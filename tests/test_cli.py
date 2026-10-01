@@ -14,7 +14,7 @@ from rich.console import Console
 
 from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.core import ArtifactStore
-from simple_ar.cli import main
+from simple_ar.cli.main import main
 from simple_ar.cli.parser import build_parser
 from simple_ar.cli.code_task_view import confirm_review_gate, render_execute_message
 from simple_ar.core.reporting import style_progress_message

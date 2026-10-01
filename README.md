@@ -1,64 +1,66 @@
 # SimpleAutoResearch
 
-**A lightweight research framework. From a task to inspectable evidence, code, experiments, and reports.**
+**A lightweight research assistant: investigate, edit, analyse, and write with inspectable results.**
 
 [中文](README_zh.md) · [Quick start](#quick-start) · [Examples](#choose-a-case) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
 
-Give SimpleAutoResearch a research goal, the materials you already have, and the
-conditions it can work within. It connects literature research, scoped code
-changes, experiment execution, and reporting in a saved, resumable session.
-Not every task needs every step: a survey does not need training, and a code
-repair does not need a paper.
+Choose a function in the guided CLI, describe a task and provide the material you already have. SimpleAutoResearch
+organises the necessary work in a saved session and delivers files you can
+inspect, edit, rebuild, and continue using.
 
-The emphasis is on **visible decisions, real execution, and reusable results**—
-with a codebase that remains understandable and straightforward to extend.
+Use individual functions or connect them: **existing data → analysis and plots →
+report → optional ACM export**. A code repair need not search papers, and writing from
+existing results need not repeat an experiment.
 
-> **Actively developed.** Literature and code-task workflows are available;
-> prepared-project research is still being validated end to end. A completed
-> run means artifacts were delivered, not that a hypothesis is correct or a
-> paper is ready for publication.
+Material writing defaults to a supplied-evidence report, not a failed-experiment
+analysis. Ask for a paper-style draft explicitly when that is the intended delivery;
+neither format turns unverified material into a validated scientific result.
 
-This is a source-visible preview. A project license has not yet been selected;
-do not treat public access to the repository as an open-source license.
+> **Source-visible preview.** Structured setup and bounded native workflows are
+> available. Free-form conversation, general autonomous reproduction preparation,
+> and integrated external coding Agents are not yet offered. A completed session
+> is not a scientific-correctness or publication-quality certificate.
+>
+> A project license has not yet been selected. Public repository access is not
+> an open-source license.
 
 ## What can you do with it?
 
-| Your task | What you provide | What to inspect afterward |
+| Task | Minimum input | Delivery and current scope |
 | --- | --- | --- |
-| Explore a research direction | A question, scope, and model access | Selected sources, reading notes, synthesis, and a Markdown report |
-| Describe and plot existing data | CSV/TSV or JSON records, selected columns and what a row represents | Counts, means/sample standard deviations or unchanged summary values, editable SVGs and rebuilding inputs; no API needed |
-| Write from existing material | Notes, drafts or completed descriptive-analysis packages, optional reference papers and model access | Reviewed report with reusable data/figures, or honest paper-style draft; scientific claims remain unverified |
-| Improve or repair a codebase | A project, task, and validation commands | An isolated edited workspace, change records, reviews, and validation results |
-| Export an existing report | Saved report artifacts and optional local TeX tools | Editable ACM manuscript, bibliography, figures, and compilation diagnostics |
-| Check a paper conclusion under a prepared protocol | Local paper, ready environment, fixed command and expected outcome | Source evidence, measured results and a bounded reproduction report; no innovation required |
-| Investigate a research improvement | Prepared code, data, environment, evaluation conditions, and resource limits | Candidate changes, actual measurements, analysis, and an evidence-based report or draft |
+| Research a direction | Question, scope, model API; optional local papers | Sources, reading notes, comparisons and Markdown report. Reading depth depends on available material. |
+| Repair a codebase | Project, allowed edit scope, validation command, model API | Isolated edited workspace, patch/review records and actual validation. Intended for bounded tasks, not arbitrary unattended engineering. |
+| Analyse and plot data | CSV/TSV or JSON records, columns and row/unit meanings | Descriptive statistics or supplied values, editable bar/line/scatter SVGs and rebuilding inputs. No API needed; no inferred uncertainty or automatic scientific validation. |
+| Write from material | Notes, draft or descriptive-analysis package; model API | Reviewed report or evidence-limited paper-style draft, references and reusable figures. No new experiment or online research is implied. |
+| Reproduce a specified conclusion | Local paper, ready project/environment, fixed command and evaluation protocol | Actual measurements and a bounded reproduction report. Preparation is required; this is not arbitrary whole-paper reproduction. |
+| Export a saved report | Report artifacts and Pandoc; SVG conversion tools when needed; TeX for optional compilation | Editable ACM acmart demonstration project, bibliography and figures, through separate `report-export`. Compilation and content quality are separate checks. |
 
-### Why SimpleAutoResearch?
+The first five tasks have guided `start` entries. Export consumes an existing
+report; it is not a sixth setup choice. Research improvement remains experimental
+and is described with the prepared cases below.
 
-- **Task-driven, not one mandatory sequence.** An accepted plan connects the
-  capabilities needed for the task. Bounded research follow-ups can supplement
-  measurements or revise a candidate when the evidence calls for it.
-- **Work you can inspect.** Plans, sources, patches, measurements, usage, and
-  reports are saved as files, rather than only appearing in a conversation.
-- **Resume without throwing everything away.** Sessions retain attempt history
-  and can reuse unaffected evidence and compatible measurements.
-- **Choose where to participate.** Use assisted decisions, key checkpoints, or
-  autonomous execution within the supplied scope.
-- **Keep the machinery understandable.** File-based state, TOML configuration,
-  Rich terminal output, and focused modules instead of another infrastructure
-  platform to operate.
+### Why use an assistant around these tasks?
+
+- **Less material handoff.** Saved analysis packages and report artifacts can
+  feed the next task instead of becoming disconnected chat answers.
+- **Inspect actual work.** Plans, source excerpts, patches, measurements,
+  usage and rejected revisions remain available as files.
+- **Continue saved work.** Compatible completed results and supported writing
+  checkpoints can be reused; continuation retains accounting.
+- **Keep control.** Choose checkpoints or autonomous actions within the accepted
+  scope. Missing critical inputs and permissions still require participation.
+
+These are intended workflow benefits, not evidence that the assistant outperforms
+a general coding Agent. Cross-task quality and first-time user experience remain
+under validation.
 
 ## Quick start
 
-Start with a real literature survey: **no dataset, training environment, or GPU
-required**. It does need network access and a working model API.
+Requirements: **Python 3.12+**, Git and [uv](https://docs.astral.sh/uv/).
 
 ### 1. Install
 
-Requirements: **Python 3.12+**, Git, and [uv](https://docs.astral.sh/uv/).
-
-The V2.9 preview is currently on `feat/v2.9-task-driven-research`, not the
-default branch. To try this preview:
+The current preview is on `feat/v2.9-task-driven-research`, not the default branch:
 
 ```bash
 git clone --branch feat/v2.9-task-driven-research https://github.com/Wchanging/SimpleAutoResearch.git
@@ -66,16 +68,24 @@ cd SimpleAutoResearch
 uv sync
 ```
 
-### 2. Configure model access
+### 2. Try a task without an API
 
-Copy `.env.example` to `.env` if you do not already have one:
+The included demonstration data can be plotted without credentials, a GPU or
+a training environment:
 
 ```bash
-cp .env.example .env
+uv run simple-ar research-session --config examples/data-curves/research.toml
 ```
 
-On PowerShell, use `Copy-Item .env.example .env` instead. Edit the local file
-with your provider's credentials, API base URL, and model identifier:
+Inspect the printed analysis package and SVG paths under `runs/data-curves/`.
+This case plots supplied demonstration coordinates; it is not an experiment
+or benchmark result. See the [case guide](examples/data-curves/README.md).
+
+### 3. Configure a model for research, code or writing
+
+Copy `.env.example` to `.env` **only if you do not already have one**:
+`cp .env.example .env` on a shell, or `Copy-Item .env.example .env` on PowerShell.
+Edit it with your provider's actual values:
 
 ```dotenv
 OPENAI_API_KEY=your_api_key
@@ -85,189 +95,182 @@ SIMPLE_AR_LLM_API=chat
 SIMPLE_AR_LLM_STREAM=true
 ```
 
-Replace the placeholders. This example uses a Chat Completions-compatible
-endpoint with streaming; choose `responses` instead if that is the API your
-provider supports. Do not commit credentials. Advanced transport, retry, and
-timeout options belong in the [configuration reference](docs/CONFIG_REFERENCE.md).
+Use an API format supported by your provider; `responses` is also supported.
+Keep secrets out of Git. `.env` holds global model/transport settings; project
+paths, interpreters, data and task limits belong in task configuration.
+[Advanced settings](docs/CONFIG_REFERENCE.md) are optional.
 
-### 3. Run a survey
-
-No hand-written configuration is needed for a first custom task:
+### 4. Start your own task
 
 ```bash
 uv run simple-ar start
 ```
 
-Choose `survey`, `bug_fix`, prepared `reproduction`, `writing` or `data_analysis`, describe the goal and relevant inputs. The short
-guided setup saves ordinary TOML under `runs/assistant/`, then uses the same
-resumable session. Use `--prepare-only` to save without API calls. This is not
-yet free-form conversation, external Agent execution or arbitrary paper reproduction.
-See [guided configuration](docs/CONFIG_REFERENCE.md#guided-setup).
+Choose `survey`, `bug_fix`, `reproduction`, `writing` or `data_analysis`.
+The structured guide collects relevant inputs, saves ordinary TOML under
+`runs/assistant/`, and starts the shared session. You do not have to write a task
+file first. `--prepare-only` saves configuration without execution or model calls.
+It is not yet a free-form conversation.
 
-Or run the supplied survey case directly:
+Or try the supplied model-backed survey:
 
 ```bash
 uv run simple-ar research-session --config examples/survey/research.toml
 ```
 
-The included task surveys small-memory continual learning. To try your own
-question, change `[task].goal` in the config—for example:
+This example surveys small-memory continual learning using available abstracts
+and metadata. It **does not download full text or train models**. Change
+`[task].goal` for another question; use the guide/configuration reference when
+you need supplied papers or best-effort full-text retrieval.
 
-```toml
-goal = "Compare replay-based approaches to small-memory continual learning. Explain their tradeoffs, evidence limitations, and open questions."
-```
-
-This case searches literature providers, reads available abstracts and metadata,
-and produces a Markdown report with references and an audit. It **does not
-download full texts or run training**. See the [survey case](examples/survey/README.md)
-for its exact scope.
-
-**Where are the results?** The terminal prints the session directory and
-deliverable paths. For this case, look under `runs/survey/<session>/`; open the
-reported `report` and `report_audit` files. Keep the session path for continuation.
-
-> **Cost:** model calls are real and billable. Cumulative API request/token
-> budgets are uncapped unless you set them. Optional caps, process limits, and
-> research-round limits are separate settings; see [configuration](docs/CONFIG_REFERENCE.md).
-> Runtime depends on the provider and task, so there is no fixed completion-time promise.
+> **Cost:** model calls are billable. Cumulative API request/token caps are
+> optional and otherwise uncapped. Process time, resources and research-round
+> limits are separate. There is no fixed completion-time promise.
 
 ## Choose a case
 
-Each example directory contains one case's inputs, configuration, and run guide.
-Generated outputs stay in `runs/`.
+One directory contains one case's inputs, configuration and instructions;
+generated work goes to `runs/`. Run the checked-in config directly—do not copy
+templates into `runs/` first.
 
-| Case | Best for | Preparation |
+| Case | Purpose | Preparation |
 | --- | --- | --- |
-| [Literature survey](examples/survey/README.md) | A first research session without training | Model API and internet access |
-| [Continual learning](examples/continual_learning/README.md) | Research improvement on Mammoth / CIFAR-100 | Project, dataset, fixed split, training environment, and GPU budget |
-| [Digits MLP](examples/code_task_digits_mlp/README.md) | A small model-code improvement task | Included project; NumPy and scikit-learn |
-| [Multi-file code review](examples/code_task_medium_review/README.md) | Trying scoped edits and validation | Included project; Python standard library |
+| [Data curves](examples/data-curves/README.md) | Supplied line/scatter coordinates | No API or training; included demonstration data |
+| [Descriptive analysis](examples/data-analysis/README.md) | Tables, descriptive bars and rebuilding | No API; explicit data/row semantics |
+| [Literature survey](examples/survey/README.md) | Research report without training | Model API and internet |
+| [Conformal reproduction](examples/conformal_reproduction/README.md) | Bounded, adapted numerical reproduction | Follow the case environment/protocol; not whole-paper or benchmark acceptance |
+| [Multi-file code review](examples/code_task_medium_review/README.md) | Scoped editing and validation | Model API for generated edits; Python standard-library project |
+| [Digits MLP](examples/code_task_digits_mlp/README.md) | Small model-code task | NumPy/scikit-learn; `uv sync --extra examples`, retain the extra in `uv run` |
+| [Continual learning](examples/continual_learning/README.md) | Experimental research improvement | Prepared Mammoth/CIFAR-100 project, fixed split, environment and GPU budget |
 
-The last two use standalone `code-task`, not the complete research loop.
-The [TabM research case](examples/tabm_research/README.md) is an experimental
-prepared-server diagnostic, not a ready-to-run example on a fresh checkout.
-For the classical-ML example, install `uv sync --extra examples` and retain that
-extra when running with `uv run --extra examples ...`.
+The two code examples use standalone `code-task`, not a full research loop.
+[TabM](examples/tabm_research/README.md) is a prepared-server diagnostic, not a
+fresh-checkout quick start. See the [example index](examples/README.md) for scope.
 
-The continual-learning case runs from its checked-in config after you prepare
-the project, data and fixed split at the paths declared in its task TOML. No
-TOML copy is required; see its [run guide](examples/continual_learning/README.md).
-The [example index](examples/README.md) explains the shared directory conventions.
+## What you receive
 
-## Bring your own task
+| Delivery | Files to inspect | Reuse |
+| --- | --- | --- |
+| Data analysis | `analysis.json`, `analysis.md`, copied input and editable SVGs | Rebuild the package or use its JSON as writing material |
+| Report | `report.md`, `report_body.md`, `references.bib` and the separately printed audit | Review claims alongside sources; export the report attempt directory |
+| ACM export | `main.tex`, `body.tex`, bibliography, figures and `export.json` | Edit/move the project; inspect `build.log` when compilation is requested |
+| Code/measurement | Edited workspace, actual validation/run logs and saved results | Inspect the actual change and evaluation conditions, not only the final prose |
 
-Start with the closest case and describe **the outcome you want**, rather than
-writing a sequence of internal stages. A useful task supplies:
+The terminal prints exact session/attempt paths. Keep the whole analysis directory so
+its copied data remains available after moving it.
 
-1. **Goal and deliverable:** a survey, a verified code change, experiment analysis,
-   or a research draft where evidence supports it.
-2. **Available assets:** papers, project paths, datasets, or prior results.
-3. **Execution conditions:** the prepared interpreter, validation/measurement
-   command, comparable evaluation conditions, and permitted edit scope.
-4. **Limits and participation:** compute limits, research rounds, optional API
-   caps, and the decisions you want to review.
+For example, connect an analysis package to writing without repeating its task:
 
-For example:
+```bash
+uv run simple-ar start --kind writing --goal "Explain these results and their limitations" --material "PATH_TO_ANALYSIS/analysis.json"
+```
 
-> Improve forgetting under a small replay-memory budget in this prepared
-> continual-learning project. Keep the dataset split and evaluation unchanged.
-> Compare against a suitable baseline, explain the measured tradeoffs, and
-> deliver an analysis if the evidence does not support an improvement.
+Replace `PATH_TO_ANALYSIS` with the printed analysis directory; model access is
+needed for writing. Export that report separately if desired:
 
-Natural language expresses the goal; configuration still supplies execution
-permissions and resource constraints. The system does not automatically
-provision a training environment. For your own project, keep the research and
-CodeTask TOMLs beside the task files, use `{config_dir}` for case-local paths
-and explicit absolute paths for machine assets; `.env` is for global model/API
-settings, not task resources. Run the research TOML directly.
+```bash
+uv run simple-ar report-export --report-dir "PATH_TO_REPORT_ATTEMPT" --output runs/acm-draft
+```
 
-### Decide how involved to be
+Replace the report path; choose an unused output directory. Pandoc is required;
+SVG conversion requires `rsvg-convert`. Add `--compile` only when pdfLaTeX,
+BibTeX and acmart are installed. An uncompiled source project is not a verified
+PDF or a conference submission. See the [export guide](docs/CLI_REFERENCE.md#simple-ar-report-export).
 
-Select a policy with `--interaction` or `[research].interaction`:
+## Bring your own material
 
-| Mode | Participation |
-| --- | --- |
-| `assisted` | Review the execution protocol, research choices, and key delivery decisions |
-| `checkpoints` | Review key protocol/direction/delivery decisions; allow bounded same-protocol follow-ups |
-| `autonomous` | Let the system choose valid next actions within the configured scope and limits |
+Start with the function and desired delivery, not an internal stage sequence:
 
-New CLI sessions default to `checkpoints`; an example config may choose a
-different mode. The survey example uses `autonomous`. **All modes can pause for
-missing critical facts, assets, or permissions**—automatic approval cannot supply them.
+- **Survey:** question, scope, relevant papers, whether online search is allowed.
+- **Code:** repository, problem, allowed files and an actual validation command.
+- **Data:** input file, selected columns, what each row/value represents and units.
+- **Writing:** source material, report or paper-style draft, optional reference papers.
+- **Reproduction:** specified paper conclusion, prepared execution conditions,
+  fixed evaluation and resource limits.
+
+For writing, provide the completed descriptive-analysis package as material,
+rather than presenting arbitrary JSON as validated experimental results.
+For a prepared project, put configuration beside the case, use `{config_dir}`
+where supported for case-local paths and explicit paths for machine assets.
+The assistant does not automatically provision environments or download datasets.
+See [usage](docs/USAGE.md) and [guided configuration](docs/CONFIG_REFERENCE.md#guided-setup).
 
 ## Inspect and resume
 
-Rich output shows the current action, elapsed time, progress messages, and final
-artifact paths. Read saved measurements and validation results alongside the
-report: generated prose is not a substitute for execution evidence.
+The terminal prints the session directory, deliverables and current action.
+Read actual measurements and source evidence alongside the report.
 
-To continue the survey after resolving a provider error or another blocker,
-replace `SESSION_PATH` below with the exact directory printed by your run:
+To resume unchanged model-backed inputs, use the saved session path:
 
 ```bash
-uv run simple-ar research-session --config examples/survey/research.toml --session-root "SESSION_PATH"
+uv run simple-ar research-session --session-root "SESSION_PATH" --model env
 ```
 
-Use the original task's config for other cases. Omitting `--session-root` starts
-a new session. Continuation preserves history and accounting; it does not reset
-an exhausted budget. For a pending decision, follow the terminal's decision ID
-and reply instructions. See [CLI reference](docs/CLI_REFERENCE.md) for explicit
-revisions and allowance changes.
+Do not rerun `start` to continue a session. For the model-free data example,
+omit `--model env`. A new run without `--session-root` creates a new session.
+Continuation does not reset an exhausted budget or imply background execution
+after disconnect. Confirm an interrupted worker has stopped before recovery;
+see the [CLI reference](docs/CLI_REFERENCE.md).
+
+New CLI sessions default to `checkpoints`; use `--interaction assisted`,
+`checkpoints` or `autonomous` to choose participation. Examples can specify a
+different policy. No mode supplies missing facts, assets or permissions.
 
 ## How it fits together
 
 ```text
-Task + materials + constraints
+Goal + material + constraints
              ↓
-      Plan the next work ←──────────────┐
+      Select necessary work ←──────────┐
              ↓                         │
-  Research / CodeTask / Experiment     │
+ Research / Code / Data / Run / Write   │
              ↓                         │
-     Save evidence and results ── Reassess
-                                       │
-                                Deliver or pause
+ Save evidence and artifacts ─── Reassess
+                                       ↓
+                              Deliver or request input
 ```
 
-These are shared capabilities, not separate end-to-end pipelines for every
-task. CodeTask handles scoped implementation and validation; experiments
-record measurements; reporting organizes available evidence. The session
-coordinates their handoffs and bounded follow-ups. Technical repair, research
-revision, and writing revision serve different purposes.
+One shared session owns attempts, accounting, artifacts and recovery.
+Domain modules own their evidence and execution. Technical repair, scientific
+revision and prose revision are different actions—not one generic retry.
 
 ## Current boundaries
 
-- **Research quality needs review.** A run can finish with negative or inconclusive
-  results. Report audits do not certify scientific correctness or publication quality.
-- **Reading depth depends on the inputs.** Abstract-only runs are not full-paper
-  reviews; complex PDFs and incomplete source material remain limitations.
-- **Code changes are scoped.** Controlled edits and isolated workspaces do not
-  make this a general-purpose unattended refactoring agent or a security sandbox.
-- **Prepare the execution environment.** Project dependencies, datasets, and
-  GPU/server setup remain your responsibility. Do not run unfamiliar project
-  code with access to sensitive files or credentials.
-- **Providers can interrupt work.** Network failures, rate limits, and model
-  output errors can pause a session. Resume after addressing the cause.
+- **Reading:** saved-text retrieval and one bounded Reader follow-up can find
+  missed passages. Lexical matches and selected excerpts are not whole-paper
+  semantic verification. Unknowns and unresolved queries must remain visible.
+- **Writing:** review, source backtracking and revision are model-assisted.
+  Citation/metric audits and a compiled PDF do not certify correct claims,
+  complete bibliography, academic style or publication readiness.
+- **Data and figures:** descriptive bars and numeric-coordinate line/scatter
+  plots are supported. Arbitrary statistical inference, heatmaps and free-form
+  scientific illustration are not covered by this guided data path.
+- **Execution:** isolated copies and scoped edits are not an OS sandbox.
+  Prepare dependencies/data; do not expose sensitive files to unfamiliar code.
+- **Services and scope:** provider errors can pause work. Integrated external
+  Agents and general autonomous reproduction preparation remain deferred.
+  No formal PaperBench or ScienceAgentBench result is claimed.
 
 ## Documentation
 
-| Guide | Use it for |
+| Guide | Purpose |
 | --- | --- |
-| [Usage](docs/USAGE.md) | Workflows, outputs, and troubleshooting |
-| [Configuration](docs/CONFIG_REFERENCE.md) | Model settings, task inputs, budgets, and execution options |
-| [CLI reference](docs/CLI_REFERENCE.md) | Commands, continuation, and decision replies |
-| [Workflows and artifacts](docs/WORKFLOWS.md) | Execution boundaries and saved results |
-| [Development](docs/DEVELOPMENT.md) | Extending capabilities and understanding internal interfaces |
-| [Changelog](CHANGELOG.md) | Changes and migration notes |
+| [Usage](docs/USAGE.md) | Choose a function, run it, inspect outputs and troubleshoot |
+| [Configuration](docs/CONFIG_REFERENCE.md) | Global connections, task inputs and optional expert settings |
+| [CLI reference](docs/CLI_REFERENCE.md) | Commands, continuation and explicit revisions |
+| [Workflows and artifacts](docs/WORKFLOWS.md) | Evidence, execution and saved-result boundaries |
+| [Development](docs/DEVELOPMENT.md) | Module ownership and engineering contracts |
+| [Changelog](CHANGELOG.md) | Implemented changes and migration notes |
 
 ## Contributing and acknowledgements
 
-Issues, reproducible bug reports, and case studies are welcome. Please discuss
-code contributions before opening a pull request while the project license is
-undecided. Include the command, relevant config, and diagnostics—**remove API
-keys, credentials, and private data first**. Report-quality improvements and
-clearer examples are as valuable as code changes.
+Issues and reproducible cases are welcome. Discuss code contributions before
+opening a PR while licensing is undecided. Include commands, relevant
+configuration and diagnostics; **remove credentials and private data**.
 
-The project is inspired by [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw),
-while pursuing a compact, inspectable implementation. Our priorities are
-lightweight execution, robustness, clear structure, stable operation, and easy
-maintenance and extension.
+Workflow and presentation inspiration includes
+[AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw),
+[OpenResearch](https://github.com/alphaXiv/OpenResearch) and
+[ARIS](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep).
+This project keeps its own compact, file-based runtime and scoped native workflows.
+Reports, examples and usability improvements matter alongside code.

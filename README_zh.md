@@ -1,57 +1,54 @@
 # SimpleAutoResearch
 
-**轻量、可检查、可恢复的自动化研究框架。从任务出发，连接文献、代码、实验与报告。**
+**轻量科研助手：调研、改码、分析与写作，交付可检查、可继续使用的成果。**
 
 [English](README.md) · [快速开始](#快速开始) · [选择案例](#选择案例) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
 
-提供研究目标、已有材料和执行条件，让 SimpleAutoResearch 在一个可保存、可续跑的会话中，
-组织文献调研、限定范围的代码修改、实验执行与报告写作。
-并非每项任务都需要走遍全部环节：调研不必训练，修复代码也不必写论文。
+在 CLI 引导中选择功能、说明任务，提供你已有的材料。SimpleAutoResearch 在保存的会话中组织必要工作，
+交付可查看、修改、重建和继续使用的文件。
 
-我们关注的是 **看得见的决策、真实执行的证据、可以复用的结果**，
-同时让框架保持清晰、易理解、易扩展。
+功能可以独立使用，也可以连接：**已有数据 → 分析绘图 → 报告 → 可选 ACM 导出**。
+修 bug 不需要先调研论文；使用已有结果写作，不需要重新跑实验。
 
-> **项目仍在积极开发。** 文献与代码任务流程已可使用；已有项目上的完整科研流程仍在持续实测。
-> 运行完成表示交付了产物，不代表研究假设成立，也不代表论文已经达到发表质量。
+已有材料写作默认交付材料报告，不套用实验失败分析。需要论文体草稿时显式选择；
+两种形式都不会把未验证材料变成已验证的科研成果。
 
-当前是源码可见的预览项目，尚未确定项目许可证；仓库公开可见不等于已授予开源使用许可。
+> **源码可见预览。** 已有结构化引导和限定范围的原生功能；尚不提供自由对话、
+> 通用自主复现准备或完整外部编码 Agent 接入。会话完成不等于科学正确或论文质量通过。
+>
+> 项目许可证尚未确定；公开仓库访问不等于获得开源许可。
 
-## 可以用来做什么？
+## 可以做什么？
 
-| 你的任务 | 需要提供 | 可以查看的结果 |
+| 功能 | 最小输入 | 交付与当前范围 |
 | --- | --- | --- |
-| 探索一个研究方向 | 问题、范围和模型访问配置 | 筛选后的来源、阅读笔记、综合分析与 Markdown 报告 |
-| 分析并绘制已有数据 | CSV/TSV 或 JSON records、数值列、每行含义 | 描述统计或不再聚合的汇总值、可编辑 SVG、重建输入；无需 API |
-| 使用已有材料写作 | 笔记、草稿或完整描述分析包，可选参考论文及模型 | 附可复用数据/图的报告或诚实论文体草稿；科学主张仍未独立验证 |
-| 改进或修复代码 | 项目、任务说明与验证命令 | 隔离的修改后工作区、修改记录、审阅与验证结果 |
-| 尝试一个研究改进 | 准备好的代码、数据、环境、评价条件与资源限制 | 候选实现、实测指标、分析，以及有证据支撑的报告或初稿 |
+| 方向调研 | 问题、范围、模型 API；可选本地论文 | 来源、阅读笔记、比较与 Markdown 报告；深度取决于可获得材料 |
+| 修改代码 | 项目、允许修改范围、验证命令、模型 API | 隔离副本中的改动、审查记录和实际验证；适合有限任务，不承诺任意无人值守工程 |
+| 分析与绘图 | CSV/TSV 或 JSON 记录、字段、行和值的含义/单位 | 描述统计或已有数值、可编辑柱状/折线/散点 SVG、重建输入；无需 API，不推断误差或科学有效性 |
+| 材料写作 | 笔记、草稿或描述分析包；模型 API | 经审阅的报告或证据受限的论文体草稿、参考文献与图；不默认重跑实验或在线调研 |
+| 有限复现 | 本地论文、准备好的项目/环境、固定命令与评价协议 | 实际测量、限定范围的复现报告；不是任意论文的自主完整复现 |
+| 报告导出 | 保存的报告、Pandoc；按需 SVG 转换工具；编译另需 TeX | 单独用 `report-export` 交付可编辑 ACM acmart 演示工程、文献和图；编译与正文质量分开检查 |
 
-### 为什么选择 SimpleAutoResearch？
+前五项有 `start` 引导入口；导出使用已有报告，不是第六种启动选择。
+研究改进仍属实验性，见后面的已准备案例。
 
-- **任务驱动，而非所有任务走同一条流水线。** 根据已接受的计划连接所需能力；
-  在配置允许的有限科研轮次内，可以根据证据补充测量或修订候选。
-- **过程可检查。** 计划、来源、代码修改、测量、用量和报告保存为文件，不只留在对话里。
-- **中断不必从头开始。** 保存尝试历史，支持复用未受影响的证据与条件仍适用的测量。
-- **参与程度可选。** 辅助决策、关键节点确认或限定范围内自主执行，按任务需要选择。
-- **框架本身易理解。** 文件化状态、TOML 配置、Rich 终端输出和职责清晰的模块，
-  无需先维护另一套复杂基础设施。
+### 为什么围绕这些功能做一个助手？
+
+- **减少材料搬运。** 保存的分析包和报告可以供下一项任务使用，不只是孤立的聊天答案。
+- **查看实际工作。** 计划、原文片段、补丁、测量、用量与被拒修订都有文件记录。
+- **接着保存的工作继续。** 可复用兼容的已完成结果与支持的写作检查点，保留原用量。
+- **保留控制。** 可以选择关键确认或授权范围内自主执行，关键输入与权限缺失仍需参与。
+
+这些是产品希望提供的工作流收益，不是已证明优于通用编码 Agent。
+跨任务质量与陌生用户体验仍在验收中。
 
 ## 快速开始
 
-已准备好环境的论文结论检查可用 `task.kind = "reproduction"`，不强制提出创新。
-低开销完整案例见 [conformal_reproduction](examples/conformal_reproduction/README.md)，
-它是声明过条件的合成改编检查，不是整篇论文或 PaperBench 成绩。
-
-已有报告可用 `simple-ar report-export` 导出可编辑 ACM 演示工程并选择编译；
-无需再调用模型或重跑实验，依赖及命令见[CLI 参考](docs/CLI_REFERENCE_zh.md#simple-ar-report-export)。
-
-先运行一个真实文献调研：**无需数据集、训练环境或 GPU**，但需要网络和可用的模型 API。
+需要 **Python 3.12+**、Git 和 [uv](https://docs.astral.sh/uv/)。
 
 ### 1. 安装
 
-准备 **Python 3.12+**、Git 和 [uv](https://docs.astral.sh/uv/)，然后在终端运行：
-
-V2.9 预览版目前在 `feat/v2.9-task-driven-research`，尚未合并到默认分支。试用本预览版时：
+当前预览位于 `feat/v2.9-task-driven-research`，不是默认分支：
 
 ```bash
 git clone --branch feat/v2.9-task-driven-research https://github.com/Wchanging/SimpleAutoResearch.git
@@ -59,16 +56,22 @@ cd SimpleAutoResearch
 uv sync
 ```
 
-### 2. 配置模型
+### 2. 无 API 体验
 
-如果还没有 `.env`，先复制模板：
+使用内置演示数据绘图，不需要密钥、GPU 或训练环境：
 
 ```bash
-cp .env.example .env
+uv run simple-ar research-session --config examples/data-curves/research.toml
 ```
 
-PowerShell 使用 `Copy-Item .env.example .env`。在本地文件中填写服务商的密钥、
-API 地址和模型标识：
+查看终端打印的分析包与 SVG 路径，产物位于 `runs/data-curves/`。
+这是已有演示坐标的可重建绘图，不是实验或 benchmark 成绩。
+具体范围见[案例说明](examples/data-curves/README.md)。
+
+### 3. 为调研、改码与写作配置模型
+
+**已有 `.env` 时不要覆盖**。首次使用可执行 `cp .env.example .env`；
+PowerShell 使用 `Copy-Item .env.example .env`。填写服务商实际提供的值：
 
 ```dotenv
 OPENAI_API_KEY=your_api_key
@@ -78,167 +81,160 @@ SIMPLE_AR_LLM_API=chat
 SIMPLE_AR_LLM_STREAM=true
 ```
 
-请替换占位值。这里使用支持流式的 Chat Completions 兼容接口；如果服务商支持的是
-Responses 接口，则选择 `responses`。不要提交密钥。
-传输方式、重试和超时等进阶选项见[配置参考](docs/CONFIG_REFERENCE_zh.md)。
+接口格式须与服务商兼容，也支持 `responses`。不要提交密钥。
+`.env` 只放全局模型与传输设置；项目路径、解释器、数据和任务限制放在对应任务配置。
+[高级配置](docs/CONFIG_REFERENCE_zh.md)按需使用。
 
-### 3. 启动调研
-
-第一次尝试自己的任务不必先写配置文件：
+### 4. 启动自己的任务
 
 ```bash
 uv run simple-ar start
 ```
 
-按提示选择 `survey`、`bug_fix`、已准备好环境的 `reproduction` 或已有材料 `writing`，说明目标与材料/可修改范围。引导入口会把
-普通 TOML 保存到 `runs/assistant/`，再交给同一套可续跑的会话；
-加 `--prepare-only` 可以只保存输入，不调用模型或执行命令。它目前不是自由对话，
-也不提供任意论文复现或外部 Agent 执行。详见[引导配置](docs/CONFIG_REFERENCE_zh.md)。
+选择 `survey`、`bug_fix`、`reproduction`、`writing` 或 `data_analysis`。
+结构化引导收集相关输入，在 `runs/assistant/` 保存普通 TOML，再进入共享会话；
+不需要提前手写任务文件。`--prepare-only` 只保存配置，不执行或调用模型。
+目前不是自由多轮对话。
 
-也可以直接运行仓库中的调研案例：
+也可以直接运行模型驱动的综述案例：
 
 ```bash
 uv run simple-ar research-session --config examples/survey/research.toml
 ```
 
-内置任务调研小内存持续学习。尝试自己的问题时，修改配置中的 `[task].goal`，例如：
+该案例利用可获得的摘要和元数据调研小内存持续学习，**不下载全文、不训练模型**。
+修改 `[task].goal` 可换问题；本地论文或尽力获取全文的设置见使用与配置文档。
 
-```toml
-goal = "比较小内存持续学习中的回放方法，解释各自的权衡、证据局限与尚未解决的问题。"
-```
-
-这个案例会检索文献来源，阅读可获取的摘要和元数据，生成带参考来源的 Markdown 报告及审计结果。
-默认**不下载全文，也不运行训练**。具体输入范围见[调研案例说明](examples/survey/README.md)。
-
-**结果在哪里？** 终端会打印会话目录与交付文件路径。本例保存在 `runs/survey/<session>/`，
-打开输出中列出的 `report` 和 `report_audit` 文件即可。保留会话路径，后续可以继续运行。
-
-> **费用提示：** 这是真实 API 调用，会产生费用。累计 API 请求数与 token 用量默认不设上限，
-> 可以主动设置；它们与进程资源、科研轮次限制分别配置，见[配置参考](docs/CONFIG_REFERENCE_zh.md)。
-> 耗时取决于服务商与任务，不承诺固定几分钟完成。
+> **费用：** 模型调用实际计费；累计请求/token 上限可选，未设置时不限。
+> 进程时间、资源与科研轮次是不同限制。不承诺固定完成时间。
 
 ## 选择案例
 
-无需手写配置即可尝试自己的任务：`uv run simple-ar start`。当前支持 `survey`
-（调研报告）、`bug_fix`（隔离改码与验证）、准备好的 `reproduction`（论文结论检查）、`writing`
-（材料写作）和无需 API 的 `data_analysis`（描述统计/图）。询问输入后，在
-`runs/assistant/` 保存普通 TOML，再进入同一可恢复会话。`--prepare-only` 只准备输入，
-不调用 API。这是简短问答引导，尚非自由对话 Agent，也不包含任意论文复现。
-详见[引导设置](docs/CONFIG_REFERENCE_zh.md#引导设置)。
+一个目录对应一个案例的输入、配置和说明；运行产物进入 `runs/`。
+直接使用版本库中的配置，不必先复制到 `runs/`。
 
-每个示例目录对应一个完整案例，包含输入、配置与运行说明。实际运行产物统一放入 `runs/`。
-
-| 案例 | 适合尝试什么 | 准备条件 |
+| 案例 | 用途 | 准备 |
 | --- | --- | --- |
-| [文献调研](examples/survey/README.md) | 无需训练的首次研究会话 | 模型 API 与网络 |
-| [持续学习](examples/continual_learning/README.md) | Mammoth / CIFAR-100 上的研究改进 | 项目、数据、固定划分、训练环境与 GPU 预算 |
-| [Digits MLP](examples/code_task_digits_mlp/README.md) | 小型模型代码改进 | 自带项目；需要 NumPy 与 scikit-learn |
-| [多文件代码 Review](examples/code_task_medium_review/README.md) | 限定范围的改码与验证 | 自带项目；使用 Python 标准库 |
+| [数据曲线](examples/data-curves/README.md) | 已有坐标的折线/散点图 | 无 API、无训练；内置演示数据 |
+| [描述分析](examples/data-analysis/README.md) | 表格、描述性柱状图与重建 | 无 API；明确数据与行语义 |
+| [方向调研](examples/survey/README.md) | 无训练的调研报告 | 模型 API 与网络 |
+| [Conformal 有限复现](examples/conformal_reproduction/README.md) | 限定范围、适配构造的数值复现 | 按案例准备环境与协议；不是整篇复现或 benchmark 验收 |
+| [多文件代码审查](examples/code_task_medium_review/README.md) | 受限修改与验证 | 生成改动需模型 API；项目使用 Python 标准库 |
+| [Digits MLP](examples/code_task_digits_mlp/README.md) | 小型模型代码任务 | NumPy/scikit-learn；`uv sync --extra examples`，运行保留 extra |
+| [持续学习](examples/continual_learning/README.md) | 实验性研究改进 | 已准备 Mammoth/CIFAR-100、固定切分、环境与 GPU 预算 |
 
-后两个使用独立 `code-task`，不等于完整科研循环。运行传统机器学习案例时，使用
-`uv sync --extra examples` 安装额外依赖，并在运行时保留 `uv run --extra examples ...`。
+两个代码案例使用独立 `code-task`，不是完整科研循环。
+[TabM](examples/tabm_research/README.md)是已准备服务器上的诊断案例，不是新安装的快速体验。
+更多边界见[案例索引](examples/README.md)。
 
-[TabM 科研案例](examples/tabm_research/README.md)是实验性的预备服务器诊断，
-新克隆的仓库不会自动具备所需论文、项目、数据和训练环境。
+## 实际交付什么？
 
-持续学习案例可直接使用仓库内的配置；按 task TOML 声明的路径准备项目、数据和固定划分，
-不必复制 TOML。具体见[运行说明](examples/continual_learning/README.md)。
-目录约定与入口汇总见[示例索引](examples/README.md)。
+| 交付 | 查看哪些文件 | 如何接着使用 |
+| --- | --- | --- |
+| 数据分析 | `analysis.json`、`analysis.md`、输入副本与可编辑 SVG | 重建分析包，或将 JSON 交给写作 |
+| 报告 | `report.md`、`report_body.md`、`references.bib` 与另行打印的审计 | 对照原文检查主张，导出该报告 attempt 目录 |
+| ACM 工程 | `main.tex`、`body.tex`、文献、图与 `export.json` | 编辑/搬迁；请求编译后查看 `build.log` |
+| 代码/测量 | 修改后工作区、实际验证/运行日志、保存的结果 | 核对真实改动与评价条件，不只看总结 |
 
-## 换成自己的任务
+会话/attempt 的准确路径由终端打印。
+保留整个分析目录，搬迁后仍能找到复制的数据。
 
-从最接近的案例开始，描述**希望得到的结果**，而非自己填写内部阶段顺序。
-一份清楚的任务通常包含：
-
-1. **目标与交付：** 综述、验证过的代码修改、实验分析，或证据充分时的研究初稿。
-2. **已有资产：** 论文、项目路径、数据集或已有实验结果。
-3. **执行条件：** 准备好的解释器、验证或测量命令、可比较的评价条件、允许修改的范围。
-4. **限制与参与方式：** 计算资源、科研轮次、可选 API 上限，以及希望人工确认的决策。
-
-例如：
-
-> 改进这个已准备好的持续学习项目在小回放内存下的遗忘问题，保持数据划分与评价方式不变。
-> 与适用的基线比较，解释实测结果中的权衡。如果证据不支持改进，就交付实验分析，不要包装成成功论文。
-
-自然语言负责表达目标；配置仍需提供执行权限与资源约束，框架不会自动部署训练环境。
-自己的项目可把研究/CodeTask TOML 和任务文件放在同一目录：用 `{config_dir}` 引用案例文件，
-用显式绝对路径声明本机资源；`.env` 只放全局模型/API 设置，不注入任务资源。直接运行研究 TOML，
-无需复制案例配置。
-
-### 选择参与程度
-
-通过 `--interaction` 或 `[research].interaction` 选择：
-
-| 模式 | 参与方式 |
-| --- | --- |
-| `assisted` | 确认执行协议、科研选择与关键交付决定 |
-| `checkpoints` | 确认关键协议、方向和交付变化；允许同协议内的有限补测 |
-| `autonomous` | 在已配置的范围与限制内，自主选择可执行的下一步 |
-
-新 CLI 会话默认 `checkpoints`，案例配置可以另选模式；调研示例使用 `autonomous`。
-**所有模式都可能因关键事实、资产或权限缺失而暂停**，自动同意并不能补齐这些条件。
-
-## 查看结果与中断续跑
-
-Rich 终端输出展示当前动作、耗时、进度消息与最终产物位置。
-查看报告时，也应检查对应的测量和验证记录，不能用生成文字代替实际执行证据。
-
-解决服务商错误或其他阻塞后，可以续跑同一个调研会话。
-将下面的 `SESSION_PATH` 替换为终端打印的完整会话目录：
+例如，将完成的分析包接到写作，不重跑原任务：
 
 ```bash
-uv run simple-ar research-session --config examples/survey/research.toml --session-root "SESSION_PATH"
+uv run simple-ar start --kind writing --goal "解释这些结果与局限" --material "PATH_TO_ANALYSIS/analysis.json"
 ```
 
-其他案例使用原任务的配置。省略 `--session-root` 会新建会话；续跑保留历史与用量记录，
-不会重置已耗尽的预算。遇到待确认决定时，按终端显示的决定 ID 和答复命令操作。
-显式修订与追加额度的方法见 [CLI 参考](docs/CLI_REFERENCE_zh.md)。
+将 `PATH_TO_ANALYSIS` 换成打印的分析目录；写作需要模型。需要时单独导出该报告：
+
+```bash
+uv run simple-ar report-export --report-dir "PATH_TO_REPORT_ATTEMPT" --output runs/acm-draft
+```
+
+替换报告路径，并使用尚不存在的输出目录。导出需要 Pandoc，SVG 转换需要 `rsvg-convert`；
+安装 pdfLaTeX、BibTeX、acmart 后才能加 `--compile`。未编译工程不是已验证 PDF 或会议投稿。
+详见[导出说明](docs/CLI_REFERENCE_zh.md#simple-ar-report-export)。
+
+## 使用自己的材料
+
+先选择功能与交付，不必写内部阶段顺序：
+
+- **调研：** 问题、范围、参考论文、是否允许在线检索。
+- **代码：** 仓库、问题、允许文件与实际验证命令。
+- **数据：** 文件、字段、每行/每个值的含义与单位。
+- **写作：** 来源材料、报告或论文体草稿、可选参考论文。
+- **复现：** 具体论文结论、准备好的执行条件、固定评价与资源限制。
+
+写作可以接收已完成的描述分析包；任意 JSON 不能因此冒充已验证的实验结果。
+项目配置放在案例旁，支持的案例内路径使用 `{config_dir}`，机器资产使用明确路径。
+不会自动准备依赖环境或下载数据。详见[使用指南](docs/USAGE_zh.md)
+与[引导配置](docs/CONFIG_REFERENCE_zh.md#引导设置)。
+
+## 检查与续跑
+
+终端显示会话目录、交付路径与当前行动。报告应与实测记录、来源证据一起看。
+
+不改变输入的模型会话可使用保存的路径续跑：
+
+```bash
+uv run simple-ar research-session --session-root "SESSION_PATH" --model env
+```
+
+不要重新运行 `start` 来续跑。无模型的数据案例省略 `--model env`；
+没有 `--session-root` 会新建会话。续跑不会重置耗尽的预算，也不表示断线后后台继续。
+中断恢复前先确认原工作进程已停止；详见[CLI 参考](docs/CLI_REFERENCE_zh.md)。
+
+新 CLI 会话默认 `checkpoints`；`--interaction assisted`、`checkpoints`、
+`autonomous` 控制参与方式，案例可声明不同策略。
+任何模式都不能替代缺失事实、资产或权限。
 
 ## 框架如何工作
 
 ```text
 目标 + 材料 + 约束
         ↓
-   规划近期工作 ←──────────────┐
-        ↓                     │
-  调研 / 改码 / 实验           │
-        ↓                     │
-  保存证据与结果 ──────── 重新判断
-                              │
-                         交付或暂停
+   选择必要工作 ←────────────────┐
+        ↓                       │
+ 调研 / 改码 / 数据 / 执行 / 写作 │
+        ↓                       │
+ 保存证据与产物 ──────── 重新判断
+                                ↓
+                           交付或请求输入
 ```
 
-这些是共享能力，不是为每类任务各造一条完整流水线。
-CodeTask 负责限定范围的实现与验证，实验模块记录测量，报告模块组织已有证据，
-会话负责连接输入输出和有限轮次的后续工作。
-技术修复、科研修订与写作修订有不同目的，不应混为一种重试。
+一套共享会话管理 attempt、用量、产物与恢复；领域模块负责自身证据和执行。
+技术修复、科学修订与正文修订不是一种通用重试。
 
 ## 当前边界
 
-- **研究质量仍需审阅。** 运行可能得到负面或不确定结果；报告审计不等于科学正确性或发表质量认证。
-- **阅读深度取决于输入。** 仅摘要的调研不是全文综述，复杂 PDF 和不完整来源仍有局限。
-- **代码修改有明确范围。** 受控编辑与隔离工作区不等于通用无人值守重构能力，也不是安全沙箱。
-- **执行环境需要准备。** 项目依赖、数据与 GPU/服务器环境由使用者准备；不要让不熟悉的项目代码接触敏感文件或凭据。
-- **外部服务可能中断。** 网络、限流与模型输出错误可能导致暂停，处理原因后再续跑。
+- **阅读：** 保存原文检索和一次有界 Reader 补读可以定位遗漏；词面命中与有限片段不等于
+  全文语义核查。未知与未解查询要保留。
+- **写作：** 审阅、回读与修订仍依赖模型。引用/指标审计和可编译 PDF 不认证主张正确、
+  书目完整、学术风格或投稿质量。
+- **分析/图：** 支持描述性柱状图和数值坐标折线/散点图；该引导路径不涵盖任意统计推断、
+  热图或自由科研插画。
+- **执行：** 隔离副本与限定修改不是操作系统沙箱。需准备依赖和数据；
+  不要让不熟悉的代码接触敏感文件。
+- **服务与范围：** 服务商错误可导致暂停；外部 Agent 接入和通用自主复现准备仍延期。
+  不宣称取得正式 PaperBench 或 ScienceAgentBench 成绩。
 
 ## 文档
 
-| 文档 | 适合查阅什么 |
+| 文档 | 用途 |
 | --- | --- |
-| [使用指南](docs/USAGE_zh.md) | 使用流程、产物与排错 |
-| [配置参考](docs/CONFIG_REFERENCE_zh.md) | 模型设置、任务输入、预算与执行选项 |
-| [CLI 参考](docs/CLI_REFERENCE_zh.md) | 命令、续跑与决定答复 |
-| [工作流与产物](docs/WORKFLOWS_zh.md) | 执行边界与结果记录 |
-| [开发指南](docs/DEVELOPMENT_zh.md) | 能力扩展与内部接口 |
-| [更新记录](CHANGELOG_zh.md) | 功能变化与迁移提示 |
+| [使用指南](docs/USAGE_zh.md) | 选择功能、运行、查看产物与排错 |
+| [配置参考](docs/CONFIG_REFERENCE_zh.md) | 全局连接、任务输入和可选专家配置 |
+| [CLI 参考](docs/CLI_REFERENCE_zh.md) | 命令、续跑与显式修订 |
+| [工作流与产物](docs/WORKFLOWS_zh.md) | 证据、执行与保存结果的边界 |
+| [开发指南](docs/DEVELOPMENT_zh.md) | 模块职责与工程契约 |
+| [更新记录](CHANGELOG_zh.md) | 已实现变化与迁移提示 |
 
 ## 参与贡献与致谢
 
-欢迎问题反馈、可复现的 bug 报告与实际案例。项目许可证确定前，
-代码贡献请先沟通，再提交 PR。
-反馈时请附上命令、相关配置和诊断信息，**先移除 API 密钥、登录凭据与私有数据**。
-报告质量、案例和文档的改进，与代码贡献同样重要。
+欢迎问题反馈与可复现案例；许可证确定前，代码贡献请先沟通再提 PR。
+附命令、相关配置与诊断信息时，**移除凭据和私有数据**。
 
-项目受到 [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw) 启发，
-同时坚持紧凑、可检查的实现。我们希望做到：
-**轻量高效、证据可核查、结构清晰、便于维护与扩展。**
+工作流与呈现参考包括 [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw)、
+[OpenResearch](https://github.com/alphaXiv/OpenResearch) 与
+[ARIS](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep)。
+项目保留自身紧凑、基于文件的运行底座与受限原生功能。报告、案例与使用体验同样重要。

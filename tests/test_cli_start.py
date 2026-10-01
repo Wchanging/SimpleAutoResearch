@@ -15,6 +15,54 @@ from simple_ar.code_task.runtime.config import load_code_task_init_options, load
 
 
 class StartTests(unittest.TestCase):
+    def test_default_writing_template_matches_supplied_material_not_failed_experiment(self):
+        from simple_ar.report.schema import ReportRuntimeConfig
+        from simple_ar.report.templates import load_report_template_bundle
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            material = root / "notes.md"
+            material.write_text("# Notes\nSupplied observations, not a locally executed experiment.\n", encoding="utf-8")
+            config = self.prepare("--kind", "writing", "--goal", "Explain notes", "--material", str(material),
+                                  "--output-root", str(root / "runs"), "--prepare-only")
+            self.assertEqual(research_defaults(["research-session", "--config", str(config)])["report_template"], "material_report")
+            for name in ("", "auto", "material_report"):
+                bundle = load_report_template_bundle(report_mode="supplied_materials", config=ReportRuntimeConfig(template=name))
+                self.assertEqual(bundle.name, "material_report")
+                self.assertIn("## Findings", bundle.template_markdown)
+                self.assertTrue(bundle.criteria_markdown.strip())
+            # Explicit existing choices and experimental fallback retain their meaning.
+            self.assertEqual(load_report_template_bundle(report_mode="supplied_materials",
+                config=ReportRuntimeConfig(template="analysis_report")).name, "analysis_report")
+            self.assertEqual(load_report_template_bundle(report_mode="experiment",
+                config=ReportRuntimeConfig(template="auto")).name, "experiment")
+
+    def test_data_configuration_and_resume_hint_do_not_require_a_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "data.csv"
+            source.write_text("value\n1\n2\n", encoding="utf-8")
+            args = build_parser().parse_args(["start", "--kind", "data_analysis", "--goal", "Describe",
+                "--data-file", str(source), "--value-column", "value", "--observation-unit", "one row",
+                "--model", "unused-model", "--output-root", str(root / "runs"), "--prepare-only"])
+            with patch("sys.stdin.isatty", return_value=False), patch("simple_ar.cli.start.print_line") as output:
+                config = prepare_start(args)
+            self.assertEqual(research_defaults(["research-session", "--config", str(config)])["model"], "")
+            resume_hint = next(call.args[0] for call in output.call_args_list if "resume its printed path" in call.args[0])
+            self.assertNotIn("--model", resume_hint)
+            self.assertIn("research-session --session-root PATH", resume_hint)
+
+    def test_resume_hint_preserves_the_selected_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for model in ("env", "custom-model"):
+                with self.subTest(model=model):
+                    args = build_parser().parse_args(["start", "--kind", "survey", "--goal", "Review",
+                        "--sources", "search", "--model", model, "--output-root", directory, "--prepare-only"])
+                    with patch("sys.stdin.isatty", return_value=False), patch("simple_ar.cli.start.print_line") as output:
+                        config = prepare_start(args)
+                    self.assertEqual(research_defaults(["research-session", "--config", str(config)])["model"], model)
+                    resume_hint = next(call.args[0] for call in output.call_args_list if "resume its printed path" in call.args[0])
+                    self.assertIn(f"--model {model}", resume_hint)
+
     def test_data_setup_reports_columns_and_rejects_bad_shape_before_saving(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

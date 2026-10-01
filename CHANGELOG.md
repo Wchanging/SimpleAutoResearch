@@ -2,9 +2,38 @@
 
 [中文版本](CHANGELOG_zh.md)
 
-This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
+This file records implemented, user-visible changes in reverse chronological order. Usage and technical references live in `docs/`; future plans and private acceptance records are not release claims.
 
 ## Unreleased (source-visible preview)
+
+### 2026-10-01 — Native analysis, reading and delivery
+
+**Added**
+
+- Guided `start` supports survey, bounded bug repair, prepared reproduction, material-based writing and descriptive data analysis. All save ordinary task configuration and use the existing session; this is structured setup, not free-form conversation.
+- CSV/TSV and JSON-record analysis can deliver copied inputs, descriptive summaries or supplied values, editable SVGs and rebuilding instructions without model access. Completed analysis packages can feed writing without rerunning an experiment.
+- Numeric-coordinate line/scatter plots complement descriptive bars. Lines sort unique numeric x values and break at missing y values; scatter plots retain duplicate x values. Neither path silently samples, aggregates, smooths, fits a model or invents uncertainty.
+
+**Changed and fixed**
+
+- Supplied-material writing defaults to `material_report`, not the failed-experiment analysis template. Section goals distinguish supplied assertions and checked computation without requiring local experiment artifacts; explicit templates and started automatic selections retain their meaning on resume.
+- Guided data-analysis configuration records no model, and resume hints omit it. Model-backed hints preserve the selected model instead of always suggesting `env`.
+- The console script resolves `simple_ar.cli.main:main` directly, removing an import-order-dependent package re-export. Python callers should import the function from `simple_ar.cli.main`; rebuild/reinstall after this entry-point change.
+- Reader can request one saved-source follow-up per paper, with up to two queries sharing six bounded windows. Follow-up evidence and unresolved questions reach synthesis and writing; superseded notes remain history rather than current evidence.
+- Source retrieval/windowing has one owner in `research/store`. Explicit figure/table captions, distinct matches and known source positions guide excerpts; unknown positions and unmatched queries are not treated as proof of absence.
+- Writer and Reviewer share section responsibilities and bounded adopted prose. Revision verification receives the original finding, instructions, draft context and source evidence; it can remove unsupported or repetitive text instead of preserving old length.
+- Whole-document editing keeps at most two section targets, each using the existing `max_review_iterations` allowance. Rejected candidates consume allowance; saved candidate/context and iteration history prevent a resume from resetting it.
+- Existing DOI, publication date, author coverage and saved front matter reach report references, BibTeX and citation maps. A filename-only local title may use a reading proposal only when it occurs in the same document's saved front matter. This is display provenance, not bibliographic identity verification.
+- Guided data checks reuse the ingestion parser; data rendering belongs to `result_analysis`, with thin report compatibility imports. No parallel runtime, memory database or retrieval index was added.
+- English/Chinese homepages and guides now distinguish available functions, experimental research improvement and remaining quality limits. The no-API data example is the first quick start; cases run directly from `examples/`.
+
+**Scope and continuation**
+
+- Source-only title recovery requires saved front matter; old bundles without it remain incomplete. No metadata is guessed or old run artifacts rewritten.
+- Reader follow-up has no per-paper API interruption checkpoint; a failed read attempt may repeat reading calls. Writing has supported saved-section/candidate recovery, not a promise of background execution after disconnect.
+- Targeted server regression, clean-install checks, fixed-source model replays and a real data→writing→ACM chain support these changes. An online survey also completed, but independent inspection found methodological-scope ambiguity; online research quality, complete semantic review, submission-quality prose and formal benchmark performance remain unaccepted. A successful audit or TeX build does not certify them.
+
+### Earlier preview changes
 
 - A model that abstains from selecting an otherwise design-ready idea now gets one bounded review of the pre-experiment decision boundary. Missing future measurements alone are not a reason to block hypothesis design; a continued abstention or invalid review is preserved rather than replaced with an automatic candidate choice. The V2.9 preview quickstart now checks out its actual branch.
 

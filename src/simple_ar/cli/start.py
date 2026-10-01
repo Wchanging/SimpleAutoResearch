@@ -60,7 +60,7 @@ def add_start_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--goal", help="Describe the question or desired fix in your own words.")
     parser.add_argument("--document", action="append", default=[], type=Path)
     parser.add_argument("--material", action="append", default=[], type=Path, help="Writing: Markdown/text/PDF or a table_analysis.v1 analysis.json with copied data; not a bibliographic paper.")
-    parser.add_argument("--template", help="Writing: built-in report template or Markdown template path; default analysis_report. Use experiment for an honest paper-style draft.")
+    parser.add_argument("--template", help="Writing: built-in report template or Markdown template path; default material_report. Use experiment for an honest paper-style draft.")
     parser.add_argument("--sources", choices=("materials", "search"), help="Use only supplied documents, or allow online search.")
     parser.add_argument("--fulltext", action="store_true", help="Allow remote full-text retrieval and PDF downloads for an online survey; otherwise read available abstracts/local materials.")
     parser.add_argument("--max-cited-sources", type=int, help="Optional maximum number of distinct sources cited in the final report.")
@@ -216,7 +216,8 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
     allowed = list(args.allow)
     sources = args.sources
     reproduction_rows: list[str] = []
-    writing_template = args.template or "analysis_report"
+    from simple_ar.report.templates import MATERIAL_REPORT_TEMPLATE
+    writing_template = args.template or MATERIAL_REPORT_TEMPLATE
     if kind == "writing":
         from simple_ar.report.schema import ReportRuntimeConfig
         from simple_ar.report.templates import ReportTemplateError, load_report_template_bundle
@@ -287,9 +288,10 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
     root = new_research_session_root(args.output_root, goal)
     config = root / "research.toml"
     outputs = {"survey": ["report"], "bug_fix": ["bug_fix"], "reproduction": ["experiments", "report"], "writing": ["report"], "data_analysis": ["data_analysis"]}
+    model = "" if kind == "data_analysis" else args.model
     rows = ["[task]", f"goal = {_quote(goal)}", f"kind = {_quote(kind)}",
             f"outputs = {_array(outputs[kind])}",
-            'output_root = "sessions"', "", "[model]", f"name = {_quote(args.model)}", "",
+            'output_root = "sessions"', "", "[model]", f"name = {_quote(model)}", "",
             "[research]", f"interaction = {_quote(args.interaction)}"]
     if kind in {"survey", "reproduction", "writing"}:
         rows.extend(_literature_rows(args, sources, documents))
@@ -316,7 +318,11 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
     research_defaults(["research-session", "--config", str(config)])
     print_line(f"Saved task configuration: {config}")
     print_line("Run: " + _command(["simple-ar", "research-session", "--config", str(config)]))
-    print_line("After a session starts, resume its printed path with research-session --session-root PATH --model env; do not rerun this setup to resume.")
+    resume = ["simple-ar", "research-session", "--session-root", "PATH"]
+    if model:
+        resume.extend(["--model", model])
+    print_line("After a session starts, resume its printed path with " + _command(resume) +
+               "; replace PATH with that session path, and do not rerun this setup to resume.")
     if args.prepare_only:
         return config
     if not args.yes:

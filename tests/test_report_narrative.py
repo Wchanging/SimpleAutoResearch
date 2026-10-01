@@ -16,6 +16,15 @@ from simple_ar.report.tool_gateway import ReportToolGateway
 
 
 class NarrativeTests(unittest.TestCase):
+    def test_supplied_material_results_are_not_restricted_to_local_experiment_artifacts(self):
+        context = ReportContext(topic="Explain an existing draft", report_mode="supplied_materials")
+        template = load_report_template_bundle(report_mode=context.report_mode,
+            config=ReportRuntimeConfig(template="experiment"))
+        memory = initialize_report_memory(context=context, template=template)
+        results = next(section for section in memory.section_plan if section.heading == "Results")
+        self.assertIn("Use supplied papers and materials", results.goal)
+        self.assertNotIn("Use only recorded metrics and experiment artifacts", results.goal)
+
     def test_material_writing_does_not_starve_results_behind_many_papers(self):
         handles = [SourceHandle(handle=f"paper:{i}", kind="paper", citation_key=f"P{i}") for i in range(10)]
         handles.extend([SourceHandle(handle="material:results", kind="material"),
