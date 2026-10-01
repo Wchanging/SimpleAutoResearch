@@ -1,14 +1,47 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 from simple_ar.report.schema import ReportSectionDraft
 
 
 def normalize_report_markdown(markdown: str) -> str:
     """Normalize final Markdown without changing report semantics."""
-    lines = [line.rstrip() for line in markdown.strip().splitlines()]
-    return "\n".join(lines).strip() + "\n"
+    lines = [line if code else line.rstrip() for line, _, code in _markdown_lines(markdown)]
+    return "\n".join(lines).strip("\r\n") + "\n"
+
+
+def _markdown_lines(markdown: str) -> Iterator[tuple[str, re.Match[str] | None, bool]]:
+    """Share ATX/fence boundaries; heading-like code is not document structure."""
+    fence_char, fence_size = '', 0
+    for line in markdown.splitlines():
+        if fence_char:
+            closing = re.fullmatch(r" {0,3}([`~]+)[ \t]*", line)
+            if closing and set(closing[1]) == {fence_char} and len(closing[1]) >= fence_size:
+                fence_char, fence_size = '', 0
+            yield line, None, True
+            continue
+        opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if opening and not (opening[1][0] == '`' and '`' in opening[2]):
+            fence_char, fence_size = opening[1][0], len(opening[1])
+            yield line, None, True
+            continue
+        yield line, re.match(r"^ {0,3}(#{1,6})[ \t]+(.+?)\s*$", line), False
+
+
+def _heading_title(title: str) -> str:
+    return re.sub(r"\s+#+\s*$", '', title).strip()
+
+
+def strip_report_references(markdown: str) -> str:
+    """Remove only a document-level References heading outside fenced code."""
+    kept = []
+    for line, match, _ in _markdown_lines(markdown):
+        if match and len(match[1]) <= 2 and _heading_title(match[2]).casefold() == 'references':
+            break
+        kept.append(line)
+    return normalize_report_markdown("\n".join(kept))
 
 
 def apply_section_numbering(
@@ -37,22 +70,13 @@ def apply_section_numbering(
             return normalize_report_markdown(markdown)
 
     counters = [0] * 6
-    in_fence = False
     lines: list[str] = []
-    for line in markdown.splitlines():
-        if line.strip().startswith("```"):
-            in_fence = not in_fence
-            lines.append(line.rstrip())
-            continue
-        if in_fence:
-            lines.append(line.rstrip())
-            continue
-        match = re.match(r"^(#{2,6})\s+(.+?)\s*$", line)
-        if not match:
-            lines.append(line.rstrip())
+    for line, match, _ in _markdown_lines(markdown):
+        if not match or len(match[1]) == 1:
+            lines.append(line)
             continue
         level = len(match.group(1))
-        title = _strip_heading_number(match.group(2))
+        title = _strip_heading_number(_heading_title(match.group(2)))
         if _is_unnumbered_academic_heading(title):
             lines.append(f"{'#' * level} {title}")
             continue
@@ -87,35 +111,29 @@ def assemble_report_sections(*, title: str, sections: list[ReportSectionDraft]) 
     """Assemble section drafts into one final Markdown body without references."""
     parts = [f"# {title.strip() or 'Research Report'}"]
     for section in sections:
-        body = _section_body(section.draft_markdown)
+        body = _section_body(section.draft_markdown, heading=section.heading)
         if body:
             parts.append(f"## {section.heading}\n\n{body}")
     return normalize_report_markdown("\n\n".join(parts))
 
 
-def _section_body(markdown: str) -> str:
-    text = markdown.strip()
-    if not text:
-        return ""
-    lines = text.splitlines()
-    while lines and lines[0].strip().startswith("#"):
+def _section_body(markdown: str, *, heading: str) -> str:
+    lines = markdown.splitlines()
+    while lines and not lines[0].strip():
         lines.pop(0)
+    if lines:
+        _, first, _ = next(_markdown_lines(lines[0]))
+        if first and len(first[1]) <= 2 and (
+            _heading_title(first[2]).casefold() == _heading_title(heading).casefold()
+        ):
+            lines.pop(0)
         while lines and not lines[0].strip():
             lines.pop(0)
-    body = "\n".join(lines).strip()
-    if "## References" in body:
-        body = body.split("## References", maxsplit=1)[0].strip()
-    return _demote_body_headings(body)
+    return _demote_body_headings(strip_report_references("\n".join(lines)))
 
 
 def _demote_body_headings(markdown: str) -> str:
     """Keep section-local headings below the assembled report section level."""
 
-    def replace(match: re.Match[str]) -> str:
-        hashes = match.group(1)
-        title = match.group(2)
-        if len(hashes) <= 2:
-            return f"### {title}"
-        return match.group(0)
-
-    return re.sub(r"(?m)^(#{1,6})\s+(.+\S)\s*$", replace, markdown).strip()
+    return "\n".join(f"### {match[2]}" if match and len(match[1]) <= 2 else line
+                     for line, match, _ in _markdown_lines(markdown)).strip("\r\n")

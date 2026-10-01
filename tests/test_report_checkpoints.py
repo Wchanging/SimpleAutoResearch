@@ -25,6 +25,43 @@ from simple_ar.report.writing import ReportWritingRequest, run_report_writing_ca
 
 
 class ReportCheckpointTests(unittest.TestCase):
+    def test_final_checkpoint_matches_reconciled_memory_without_document_review(self):
+        # A single section cannot enter whole-document review, even when enabled.
+        for document_review in (False, True):
+            with self.subTest(document_review=document_review):
+                context = ReportContext(topic="Bounded result", report_mode="experiment")
+                memory = ReportMemory(section_plan=[ReportSectionPlan(
+                    section_id="results", heading="Results", goal="Describe observations")])
+                config = ReportRuntimeConfig(document_review=document_review,
+                                             max_review_iterations=1)
+                saved, labels = [], []
+
+                class Client:
+                    def ask_json(self, *args, label="", **kwargs):
+                        labels.append(label)
+                        if "reviewer" in label:
+                            return {"verdict": "pass", "findings": []} if "round-2" in label else {
+                                "verdict": "revise_required", "findings": [{
+                                    "finding_id": "scope", "type": "unsupported_claim",
+                                    "severity": "major", "section_id": "results",
+                                    "message": "The claim exceeds the observations."}]}
+                        return {"section_id": "results", "heading": "Results",
+                                "draft_markdown": "Only this setting was observed."
+                                if "reviser" in label else "All settings improve."}
+
+                kwargs = dict(client=Client(), context=context, memory=memory, config=config,
+                    template=load_report_template_bundle(report_mode="experiment", config=config),
+                    gateway=ReportToolGateway(context))
+                result = run_report_agent(**kwargs, checkpoint_sink=saved.append)
+                self.assertEqual(result.memory.reviewer_findings, [])
+                self.assertEqual(saved[-1]["memory"], result.memory.model_dump(mode="json"))
+                self.assertTrue(saved[-1]["reviewer_findings"])
+                before = len(labels)
+                resumed = run_report_agent(**kwargs, completed_checkpoint=saved[-1])
+                self.assertEqual(resumed.report_body, result.report_body)
+                self.assertEqual(resumed.memory, result.memory)
+                self.assertEqual(len(labels), before)
+
     def test_document_review_refuses_oversized_evidence_before_model_call(self):
         config = ReportRuntimeConfig(document_review=True)
         template = load_report_template_bundle(report_mode="survey", config=config)

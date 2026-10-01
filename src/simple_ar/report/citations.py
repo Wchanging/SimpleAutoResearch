@@ -5,6 +5,7 @@ from typing import Any
 
 from simple_ar.literature.models import Paper, bibliographic_details
 from simple_ar.literature.verify import find_citation_ids
+from simple_ar.report.assembler import strip_report_references
 
 
 _CITATION_PATTERN = r"(?<![A-Za-z0-9_])@([A-Za-z0-9_.:-]+)"
@@ -42,14 +43,8 @@ def references_markdown(
 
 
 def strip_references_section(markdown: str) -> str:
-    """Remove a model-written References section before appending verified refs."""
-    lines = markdown.strip().splitlines()
-    kept: list[str] = []
-    for line in lines:
-        if line.strip().lower().lstrip("#").strip() == "references":
-            break
-        kept.append(line)
-    return "\n".join(kept).strip() + "\n"
+    """Use the shared Markdown boundary before appending recorded references."""
+    return strip_report_references(markdown)
 
 
 def append_references_section(

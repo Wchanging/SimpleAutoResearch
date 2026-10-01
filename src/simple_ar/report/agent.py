@@ -426,8 +426,11 @@ def run_report_agent(
                 checkpoint=checkpoint, gateway=gateway, all_tool_results=all_tool_results,
             )
             document_review_done = True
-            checkpoint()
         current.claims_evidence_matrix = adopted_claims(memory.claims_evidence_matrix, sections)
+        # Final section-review reconciliation also matters when whole-document
+        # review is disabled or inapplicable. Persist the memory we return,
+        # not the earlier append-only history from the last section checkpoint.
+        checkpoint()
         body = assemble_report_sections(title=context.topic, sections=_final_sequence(current.section_plan, sections))
         return AgentReportResult(
             report_body=body,

@@ -685,6 +685,15 @@ See the capability entrypoints above for typed inputs and outputs.
 
 ## Artifact Ownership Summary
 
+Report assembly owns heading presentation and the final reference list, not the
+meaning of section prose. A distinct leading subsection is retained; only an exact
+duplicate of its section label is removed. Fenced-code headings and literal
+`References` text are not document boundaries. Citation cleanup and numbering use
+the same boundary rules. Final writing checkpoints save current unresolved
+findings separately from historical review records, including when whole-document
+review is off. Reassembly does not rerun reading, models or experiments and does
+not independently certify the content.
+
 - `session_manifest.json` records session and attempt state; the application
   chooses research actions, and the shared budget ledger records usage.
 - Each `attempts/` directory owns its declared artifacts. References, rather

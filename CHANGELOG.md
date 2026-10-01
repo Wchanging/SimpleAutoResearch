@@ -16,6 +16,8 @@ This file records implemented, user-visible changes in reverse chronological ord
 
 **Changed and fixed**
 
+- Report assembly preserves distinct leading subsections and heading-like text inside fenced code. Citation cleanup and section numbering share the same Markdown boundary rules; only duplicated section labels and real document-level reference sections are removed.
+- Final writing checkpoints now save reconciled review memory even when whole-document review is disabled or a report has only one section. Historical findings remain available without reappearing as unresolved current work on recovery.
 - Report findings separate impact severity from the requested action (advice, correction or source verification). Verification-only requests can fetch and rejudge before rewriting; unresolved required work remains visible to audit and uses the existing correction/tool allowances. Historical findings retain their previous policy.
 - Interactive `start` presents a numbered bilingual function menu with preparation requirements; canonical `--kind` values and saved configuration remain unchanged.
 - Reading notes can retain bounded claim scopes (object, property, conditions and evidence kind) with source-owned passage references. Synthesis, Writer and Reviewer consume that scope; old notes remain readable. These are model interpretations, not semantic certificates.
