@@ -47,7 +47,7 @@ def report_tool_specs() -> list[ReportToolSpec]:
     return [
         _spec(
             "get_paper_brief",
-            "Return current-run paper metadata and paper-brief handles for a paper id.",
+            "Return recorded paper metadata and saved source front matter (title/byline/version text) when retained. Text and metadata are separate; this does not certify identity or a complete byline.",
             GetPaperBriefArgs,
         ),
         _spec(

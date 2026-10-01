@@ -237,6 +237,7 @@ def provided_materials_result(records: Iterable[DocumentRecord]) -> SearchResult
         abstract=record.abstract, url=record.url or "",
         published=record.published, source=record.source,
         source_id=record.source_id or record.document_id, doi=record.doi,
+        bibliographic_notes=list(record.metadata.get("bibliographic_notes", [])),
     ) for record in records)
     return SearchResult(
         status="completed" if papers else "empty",

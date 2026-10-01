@@ -48,7 +48,12 @@ not silently translated to the canonical application.
 
 `start --kind data_analysis --goal "Describe results" --data-file results.csv --value-column score --observation-unit "one run" --yes`
 selects values explicitly. Optional `--group-column method` groups observations; repeat `--value-column`
-for separate metrics. `--data-mode values` keeps precomputed summaries unchanged and requires unique labels.
+for separate metrics. For bars, `--data-mode values` keeps precomputed summaries unchanged and requires unique labels.
+`--data-plot line|scatter --data-mode values --x-column step` instead plots numeric
+coordinates without a group column. `--x-unit` records the x unit. Lines require
+unique x and break at missing y; scatter retains duplicate x. No fitted trend or
+aggregation is inferred. `--data-max-points 10000` limits rows per coordinate figure
+and can be adjusted explicitly; no sampling. See the [workflow](WORKFLOWS.md).
 `--data-missing reject|omit` defaults to reject; `--value-unit` records declared units;
 `--figure-width column|wide` defaults wide. Physical caps: `--data-max-mb 20`, `--data-max-figures 100`;
 overflow fails rather than silently dropping data. These options also work in `research-session`

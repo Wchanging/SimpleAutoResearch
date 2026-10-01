@@ -20,7 +20,10 @@
 
 `start --kind data_analysis --goal "描述结果" --data-file results.csv --value-column score --observation-unit "一次运行" --yes`
 明确选数值列。`--group-column method` 可选分组；`--value-column` 可重复，指标分别绘图。
-`--data-mode values` 保留已有汇总值，不再次平均，且要求唯一标签；默认 `observations` 做描述统计。
+条形图的 `--data-mode values` 保留已有汇总值，不再次平均，且要求唯一标签；默认 `observations` 做描述统计。
+`--data-plot line|scatter --data-mode values --x-column step` 改为数值坐标图，不设分组列；
+`--x-unit` 记录横轴单位。折线要求 x 唯一、缺失 y 断线，散点保留重复 x，不聚合、不拟合。
+`--data-max-points 10000` 为每图行数的可调整物理上限，超出不抽样。详见[工作流](WORKFLOWS_zh.md)。
 `--data-missing reject|omit` 默认 reject；`--value-unit` 记录单位；`--figure-width column|wide` 默认 wide。
 物理上限 `--data-max-mb 20`、`--data-max-figures 100`，超出报错而非丢数据，可明确调整。
 高级入口同样支持这些参数及 `--task-kind data_analysis`、输出 `data_analysis`。

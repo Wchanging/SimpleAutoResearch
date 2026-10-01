@@ -20,8 +20,11 @@ uv run simple-ar start --kind data_analysis --goal "Describe my measurements" \
 ```
 
 Explicit columns and row semantics are required; IDs and metrics are not guessed.
+Setup checks bounded input shape and selected column names before saving task files.
+Unknown columns report the available names. This preview does not compute measurements
+or certify numeric values; ingestion validates values and freezes the actual bytes.
 `observations` (default) calculates count, mean and sample standard deviation per group/column.
-For existing means or other summaries use `--data-mode values`: labels must be unique,
+For bars of existing means or other summaries use `--data-mode values`: labels must be unique,
 values are not averaged again and error bars are not inferred. `--data-missing omit`
 explicitly allows per-column omission with counts; otherwise missing values fail, not become zero.
 Nonfinite/nonnumeric values, duplicate columns, malformed/empty input and nested JSON fail explicitly.
@@ -35,6 +38,16 @@ sensitivity before sharing. Physical limits default to 20 MiB input and 100 SVG 
 Separate metrics have separate axes; categories are paginated without dropping data.
 `--figure-width column|wide` uses generic 3.5/7-inch targets, not venue-specific dimensions.
 Visual checks are initially `not_performed`, separate from numeric computation.
+
+For numeric curves or coordinate pairs, use `--data-mode values --data-plot line|scatter
+--x-column step` instead of a grouping column. Repeat `--value-column` for separate
+axes; `--x-unit` records the declared x unit. Lines sort by numeric x and require
+unique x coordinates; scatter retains duplicate x values. Missing x fails;
+explicit `--data-missing omit` keeps missing y records and breaks lines at those gaps.
+There is no smoothing, regression, replicate aggregation or guessed error bar.
+`--data-max-points` defaults to 10000 rows per coordinate figure and is adjustable;
+overflow fails without sampling. The same copied input, resume and rebuilding apply.
+See the complete [coordinate case](../examples/data-curves/README.md).
 
 Resume with `research-session --session-root PATH` even if the original data changes/disappears;
 completed input snapshots are reused. Copy the completed analysis directory, then rebuild figures
@@ -63,6 +76,9 @@ a separate bibliographic paper. Writing extracts and persists the supplied text,
 uses the shared Writer, Reviewer, assembly and audit capabilities. It does not search,
 create innovation candidates, execute experiments or manufacture an empty synthesis.
 Inputs are Markdown/text/PDF or a completed `table_analysis.v1` analysis package.
+Template section bodies supply the corresponding section's writing requirements,
+not just its heading. Material-based writing keeps supplied material visible alongside
+papers within the source budget; more references do not replace the task's own results.
 For data-backed writing, pass the analysis task's printed `analysis.json` path
 to `--material` (optionally alongside notes). The system checks the saved records
 against the package-local copied data, freezes that package and regenerates its
@@ -113,6 +129,28 @@ gap, including when backtracking is disabled or exhausted. Section and document 
 use the existing tool/revision budgets; recent tool results take priority in bounded prompts,
 with omissions recorded. Resume reconstructs consumed tool calls from saved results instead
 of resetting the allowance. No-request reviews do not gain an extra model call.
+Writer and section Reviewer share a bounded view of adopted section prose and the
+frozen section responsibilities. Format recovery retains this view; resume reconstructs
+it from saved sections rather than another summary store. Excerpts include head/tail
+positions and omitted character counts. They help coherence, not source verification.
+The claim view follows current adopted drafts, preserving separate declarations even
+when two sections reuse a claim id; rejected revisions do not replace current prose.
+Revision verification receives the original findings, requested changes and a bounded
+view of the previous draft, alongside source evidence. Removing unsupported or repeated
+prose is allowed; preserving supported facts and qualifications matters more than preserving
+word count. Checkpoints retain correction requests and editor candidates: resume reuses
+them and consumed correction/source-call allowances rather than generating a fresh allowance.
+These checks are model-assisted, not certification of every important claim or paper quality.
+Known publication dates, DOI and author-list coverage notes survive document handoff
+and share one metadata projection for writing, references, BibTeX and `citation_map.json`.
+Missing details are displayed rather than inferred. Provider metadata is not independent
+identity/version verification: same-title records and complete-looking fields can still be wrong.
+Extracted text before the first recognized heading is retained as front matter;
+Bounded chunk budgets prioritize body evidence and may leave front matter out of indexed chunks.
+Reading a byline does not automatically replace metadata.
+`get_paper_brief` returns recorded metadata alongside saved front matter, even if
+the indexed chunk cap omitted that header. It does not open live file paths or
+guess missing headers in old saved bundles; truncation and missing text stay explicit.
 Reading notes receive the user task focus separately from source evidence. Default excerpts
 retain an ingest-sized chunk; smaller windows mark further clipping. Note identities and
 declared references are checked against their owning document. This prevents misattribution,
@@ -596,6 +634,18 @@ IDs and an explicit `semantic_verification = not_performed` marker. A match
 helps locate evidence; it does not prove a claim or establish that no contrary
 passage exists. Unmatched or differently worded questions still need targeted
 source reading, and source acquisition/extraction failures remain limitations.
+
+Model notes may request up to two specific followup queries. The reader searches
+only that source's retained text, with one round and at most six bounded windows
+per document (including neighbors). New text permits one note-revision call;
+different hits share the window budget across questions, with omitted candidates
+recorded rather than interpreted as absence from the source.
+no request or no new window adds no call. Queries, original excerpts and unresolved
+questions reach synthesis and writing; superseded interpretations remain in the
+read artifact, not the current synthesis input. No match is not evidence of
+absence. Unresolved requests keep the result partial, without recursive searches
+or downloads. Recovery uses the existing read attempt, not a new per-paper API
+checkpoint; a failed read may repeat its calls when resumed.
 
 LLM-generated ideas and local novelty checks are research suggestions, not proof
 of originality. Offline fixture output is not model-backed scientific analysis.

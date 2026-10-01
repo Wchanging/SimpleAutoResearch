@@ -641,7 +641,8 @@ def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
             "paper_notes",
             "Model Reading Notes",
             ("paper_id", "title", "method", "key_claims", "limitations", "open_questions",
-             "evidence_refs", "confidence", "relation_to_topic", "synthesis_hint"),
+             "evidence_refs", "confidence", "relation_to_topic", "synthesis_hint",
+             "reading_coverage", "reading_followup"),
         ),
     ):
         rows = pack.get(key)
@@ -692,6 +693,11 @@ def _generation_mode(value: object) -> Literal["deterministic", "llm"]:
 def _diagnostics(pack: Mapping[str, Any], ideas: list[IdeaCandidate], *, require_ideas: bool = True) -> list[str]:
     """Report evidence gaps without blocking conservative synthesis."""
     diagnostics: list[str] = []
+    pending = [str(row.get("paper_id") or "unknown") for row in _mapping_rows(pack.get("paper_notes"))
+               if isinstance(row.get("reading_followup"), Mapping)
+               and row["reading_followup"].get("pending_queries")]
+    if pending:
+        diagnostics.append("Unresolved source-reading questions remain: " + ", ".join(pending[:5]) + ".")
     # Facet gaps remain visible in ``gap_summary`` and the evidence pack.  They
     # are not, by themselves, a reason to block a bounded experiment: a small
     # user-provided baseline may intentionally test one method before the

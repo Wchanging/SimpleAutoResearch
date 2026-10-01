@@ -25,6 +25,7 @@ from simple_ar.research.contracts import (
 )
 from simple_ar.research.documents.ingest import DocumentBundle
 from simple_ar.research.store.chunking import DEFAULT_CHUNK_CHARS
+from simple_ar.research.store.retrieval import order_source_chunks, rank_source_chunks, source_chunk_views, source_query_terms
 from simple_ar.research.evidence.cards import (
     build_code_links,
     build_dataset_cards,
@@ -196,8 +197,8 @@ class ReadResult:
         """Return cards and source locations for an explicit downstream handoff.
 
         The handoff keeps document identity and evidence locations, but does
-        not duplicate chunk text.  Callers can therefore persist it beside an
-        attempt without turning the read result into a second document store.
+        not duplicate the source bundle. Notes may retain bounded query
+        excerpts and their locations to explain a source-driven correction.
         """
         return {
             "schema_version": "read_result.v1",
@@ -296,16 +297,14 @@ def read_documents(request: ReadRequest) -> ReadResult:
             screening_decisions = tuple(decisions)
             bundle = _bundle_for_screening(bundle, decisions)
         if bundle.records:
+            snippets = {record.document_id: format_bundle_evidence_snippets(
+                bundle, document_id=record.document_id,
+                focus="\n".join((request.topic, request.problem_markdown)),
+            ) for record in bundle.records}
             notes = read_paper_notes_with_llm(
                 client,
                 papers=[record.to_row() for record in bundle.records],
-                evidence_snippets_by_document={
-                    record.document_id: format_bundle_evidence_snippets(
-                        bundle, document_id=record.document_id,
-                        focus="\n".join((request.topic, request.problem_markdown)),
-                    )
-                    for record in bundle.records
-                },
+                evidence_snippets_by_document=snippets,
                 topic=request.topic,
                 problem_markdown=request.problem_markdown,
                 emit=request.emit,
@@ -328,8 +327,8 @@ def read_documents(request: ReadRequest) -> ReadResult:
                     "selection": "overview_and_lexical_focus" if focus.strip() else "overview",
                     "semantic_verification": "not_performed",
                 }
-            paper_notes = tuple(notes)
-            notes_markdown = render_paper_notes_markdown(notes)
+            paper_notes = tuple(_refine_reading_gaps(request, bundle, notes, snippets))
+            notes_markdown = render_paper_notes_markdown(paper_notes)
     if not bundle.records:
         return ReadResult(
             status="empty",
@@ -349,6 +348,11 @@ def read_documents(request: ReadRequest) -> ReadResult:
     code_links = build_code_links(documents=bundle.records, chunks=bundle.chunks)
     diagnostics: list[str] = []
     status: ReadStatus = "completed"
+    pending = [note["paper_id"] for note in paper_notes
+               if note.get("reading_followup", {}).get("pending_queries")]
+    if pending:
+        status = "partial"
+        diagnostics.append(f"Source questions remain after one bounded reading followup: {', '.join(pending[:5])}.")
     if not bundle.chunks:
         status = "partial"
         diagnostics.append(
@@ -583,6 +587,83 @@ def _preserve_required_screening(
     return output
 
 
+def _refine_reading_gaps(
+    request: ReadRequest, bundle: DocumentBundle,
+    notes: list[dict[str, Any]], snippets: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """One source-scoped query round, then revise notes only with new text.
+
+    The saved bundle remains the source owner. Query excerpts are bounded
+    provenance for this correction, not another index or a support verdict.
+    Failures propagate through the existing Read attempt; no silent success.
+    """
+    records = {record.document_id: record for record in bundle.records}
+    output = []
+    for note in notes:
+        queries = list(dict.fromkeys(note.get("followup_queries", [])))[:2]
+        if not queries:
+            output.append(note)
+            continue
+        chunks = order_source_chunks([chunk for chunk in bundle.chunks if chunk.document_id == note["paper_id"]
+                                      and chunk.metadata.get("section") != "references"])
+        shown_ids = set(note["reading_coverage"]["shown_chunk_ids"])
+        initial_text = {chunk.chunk_id: " ".join(chunk.text.split()) for chunk in chunks}
+        initial_text = {key: text[:DEFAULT_CHUNK_CHARS - 3] if len(text) > DEFAULT_CHUNK_CHARS else text
+                        for key, text in initial_text.items()}
+        lookups = []
+        candidates = []
+        for query in queries:
+            hits = rank_source_chunks(chunks, query, limit=2)
+            # Keep independent appearances before neighbors. A caption and
+            # its prose reference can be far apart after PDF extraction.
+            positions = [chunks.index(hit) for hit in hits]
+            indices = list(dict.fromkeys([*positions, *[
+                neighbor for index in positions for neighbor in (index + 1, index - 1)
+                if 0 <= neighbor < len(chunks)
+            ]]))
+            selected = [chunks[index] for index in indices]
+            views = source_chunk_views(selected, query=query, max_chars=6 * DEFAULT_CHUNK_CHARS,
+                                       max_chunk_chars=DEFAULT_CHUNK_CHARS)
+            new_views = [view for view in views if view["chunk_id"] not in shown_ids or
+                         " ".join(view["text"].split()) not in
+                         initial_text[view["chunk_id"]]]
+            candidates.append(new_views)
+            lookups.append({"query": query, "status": "matches" if hits else "no_lexical_match",
+                            "matched_chunk_ids": [chunk.chunk_id for chunk in hits],
+                            "semantic_verification": "not_performed"})
+        # Fair sharing between questions without adding another retrieval or
+        # model round. Duplicates use no additional window budget.
+        passages = {}
+        for position in range(max((len(rows) for rows in candidates), default=0)):
+            for rows in candidates:
+                if position < len(rows) and len(passages) < 6:
+                    view = rows[position]
+                    passages.setdefault((view["chunk_id"], view["character_start"], view["character_end"]), view)
+        for lookup, rows in zip(lookups, candidates):
+            included = sum((row["chunk_id"], row["character_start"], row["character_end"]) in passages for row in rows)
+            lookup.update(new_window_count=included, omitted_window_count=len(rows) - included)
+        trace = {"lookups": lookups, "passages": list(passages.values()),
+                 "revision_performed": False, "pending_queries": queries,
+                 "scope": "retained_text_only_no_absence_or_support_certification"}
+        if passages:
+            _emit = request.emit
+            if _emit is not None:
+                _emit(f"Rereading source gaps for {note['paper_id']} (one bounded round).")
+            revised = read_paper_notes_with_llm(request.llm_client,
+                papers=[records[note["paper_id"]].to_row()], evidence_snippets_by_document=snippets,
+                revision_context_by_document={note["paper_id"]: {"previous_note": note, "source_lookup": trace}},
+                topic=request.topic, problem_markdown=request.problem_markdown,
+                config=request.config, emit=request.emit)[0]
+            trace.update(revision_performed=True, pending_queries=revised.get("followup_queries", []),
+                         prior_note=note)
+            revised["reading_coverage"] = {**note["reading_coverage"],
+                "followup_shown_chunk_ids": list(dict.fromkeys(view["chunk_id"] for view in trace["passages"]))}
+            note = revised
+        note["reading_followup"] = trace
+        output.append(note)
+    return output
+
+
 def _optional_int(value: object) -> int | None:
     try:
         return int(value)  # type: ignore[arg-type]
@@ -680,17 +761,11 @@ def select_reading_chunks(
     quota. The remaining budget still covers sections and late text. This is
     lexical retrieval, not a relevance verdict, translation or claim audit.
     """
-    def tokens(text: str) -> set[str]:
-        words = set(re.findall(r"[^\W\d_]{3,}|\d+(?:\.\d+)?", text.casefold()))
-        for run in re.findall(r"[\u3400-\u9fff]+", text):
-            words.update(run[i:i + 2] for i in range(len(run) - 1))
-        return words
-
-    terms = tokens(focus)
+    terms = source_query_terms(focus)
     if not terms or max_chunks < 3 or len(chunks) <= max_chunks:
         return select_representative_chunks(chunks, max_chunks=max_chunks)
     candidates = [chunk for chunk in chunks if chunk.metadata.get("section") != "references"]
-    overlaps = [tokens(chunk.text) & terms for chunk in candidates]
+    overlaps = [source_query_terms(chunk.text) & terms for chunk in candidates]
     frequencies = {term: sum(term in match for match in overlaps) for term in terms}
     weights = {term: math.log((len(candidates) + 1) / (count + 1))
                for term, count in frequencies.items() if 0 < count < len(candidates)}

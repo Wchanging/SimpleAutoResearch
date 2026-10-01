@@ -157,7 +157,11 @@ def _prepare_report_citations(
     paper_rows: tuple[Mapping[str, Any], ...],
     citation_key_map: Mapping[str, str],
 ) -> tuple[str, list[Paper], list[str]]:
-    """Normalize the writer-facing body and select its verified references."""
+    """Normalize the writer-facing body and select its recorded references.
+
+    Citation membership is checked here; metadata accuracy and support for
+    individual claims are not independently certified by assembly.
+    """
 
     papers = [Paper.from_row(dict(row)) for row in paper_rows]
     if not papers:

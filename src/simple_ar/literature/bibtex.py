@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from simple_ar.literature.models import Paper
+from simple_ar.literature.models import Paper, bibliographic_details
 
 
 def papers_to_bibtex(papers: list[Paper]) -> str:
@@ -16,15 +16,18 @@ def papers_to_bibtex(papers: list[Paper]) -> str:
 
 
 def _paper_to_bibtex(paper: Paper) -> str:
+    metadata = bibliographic_details(paper)
     fields = {
-        "title": paper.title,
-        "author": " and ".join(paper.authors),
-        "url": "" if paper.source == "local_files" else paper.url,
+        "title": metadata["title"],
+        "author": " and ".join(metadata["authors"]),
+        "url": metadata["url"],
     }
-    if paper.published:
-        fields["year"] = paper.published[:4]
-    if paper.doi:
-        fields["doi"] = paper.doi
+    if metadata["year"]:
+        fields["year"] = metadata["year"]
+    if metadata["doi"]:
+        fields["doi"] = metadata["doi"]
+    if metadata["notes"]:
+        fields["note"] = " ".join(metadata["notes"])
     if paper.source == "arxiv" and paper.source_id:
         fields["eprint"] = paper.source_id
         fields["archivePrefix"] = "arXiv"

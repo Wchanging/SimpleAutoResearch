@@ -32,8 +32,10 @@ Files default to 20 MiB, outputs to 100 SVG pages; adjust positive `max_mb` and
 
 The analysis is descriptive, not a verification of data collection or semantics.
 Review data sensitivity before sharing the delivery directory. No model is used
-even if `.env` contains a connection. Complex statistics and automatic cross-session
-figure attachment to writing are not yet supported; writing can use `analysis.md`.
+even if `.env` contains a connection. Complex statistics are not inferred. A later
+writing task can use the completed `analysis.json` as `--material`, with its copied
+input beside it; values are rechecked and editable figures attached. For supplied
+numeric coordinates rather than group means, see [data curves](../data-curves/README.md).
 
 ## 中文
 
@@ -46,4 +48,6 @@ figure attachment to writing are not yet supported; writing can use `analysis.md
 已有汇总表用 `mode = "values"`，标签必须唯一，不再次平均、不猜误差条。
 缺失默认拒绝，明确 `omit` 才省略并报告数量；不同单位不要混用同一个单位声明。
 物理限制默认 20 MiB/100 页 SVG，可明确调大；分类分页而非丢数据。
-描述统计不证明采集、语义、显著性或因果关系；分享前核对敏感数据。复杂统计及自动跨会话图附件仍待补齐。
+描述统计不证明采集、语义、显著性或因果关系；分享前核对敏感数据。不推断复杂统计。
+后续写作可将 `analysis.json` 用作 `--material`，保留数据副本，系统复算并附可编辑图。
+数值坐标而非分组均值见[曲线案例](../data-curves/README.md)。

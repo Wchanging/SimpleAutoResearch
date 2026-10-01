@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from simple_ar.core import ArtifactRef, ArtifactStore
-from simple_ar.literature.models import Paper
+from simple_ar.literature.models import Paper, bibliographic_details
 from simple_ar.report.schema import (
     ClaimEvidenceRecord,
     MetricSource,
@@ -555,6 +555,33 @@ def attach_report_read_evidence(
         if paper_id:
             by_paper.setdefault(paper_id, record)
     notes = {note["paper_id"]: note for note in read.paper_notes}
+    # Local inputs initially use a filename as title. Reuse an existing reading
+    # proposal only when it occurs verbatim (apart from whitespace) in that
+    # same source's front matter. Do not overwrite provider/user metadata or
+    # infer dates/bylines from PDF creation properties.
+    front_matter = {section.document_id: section for section in documents.sections
+                    if section.section == "front_matter"}
+    paper_rows = []
+    title_sources = {}
+    for row in context.papers:
+        paper = dict(row)
+        record = by_paper.get(paper["id"])
+        note = notes.get(record.document_id) if record is not None else None
+        front = front_matter.get(record.document_id) if record is not None else None
+        proposed = " ".join(str(note.get("title") or "").split()) if note is not None else ""
+        source_id = record.source_id if record is not None else ""
+        filename_title = PurePosixPath(str(source_id or "").replace("\\", "/")).stem.replace("_", " ").replace("-", " ").strip()
+        if (record is not None and record.source == "local_files" and not record.metadata.get("paper_id")
+                and source_id and paper.get("title") == filename_title and front is not None
+                and 0 < len(proposed) <= 240 and proposed != filename_title
+                and proposed in " ".join(front.text[:2400].split())):
+            paper["title"] = proposed
+            paper["bibliographic_notes"] = [*(paper.get("bibliographic_notes") or []),
+                "Title proposed by reading and present in supplied front matter; source identity and publication metadata are not independently verified."]
+            title_sources[paper["id"]] = {"section_id": front.section_id, "quote": proposed,
+                "scope": "same_source_front_matter_text_match_not_identity_verification"}
+        paper_rows.append(paper)
+    papers_by_id = {row["id"]: row for row in paper_rows}
     chunks = {chunk.chunk_id: chunk for chunk in documents.chunks}
     statuses = [record.extraction_status for record in documents.records]
     parsed_count = sum(status == "parsed" for status in statuses)
@@ -578,6 +605,9 @@ def attach_report_read_evidence(
             extraction_status=record.extraction_status,
             reading_artifact=read_ref.path,
         )
+        if handle.paper_id in title_sources:
+            metadata["title_source"] = title_sources[handle.paper_id]
+            metadata["bibliography"] = bibliographic_details(Paper.from_row(papers_by_id[handle.paper_id]))
         if note is not None:
             metadata["reading_notes"] = {
                 key: note[key]
@@ -586,24 +616,45 @@ def attach_report_read_evidence(
                 if key in note
             }
             metadata["reading_notes_kind"] = "model_interpretation_not_source_text"
+            followup = note.get("reading_followup", {})
+            if isinstance(followup, Mapping):
+                metadata["reading_notes"]["reading_followup"] = {
+                    key: followup[key] for key in ("lookups", "pending_queries", "revision_performed", "scope")
+                    if key in followup
+                }
             refs = note.get("evidence_refs", [])
             supported = [chunks[ref] for ref in refs if ref in chunks
                          and chunks[ref].document_id == record.document_id]
             # Interpretations alone are not a passage-level check. Carry a
             # bounded set of the exact persisted passages alongside the notes.
-            metadata["evidence_passages"] = [
+            # Query-centered windows precede chunk prefixes: otherwise a
+            # corrected late passage would disappear again during delivery.
+            queried = []
+            for row in followup.get("passages", []) if isinstance(followup, Mapping) else []:
+                if not isinstance(row, Mapping):
+                    continue
+                chunk = chunks.get(row.get("chunk_id"))
+                start, end = row.get("character_start"), row.get("character_end")
+                if (chunk is not None and chunk.document_id == record.document_id
+                        and type(start) is int and type(end) is int and 0 <= start < end <= len(chunk.text)
+                        and row.get("text") == chunk.text[start:end]):
+                    queried.append(dict(row))
+            queried_ids = {row["chunk_id"] for row in queried}
+            passages = [*queried, *[
                 {"chunk_id": chunk.chunk_id, "text": chunk.text[:1200],
                  "truncated": len(chunk.text) > 1200}
-                for chunk in supported[:6]
-            ]
-            metadata["evidence_passages_truncated"] = len(supported) > 6
+                for chunk in supported if chunk.chunk_id not in queried_ids
+            ]]
+            metadata["evidence_passages"] = passages[:6]
+            metadata["evidence_passages_truncated"] = len(passages) > 6
         handles.append(
             handle.model_copy(
-                update={"summary": record.abstract or handle.summary, "metadata": metadata}
+                update={"summary": record.abstract or handle.summary, "metadata": metadata,
+                        "title": papers_by_id.get(handle.paper_id, {}).get("title", handle.title)}
             )
         )
     return (
-        context.model_copy(update={"source_handles": handles,
+        context.model_copy(update={"source_handles": handles, "papers": paper_rows,
                                    "evidence_summary": f"{context.evidence_summary} {coverage_note}".strip()}),
         memory.model_copy(update={"source_handles": handles,
                                   "limitations": [*memory.limitations, coverage_note]}),
@@ -1192,6 +1243,9 @@ def _paper_source_handles(search: SearchResult) -> list[SourceHandle]:
                 "source_id": paper.source_id,
                 "url": paper.url,
                 "published": paper.published,
+                "authors": list(paper.authors),
+                "doi": paper.doi,
+                "bibliography": bibliographic_details(paper),
             },
         )
         for index, paper in enumerate(search.selected_papers, start=1)

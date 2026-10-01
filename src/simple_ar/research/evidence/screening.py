@@ -129,6 +129,7 @@ def read_paper_notes_with_llm(
     papers: Sequence[Mapping[str, Any]],
     evidence_snippets: str = "",
     evidence_snippets_by_document: Mapping[str, str] | None = None,
+    revision_context_by_document: Mapping[str, Mapping[str, Any]] | None = None,
     topic: str = "",
     problem_markdown: str = "",
     config: Mapping[str, object] | None = None,
@@ -153,6 +154,8 @@ def read_paper_notes_with_llm(
                 ),
                 topic=topic,
                 problem_markdown=problem_markdown,
+                revision_context_json=json.dumps(revision_context_by_document.get(_paper_id(paper, index), {}), ensure_ascii=False)
+                    if revision_context_by_document is not None else "",
             ),
             label=_paper_id(paper, index),
         )
@@ -815,6 +818,7 @@ def _normalize_paper_note(
         "confidence": _text_field(row, "confidence") or "unknown",
         "limitation": limitation_text or (limitations[0] if limitations else "Not specified."),
         "relevance": _text_field(row, "relevance") or relation or "Not specified.",
+        "followup_queries": [query[:500] for query in _string_items(row.get("followup_queries"), limit=2)],
     }
 
 

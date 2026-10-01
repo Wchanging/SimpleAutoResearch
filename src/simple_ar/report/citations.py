@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from simple_ar.literature.models import Paper
+from simple_ar.literature.models import Paper, bibliographic_details
 from simple_ar.literature.verify import find_citation_ids
 
 
@@ -20,17 +20,24 @@ def references_markdown(
     lines = []
     for paper in papers:
         label = f"[{citation_map[paper.id]}]" if citation_map and paper.id in citation_map else f"[@{paper.id}]"
-        authors = ", ".join(author.strip() for author in paper.authors if author.strip())
-        year = paper.published[:4] if paper.published else ""
+        metadata = bibliographic_details(paper)
+        names = metadata["authors"]
+        authors = ", ".join(names[:6]) + (", et al." if len(names) > 6 else "")
+        year = metadata["year"]
         attribution = f"{authors} ({year}). " if authors and year else (
             f"{authors}. " if authors else (f"({year}) " if year else "")
         )
         # A supplied file path is provenance for the run, not a reader-facing
         # URL. Keep its full location in source artifacts, not the reference list.
         url = " (supplied local document)" if paper.source == "local_files" else (
-            f" {paper.url}" if paper.url else ""
+            f" {metadata['url']}" if metadata["url"] else ""
         )
-        lines.append(f"- {label} {attribution}{paper.title}.{url}")
+        doi = f" DOI: {metadata['doi']}." if metadata["doi"] else ""
+        missing = (" (Bibliographic details unavailable: " + ", ".join(
+            "public URL or DOI" if key == "public_locator" else key for key in metadata["missing_fields"]) + ".)"
+                   if metadata["missing_fields"] else "")
+        notes = " (" + " ".join(metadata["notes"]) + ")" if metadata["notes"] else ""
+        lines.append(f"- {label} {attribution}{paper.title}.{url}{doi}{missing}{notes}")
     return "\n".join(lines)
 
 
@@ -123,14 +130,16 @@ def citation_map_artifact(
     entries: list[dict[str, Any]] = []
     for paper_id, number in sorted(citation_map.items(), key=lambda item: item[1]):
         paper = by_id.get(paper_id)
+        bibliography = bibliographic_details(paper) if paper else {}
         entries.append(
             {
                 "number": number,
                 "model_key": key_by_id.get(paper_id, ""),
                 "paper_id": paper_id,
                 "title": paper.title if paper else "",
-                "url": paper.url if paper else "",
+                "url": bibliography.get("url", ""),
                 "source": paper.source if paper else "",
+                "bibliography": bibliography,
             }
         )
     return {

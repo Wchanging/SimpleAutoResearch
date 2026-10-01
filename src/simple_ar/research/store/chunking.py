@@ -78,6 +78,10 @@ def _chunks_from_sections(
     chunk_chars: int,
     overlap_chars: int,
 ) -> list[TextChunk]:
+    # With a physical cap, title/byline pages must not crowd out all of a
+    # document's actual evidence. Keep their source spans but budget body first.
+    if max_chunks is not None:
+        sections = sorted(sections, key=lambda row: row.section == "front_matter")
     chunks: list[TextChunk] = []
     per_document: dict[str, int] = {}
     for section in sections:
@@ -115,7 +119,8 @@ def _bounded_document_coverage(chunks: list[TextChunk], max_chunks: int | None) 
 
     A long first PDF must not silently consume the entire reading budget while
     later selected documents receive no source text at all. Within each
-    document, section/chunk order and source IDs remain unchanged.
+    document, chunk order and source IDs remain unchanged from construction;
+    bounded section construction budgets body before front matter.
     """
     if max_chunks is None or len(chunks) <= max_chunks:
         return chunks

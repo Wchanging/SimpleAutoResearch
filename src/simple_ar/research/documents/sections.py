@@ -116,6 +116,14 @@ def _split_sections(text: str) -> list[dict[str, object]]:
         return [_fallback_section(text, lines)]
 
     sections: list[dict[str, object]] = []
+    # Title/byline/version declarations and supplied caveats before the first
+    # recognized heading are source text too. Do not infer metadata from them,
+    # but retain them for targeted identity or condition checks.
+    first_heading = heading_rows[0][0]
+    preamble = "\n".join(lines[:first_heading]).strip()
+    if preamble:
+        sections.append({"section": "front_matter", "heading": "Front matter",
+                         "text": preamble, "line_start": 1, "line_end": first_heading})
     for position, (line_index, section, heading) in enumerate(heading_rows):
         next_line = heading_rows[position + 1][0] if position + 1 < len(heading_rows) else len(lines)
         body_lines = lines[line_index + 1 : next_line]

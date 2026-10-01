@@ -73,11 +73,14 @@ def _record_from_paper(paper: Paper) -> DocumentRecord:
         source=paper.source,
         source_id=paper.source_id or paper.id,
         url=paper.url,
+        doi=paper.doi,
+        published=paper.published,
         authors=list(paper.authors),
         abstract=paper.abstract,
         local_path=local_path,
         extraction_status="metadata_only",
-        metadata={"paper_id": paper.id, "fulltext_hints": hints},
+        metadata={"paper_id": paper.id, "fulltext_hints": hints,
+                  "bibliographic_notes": list(paper.bibliographic_notes)},
     )
 
 

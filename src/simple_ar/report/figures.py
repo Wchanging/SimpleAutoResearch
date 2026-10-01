@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 from simple_ar.core.artifacts import write_text
 from simple_ar.report.document_plan import visual_plan_for_renderer
 from simple_ar.report.schema import ReportDocumentPlan, ReportFigureConfig
+# Retain the old import surface; data rendering no longer depends on reporting.
+from simple_ar.result_analysis.figures import render_table_figures
 
 
 _DEFAULT_PAIRED_FIGURE_LIMIT = 4
@@ -143,87 +145,6 @@ def add_paired_measurement_figures(*, report_markdown: str, report_dir: Path,
         marker = re.search(r"^## References\s*$", body, re.MULTILINE)
         body = body[:marker.start()] + block + body[marker.start():] if marker else body + block
     return ReportFigureResult(report_markdown=body, figures=figures)
-
-
-def render_table_figures(result: dict, output_dir: Path) -> list[dict]:
-    """Render explicit computed table values, not numbers mined from prose.
-
-    Separate metrics have separate axes. Pagination preserves all categories;
-    no aggregate, error bar or comparison verdict is inferred by the renderer.
-    SVG is both output and editable source; the result/data retain full labels.
-    """
-    import textwrap
-    from html import escape
-
-    spec = result["spec"]
-    wide = spec["width"] == "wide"
-    width, left = (720, 245) if wide else (360, 145)
-    right = width - 40
-    records = result["records"]
-    by_column = {name: [] for name in spec["value_columns"]}
-    for row in records:
-        by_column[row["column"]].append(row)
-    planned = sum((len(rows) + 11) // 12 for rows in by_column.values())
-    if planned > spec.get("max_figures", 100):
-        raise ValueError(f"Data needs {planned} figure pages; exceeds physical max_figures={spec.get('max_figures', 100)}. Select fewer columns/groups or explicitly increase the output limit; no data was silently dropped.")
-    figures = []
-    for metric_index, column in enumerate(spec["value_columns"], start=1):
-        selected = by_column[column]
-        for offset in range(0, len(selected), 12):
-            page = selected[offset:offset + 12]
-            values = [row["mean"] if spec["mode"] == "observations" else row["value"] for row in page]
-            low, high = min(0, *values), max(0, *values)
-            # Normalize before subtracting: large finite values of opposite
-            # signs must not overflow the axis range.
-            scale = max(abs(low), abs(high), 1e-300)
-            lo, hi = low / scale, high / scale
-            if lo == hi:
-                lo, hi = -1, 1
-                scale = 1
-            def x(value):
-                return left + (value / scale - lo) / (hi - lo) * (right - left)
-            y, labels = 40, []
-            for row in page:
-                parts = textwrap.wrap(row["group"], width=29 if wide else 16) or [row["group"]]
-                shown = parts[:3]
-                if len(parts) > 3:
-                    shown[-1] = shown[-1][:-1] + "…"
-                height = max(40, len(shown) * 17 + 12)
-                labels.append((row, shown, y, height))
-                y += height
-            unit = spec.get("value_unit") or "unit not supplied"
-            unit_lines = textwrap.wrap(unit, width=max(8, int((right - left) / 8.4))) or [unit]
-            displayed_unit = unit_lines[:2]
-            if len(unit_lines) > 2:
-                displayed_unit[-1] = displayed_unit[-1][:-1] + "…"
-            height = y + 36 + 17 * len(displayed_unit)
-            physical_width = "7in" if wide else "3.5in"
-            svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{physical_width}" height="{height / width * (7 if wide else 3.5):.4f}in" viewBox="0 0 {width} {height}">',
-                   f'<title>{escape(column)}; descriptive {escape(spec["mode"])}</title>',
-                   '<rect width="100%" height="100%" fill="white"/>',
-                   '<g font-family="sans-serif" font-size="14" fill="#203040">',
-                   f'<text x="8" y="22" font-weight="bold">{escape(textwrap.shorten(column, width=70 if wide else 34, placeholder="…"))}</text>',
-                   f'<line x1="{x(0):.4f}" y1="20" x2="{x(0):.4f}" y2="{y}" stroke="#687583"/>']
-            for row, shown, top, bar_height in labels:
-                value = row["mean"] if spec["mode"] == "observations" else row["value"]
-                svg.append(f'<g><title>{escape(row["group"])}: {value:.12g}; n={row["count"]}; missing={row["missing"]}</title>')
-                for line_index, text in enumerate(shown):
-                    svg.append(f'<text x="8" y="{top + 16 + line_index * 17}">{escape(text)}</text>')
-                svg.append(f'<rect x="{min(x(0), x(value)):.4f}" y="{top + 6}" width="{abs(x(value) - x(0)):.4f}" height="18" fill="#286a9b"/></g>')
-            svg.append(f'<line x1="{left}" y1="{y}" x2="{right}" y2="{y}" stroke="#687583"/>')
-            for i in range(3):
-                value = (lo + (hi - lo) * i / 2) * scale
-                svg.append(f'<text x="{x(value):.4f}" y="{y + 20}" text-anchor="middle">{value:.3g}</text>')
-            for i, line in enumerate(displayed_unit):
-                svg.append(f'<text x="{(left + right) / 2}" y="{y + 38 + i * 17}" text-anchor="middle"><title>{escape(unit)}</title>{escape(line)}</text>')
-            svg.append('</g></svg>')
-            filename = f"figures/value-{metric_index}-{offset // 12 + 1}.svg"
-            write_text(output_dir / filename, "\n".join(svg))
-            caption = (f"{column}: {'row means' if spec['mode'] == 'observations' else 'supplied values without re-aggregation'}; "
-                       f"user-declared row unit: {spec['observation_unit']}; no inferred uncertainty bars. "
-                       "Full category labels, counts and omissions are in analysis.json; long labels may be shortened in the figure.")
-            figures.append({"path": filename, "caption": caption, "width": spec["width"], "visual_check": "not_performed"})
-    return figures
 
 
 def maybe_add_report_figures(

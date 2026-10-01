@@ -63,11 +63,14 @@ def write_report_memory(path: Path, memory: ReportMemory) -> None:
 
 
 def _section_plan(template_markdown: str, context: ReportContext) -> list[ReportSectionPlan]:
-    headings = [
-        heading
-        for heading in (match.group(1).strip() for match in SECTION_PATTERN.finditer(template_markdown))
-        if heading.strip().lower() not in NON_DRAFT_SECTION_NAMES
-    ]
+    matches = list(SECTION_PATTERN.finditer(template_markdown))
+    headings = [match.group(1).strip() for match in matches
+                if match.group(1).strip().lower() not in NON_DRAFT_SECTION_NAMES]
+    guidance = {
+        _heading_key(match.group(1)): template_markdown[match.end():
+            matches[index + 1].start() if index + 1 < len(matches) else len(template_markdown)].strip()
+        for index, match in enumerate(matches)
+    }
     if not headings:
         headings = _fallback_headings(context.report_mode)
     evidence_handles = _section_evidence_handles(context)
@@ -76,6 +79,14 @@ def _section_plan(template_markdown: str, context: ReportContext) -> list[Report
     for index, heading in enumerate(headings, start=1):
         section_id = _slug(heading) or f"section_{index}"
         goal = _section_goal(heading, context.report_mode)
+        # Do not discard per-section template instructions and replace them
+        # with the title heuristic. Preserve the latter's evidence routing;
+        # the user-authored purpose remains explicit in the frozen plan.
+        section_guidance = guidance.get(_heading_key(heading), "")
+        if section_guidance:
+            goal += "\nTemplate section guidance: " + section_guidance[:800]
+            if len(section_guidance) > 800:
+                goal += f"\n({len(section_guidance) - 800} guidance characters omitted; full template remains available.)"
         section_handles = evidence_handles
         if context.report_mode == "experiment" and context.max_section_sources > 0:
             execution_handles = [h.handle for h in context.source_handles if h.kind == "experiment"]
@@ -126,6 +137,21 @@ def _section_evidence_handles(context: ReportContext) -> list[str]:
     metadata. Extra non-paper handles fill remaining slots only when the paper
     set is smaller than the configured section-source budget.
     """
+    if context.report_mode == "supplied_materials":
+        # Writing starts from supplied notes/results. Bibliographic sources
+        # must not fill the whole window and silently hide those primary inputs.
+        materials = [row.handle for row in context.source_handles if row.kind == "material"]
+        papers = [row.handle for row in context.source_handles if row.kind == "paper"]
+        remaining = [row.handle for row in context.source_handles
+                     if row.kind not in {"material", "paper", "chunk"}]
+        ordered = []
+        for index in range(max(len(materials), len(papers))):
+            if index < len(materials):
+                ordered.append(materials[index])
+            if index < len(papers):
+                ordered.append(papers[index])
+        ordered = list(dict.fromkeys([*ordered, *remaining]))
+        return ordered[:context.max_section_sources] if context.max_section_sources > 0 else ordered
     experiment_handles = [
         handle.handle for handle in context.source_handles if handle.kind == "experiment"
     ]

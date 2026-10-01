@@ -90,6 +90,12 @@ value_unit = "秒"
 或明确 `"omit"`；`width = "wide"` 或 `"column"`；物理限制 `max_mb = 20`、`max_figures = 100`
 为可调整正整数。缺失不填零，非有限/非数值报错；不自动造误差条，不作显著性/因果结论。
 任务只接受 `data_analysis` 输出，不接受执行或文献选项，不需要或使用模型配置。
+`plot` 默认 `"bar"`；`"line"`/`"scatter"` 要求 `mode = "values"` 和数值 `x_column`，
+不设置 `group_column`，`x_unit` 默认空（单位未知）；多个数值列分别绘图。
+折线要求 x 唯一并按 x 排序，缺失 y 断线；散点保留重复 x，不聚合、不拟合。
+即便 `missing = "omit"`，x 也必须完整。坐标图物理上限 `max_points = 10000` 为可调整正整数，
+超出报错而非抽样。见[完整案例](../examples/data-curves/README.md)。
+新任务保存前按 `max_mb` 预检表格结构与所选列；正式摄入仍校验数值，续跑不重读原文件。
 摄入时固化原始字节与设置，续跑复用；更改列/聚合设置需新任务。产物与重建见[工作流](WORKFLOWS_zh.md)。
 
 ## 全局 `.env`
@@ -142,7 +148,7 @@ value_unit = "秒"
 | `[execution]` | `primary_metric`、`metrics`、`metric_directions` | 可选测量 schema；方向为 `higher`、`lower`、`resource` 或 `ignore`。 |
 | `[execution]` | `pairs`、`seeds`、`seed_flag`、`seed_count` | 可选的显式比较输入。`pairs` 每行包含唯一整数 `seed` 与 literal `baseline_command`/`candidate_command`；compact seed 必须有 literal command 和显式 seed flag/count，不解析自然语言 seed。 |
 | `[execution]` | `baseline_policy`、`baseline_ref`、`protocol` | policy 为 `run`、`skip` 或 `reuse`；`reuse` 要求当前 session 中通过且命令、schema、协议条件、保护资产和准备 lineage 都匹配的产物。`protocol` 复用已有实验合同，但不证明数据内容。 |
-| `[report]` | `template`、`reviewer`、`max_review_iterations`、`document_review`、`max_section_tokens`、`max_cited_sources`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，review iteration 默认 `1`。可选 `document_review = true` 增加一次有界整稿审查和最多两处定向修订；在真实长文验证前默认关闭。`max_section_tokens = 0` 取消单次输出上限；可选正整数 `max_cited_sources` 限制最终报告的不同引用数，不提前截断检索/阅读候选，超出则终审失败；省略即不设此上限。图表默认使用确定性图表，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
+| `[report]` | `template`、`reviewer`、`max_review_iterations`、`document_review`、`max_section_tokens`、`max_cited_sources`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，CLI 修订次数默认 `1`。可选 `document_review = true` 增加有界整稿审查，最多选择两处，每处最多修订 `max_review_iterations` 次；被拒候选也计入额度，恢复不重置。整稿审查默认关闭。`max_section_tokens = 0` 取消单次输出上限；可选正整数 `max_cited_sources` 限制最终报告的不同引用数，不提前截断检索/阅读候选，超出则终审失败；省略即不设此上限。图表默认使用确定性图表，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
 
 单条固定命令只写 `seed_flag` 会记录当前 seed，但不授权增加新 seed。若希望先只运行 seed 0、以后允许按证据决定是否补测，可同时写 `seeds = [0]` 和 `seed_flag = "--seed"`；这不会默认多跑种子。补测仍须分析提出理由、运行同种子的 baseline/candidate 配对、通过剩余进程预算检查并由既定交互模式接受。
 

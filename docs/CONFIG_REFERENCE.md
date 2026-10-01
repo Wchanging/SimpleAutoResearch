@@ -99,8 +99,17 @@ with unique labels; `missing = "reject"` or explicitly `"omit"`; `width = "wide"
 physical input/output limits `max_mb = 20`, `max_figures = 100` (positive, adjustable).
 Missing values are never zero-filled; nonfinite/nonnumeric values fail. No inferred error bars or
 scientific verdict. The task accepts only its descriptive output, not execution or literature options.
-Model connections are not used or required. Settings and input bytes freeze at ingest; changing
-them requires a new task, while resume reuses completed snapshots. See [workflow](WORKFLOWS.md).
+`plot` defaults to `"bar"`. `plot = "line"` or `"scatter"` requires `mode = "values"`
+and a numeric `x_column`, with no `group_column`; `x_unit` defaults empty (unknown).
+Each selected value column gets its own axis. Lines require unique x, sort by x and
+break at missing y; scatter retains duplicate x. x must be present even with `missing = "omit"`.
+`max_points = 10000` is a positive, adjustable coordinate-output limit; overflow
+fails without sampling. Coordinates are not aggregated or fitted. See the
+[complete example](../examples/data-curves/README.md).
+Model connections are not used or required. Setup checks shape and explicit column names
+within `max_mb` before persisting a new task; numeric validation happens at ingestion.
+Settings and input bytes freeze at ingest; changing them requires a new task, while resume
+reuses completed snapshots without rereading the original file. See [workflow](WORKFLOWS.md).
 
 ## Global `.env`
 
@@ -164,7 +173,7 @@ on disk. Parser failures remain diagnostics, not invented paper content.
 | `[execution]` | `primary_metric`, `metrics`, `metric_directions` | Optional measurement schema; directions use `higher`, `lower`, `resource`, or `ignore`. |
 | `[execution]` | `pairs`, `seeds`, `seed_flag`, `seed_count` | Optional explicit comparison inputs. `pairs` contains unique integer `seed` plus literal `baseline_command` and `candidate_command`; compact seed expansion requires a literal command and explicit seed flag/count. Natural-language seed requests are not parsed. |
 | `[execution]` | `baseline_policy`, `baseline_ref`, `protocol` | Policy is `run`, `skip`, or `reuse`; `reuse` requires a passed current-session artifact whose command, schema, protocol conditions, protected assets and preparation lineage match. `protocol` uses the existing experiment contract and does not certify data contents. |
-| `[report]` | `template`, `reviewer`, `max_review_iterations`, `document_review`, `max_section_tokens`, `max_cited_sources`, `figures` | `template` defaults to `auto`; `reviewer` defaults to `llm`; review iterations default to `1`. Optional `document_review = true` adds one bounded cross-section review and up to two targeted revisions; it is off until validated on real long-form work. `max_section_tokens = 0` omits a per-call output cap. Optional positive `max_cited_sources` bounds distinct final citations without truncating the search/reading pool; the writer sees the bound, and final audit fails if the document exceeds it. Omit it for no source-count cap. Figures are deterministic by default; set `[report.figures].enabled = false` or `mode = "off"` for text-only output. |
+| `[report]` | `template`, `reviewer`, `max_review_iterations`, `document_review`, `max_section_tokens`, `max_cited_sources`, `figures` | `template` defaults to `auto`; `reviewer` defaults to `llm`; CLI review iterations default to `1`. Optional `document_review = true` adds bounded cross-section review of at most two target sections, with up to `max_review_iterations` corrections per target; saved rejected candidates consume this allowance on recovery. It is off by default. `max_section_tokens = 0` omits a per-call output cap. Optional positive `max_cited_sources` bounds distinct final citations without truncating the search/reading pool; the writer sees the bound, and final audit fails if the document exceeds it. Omit it for no source-count cap. Figures are deterministic by default; set `[report.figures].enabled = false` or `mode = "off"` for text-only output. |
 
 Explicit `outputs` cannot be combined with `--with-report`/`--no-report`. Report structure
 selection never overrides measured facts or certifies scientific success. Changed

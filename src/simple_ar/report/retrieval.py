@@ -1,36 +1,7 @@
 from __future__ import annotations
 
-import math
-import re
-
 from simple_ar.report.schema import ReportContext, SourceHandle
-from simple_ar.research.contracts import TextChunk
-
-
-def source_query_terms(query: str) -> set[str]:
-    """Lexical anchors, not a semantic relevance or evidence verdict."""
-    terms = set(re.findall(r"[^\W\d_]{3,}|\d+(?:\.\d+)?", query.casefold()))
-    for run in re.findall(r"[\u3400-\u9fff]+", query):
-        terms.update(run[index:index + 2] for index in range(len(run) - 1))
-    return terms
-
-
-def rank_source_chunks(chunks: list[TextChunk], query: str, *, limit: int) -> list[TextChunk]:
-    """Rank retained source text without creating another index or opening files."""
-    terms = source_query_terms(query)
-    if not terms:
-        return []
-    overlaps = [source_query_terms(chunk.text) & terms for chunk in chunks]
-    weights = {term: 1 + math.log((len(chunks) + 1) / (1 + sum(term in row for row in overlaps)))
-               for term in terms}
-    phrase = " ".join(re.findall(r"\w+", query.casefold()))
-    phrase_weight = math.fsum(weights[term] for term in sorted(terms))
-    scored = [(math.fsum(weights[term] for term in sorted(matches)) +
-               (phrase_weight if phrase and f" {phrase} " in
-                " " + " ".join(re.findall(r"\w+", chunk.text.casefold())) + " " else 0), index)
-              for index, (chunk, matches) in enumerate(zip(chunks, overlaps)) if matches]
-    scored.sort(key=lambda row: (-row[0], row[1]))
-    return [chunks[index] for _, index in scored[:limit]]
+from simple_ar.research.store.retrieval import rank_source_chunks, source_query_terms
 
 
 class ReportSourceResolver:

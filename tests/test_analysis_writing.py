@@ -54,6 +54,18 @@ class AnalysisWritingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'relative path'):
                 load_analysis_package(path)
 
+    def test_pre_coordinate_v1_package_keeps_bar_defaults_and_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.package(Path(directory))
+            payload = json.loads(path.read_text(encoding='utf-8'))
+            for field in ('plot', 'x_column', 'x_unit', 'max_points'):
+                payload['spec'].pop(field, None)
+            path.write_text(json.dumps(payload), encoding='utf-8')
+            result, _, _ = load_analysis_package(path)
+            self.assertEqual(result['spec']['plot'], 'bar')
+            self.assertEqual(result['records'], payload['records'])
+            rebuild(path)
+
     def test_rejects_package_input_escape_and_missing_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

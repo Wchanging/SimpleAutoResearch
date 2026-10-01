@@ -1,0 +1,16 @@
+[task]
+goal = "Plot supplied demonstration loss coordinates, retaining missing values without scientific conclusions"
+kind = "data_analysis"
+outputs = ["data_analysis"]
+output_root = "../../runs/data-curves"
+
+[analysis]
+file = "measurements.csv"
+value_columns = ["loss_a", "loss_b"]
+observation_unit = "one supplied demonstration checkpoint"
+value_unit = "arbitrary loss units"
+mode = "values"
+plot = "line"
+x_column = "step"
+x_unit = "checkpoint index"
+missing = "omit"

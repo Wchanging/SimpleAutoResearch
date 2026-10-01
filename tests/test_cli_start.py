@@ -15,6 +15,39 @@ from simple_ar.code_task.runtime.config import load_code_task_init_options, load
 
 
 class StartTests(unittest.TestCase):
+    def test_data_setup_reports_columns_and_rejects_bad_shape_before_saving(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "data.csv"
+            output = root / "runs"
+            args = ["--kind", "data_analysis", "--goal", "Describe values",
+                    "--data-file", str(source), "--value-column", "loss",
+                    "--observation-unit", "one run", "--output-root", str(output), "--prepare-only"]
+            source.write_text("value,group\n0.2,A\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Available columns.*value.*group"):
+                self.prepare(*args)
+            self.assertFalse(output.exists())
+            source.write_text("loss,group\n0.2,A,extra\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "expected 2"):
+                self.prepare(*args)
+            self.assertFalse(output.exists())
+            source.write_bytes(b"loss\n\xff\n")
+            with self.assertRaisesRegex(ValueError, "UTF-8"):
+                self.prepare(*args)
+            self.assertFalse(output.exists())
+
+    def test_data_prepare_does_not_measure_or_infer_numeric_column_semantics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "data.csv"
+            source.write_text("loss\nnot-a-number\n", encoding="utf-8")
+            config = self.prepare("--kind", "data_analysis", "--goal", "Describe",
+                                  "--data-file", str(source), "--value-column", "loss",
+                                  "--observation-unit", "one row", "--output-root", str(root / "runs"),
+                                  "--prepare-only")
+            self.assertTrue(config.is_file())
+            self.assertEqual(research_defaults(["research-session", "--config", str(config)])["value_column"], ["loss"])
+
     def test_writing_roundtrips_material_role_template_and_no_execution(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

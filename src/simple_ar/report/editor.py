@@ -20,7 +20,7 @@ from simple_ar.report.schema import (
 
 MAX_DOCUMENT_REVIEW_CHARS = 60_000
 MAX_DOCUMENT_REVIEW_PROMPT_CHARS = 90_000
-MAX_DOCUMENT_REVISIONS = 2
+MAX_DOCUMENT_REVIEW_SECTIONS = 2
 
 
 def review_document(
@@ -47,6 +47,10 @@ def review_document(
         "template": template.name,
         "criteria": template.criteria_markdown,
         "sections": drafts,
+        "section_responsibilities": [
+            {"section_id": row.section_id, "heading": row.heading, "purpose": row.goal}
+            for row in memory.section_plan
+        ],
         "verified_execution_results": execution_summary,
         "execution_evidence": dict(execution_evidence or {}),
         "metric_sources": metric_summary,
@@ -67,6 +71,7 @@ def review_document(
             "Do not request new experiments or rewrite measurements. An evidence gap remains an unresolved finding.",
             "Separate declared protocol, executor observations and method verification. Invocation does not prove algorithmic details; elapsed duration is not the configured timeout.",
             "Distinguish parsed source passages from model reading notes and abstract-only access. Do not deny a reported result merely because it is absent from an abstract; check the supplied passages. Missing passages are not proof that the paper omits the result.",
+            "Recorded bibliography is not independently verified identity or edition information. Check important attribution against original source passages; retain conflicting dates/identifiers and author-list coverage limits instead of inventing metadata.",
             "Return at most two section-level reviews for the most consequential issues; do not pad findings.",
         ],
         "output_schema": {"section_reviews": [{
@@ -90,7 +95,7 @@ def review_document(
     if not isinstance(response, Mapping) or not isinstance(response.get("section_reviews"), list):
         raise LLMResponseError("Whole-document reviewer did not return section_reviews.")
     raw_reviews = response["section_reviews"]
-    if len(raw_reviews) > MAX_DOCUMENT_REVISIONS:
+    if len(raw_reviews) > MAX_DOCUMENT_REVIEW_SECTIONS:
         raise LLMResponseError("Whole-document reviewer exceeded the bounded section review count.")
     reviews: list[ReportSectionReview] = []
     seen: set[str] = set()

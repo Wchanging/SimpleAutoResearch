@@ -368,10 +368,11 @@ def _print_research_session(args: argparse.Namespace) -> None:
             from simple_ar.cli.start import data_settings
             try:
                 data_analysis = data_settings(args)
-            except ValueError as exc:
+            except (OSError, ValueError) as exc:
                 raise SystemExit(str(exc)) from exc
     elif any((args.data_file, args.value_column, args.group_column, args.observation_unit, args.value_unit,
-              args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100)):
+              args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100,
+              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000)):
         raise SystemExit("Data options require --task-kind data_analysis.")
     if materials and task_kind != "writing":
         raise SystemExit("--material/assets.materials currently requires task.kind=writing.")

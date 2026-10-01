@@ -20,7 +20,7 @@ _REQUEST_GAP_SEC = 0.25
 _OPENALEX_API_URL = "https://api.openalex.org/works"
 _SELECT_FIELDS = (
     "id,title,display_name,authorships,publication_year,publication_date,"
-    "primary_location,doi,ids,abstract_inverted_index,open_access,best_oa_location"
+    "primary_location,doi,ids,abstract_inverted_index,open_access,best_oa_location,is_authors_truncated"
 )
 _last_request_at = 0.0
 _rate_lock = threading.Lock()
@@ -96,6 +96,11 @@ def _paper_from_work(item: dict[str, Any]) -> Paper:
     url = arxiv_url or fulltext_url or (f"https://doi.org/{doi}" if doi else openalex_id)
     source_id = openalex_id.rsplit("/", maxsplit=1)[-1] if openalex_id else title[:40]
     authors = _authors_from_authorships(item.get("authorships"))
+    # The list endpoint caps authorships at 100. A missing truncation flag
+    # does not establish completeness at that boundary (provider docs).
+    notes = []
+    if item.get("is_authors_truncated") is True or len(authors) >= 100:
+        notes.append("OpenAlex list responses cap authorships at 100; the recorded author list may be incomplete.")
     categories = _categories_from_location(item.get("primary_location"))
     return Paper(
         id=normalize_paper_id(f"openalex-{source_id}"),
@@ -109,6 +114,7 @@ def _paper_from_work(item: dict[str, Any]) -> Paper:
         source_id=source_id,
         doi=doi or None,
         fulltext_url=fulltext_url,
+        bibliographic_notes=notes,
     )
 
 

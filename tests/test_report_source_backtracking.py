@@ -45,6 +45,15 @@ class SourceBacktrackingTests(unittest.TestCase):
         result = self.call(gateway, chunk_id="c0", before=3, after=0)
         self.assertEqual([r["chunk_id"] for r in result.content["chunks"]], ["c0"])
 
+    def test_neighbors_use_original_positions_after_ingest_front_matter_deferral(self):
+        self.documents.chunks[:] = [
+            TextChunk("middle", "doc", "Body", source_path="source.txt", line_start=10),
+            TextChunk("last", "doc", "Last page", source_path="source.txt", line_start=100),
+            TextChunk("first", "doc", "Front matter", source_path="source.txt", line_start=1)]
+        result = self.call(ReportToolGateway(self.context, documents=self.documents), chunk_id="first", before=0, after=1)
+        self.assertEqual([row["chunk_id"] for row in result.content["chunks"]], ["first", "middle"])
+        self.assertIn("do not guarantee contiguous", result.summary)
+
     def test_output_is_bounded_and_truncation_visible(self):
         bundle = DocumentBundle([], {}, {}, [], [TextChunk(f"c{i}", "doc", "x" * 6000) for i in range(7)])
         result = self.call(ReportToolGateway(self.context, documents=bundle), before=3, after=3)

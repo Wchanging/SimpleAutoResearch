@@ -28,17 +28,27 @@ def add_data_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--figure-width", choices=("column", "wide"), default="wide", help="Generic 3.5/7-inch figure target, not a conference-specific size.")
     parser.add_argument("--data-max-mb", type=int, default=20, help="Physical input size limit, MiB.")
     parser.add_argument("--data-max-figures", type=int, default=100, help="Physical SVG page limit; overflow fails without dropping categories.")
+    parser.add_argument("--data-plot", choices=("bar", "line", "scatter"), default="bar", help="Default: descriptive bars. line/scatter retain supplied numeric coordinates, without aggregation.")
+    parser.add_argument("--x-column", default="", help="line/scatter: explicit numeric x column, distinct from value columns.")
+    parser.add_argument("--x-unit", default="", help="Unit of the x coordinate; omission is recorded as unknown.")
+    parser.add_argument("--data-max-points", type=int, default=10000, help="Physical points per coordinate figure; excess fails without sampling.")
 
 
 def data_settings(args: argparse.Namespace) -> dict:
-    from simple_ar.result_analysis.table import TableSpec
+    from simple_ar.result_analysis.table import TableSpec, read_table_source, validate_table_columns
     spec = TableSpec(tuple(args.value_column), args.observation_unit, args.group_column,
-                     args.value_unit, args.data_mode, args.data_missing, args.figure_width, args.data_max_mb, args.data_max_figures)
+                     args.value_unit, args.data_mode, args.data_missing, args.figure_width, args.data_max_mb, args.data_max_figures,
+                     args.data_plot, args.x_column, args.x_unit, args.data_max_points)
     if args.data_file is None:
         raise ValueError("Data analysis requires --data-file.")
     path = args.data_file.expanduser().resolve()
     if not path.is_file() or path.suffix.lower() not in {".csv", ".tsv", ".json"}:
         raise ValueError("Provide an existing CSV/TSV or JSON records file.")
+    # Setup checks the bounded shape and selected names before creating files.
+    # Ingestion later freezes fresh bytes and validates values; this preview is
+    # not a cached measurement or a replacement for the saved input snapshot.
+    _, rows = read_table_source(path, max_mb=spec.max_mb)
+    validate_table_columns(rows, spec)
     from dataclasses import asdict
     return {"file": str(path), **asdict(spec)}
 
@@ -171,7 +181,8 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
             args.observation_unit = _answer("What one row represents / 每行代表什么", args.observation_unit, interactive=True)
         analysis = data_settings(args)
     elif any((args.data_file, args.value_column, args.group_column, args.observation_unit, args.value_unit,
-              args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100)):
+              args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100,
+              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000)):
         raise ValueError("Data options require --kind data_analysis.")
     documents = [path.expanduser().resolve() for path in args.document]
     materials = [path.expanduser().resolve() for path in args.material]

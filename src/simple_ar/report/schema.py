@@ -375,6 +375,8 @@ class ReportIterationRecord(ReportModel):
     # Optional for historical checkpoints; retain candidates not adopted.
     draft: ReportSectionDraft | None = None
     adopted: bool | None = None
+    # Review instructions belong to the existing review event, not a second ledger.
+    revision_instructions: list[str] = Field(default_factory=list)
 
 
 class AgentReportResult(ReportModel):

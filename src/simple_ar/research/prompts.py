@@ -118,7 +118,7 @@ def research_planner_user_prompt(
     )
 
 
-def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topic: str = "", problem_markdown: str = "") -> str:
+def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topic: str = "", problem_markdown: str = "", revision_context_json: str = "") -> str:
     """Build the reading prompt for a single paper metadata record.
 
     Args:
@@ -164,14 +164,19 @@ def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topi
         "- `open_questions`: list of questions that remain unresolved.\n"
         "- `evidence_refs`: list of paper ids, snippet labels, or empty list.\n"
         "- `confidence`: low, medium, or high.\n\n"
+        "- `followup_queries`: up to two specific source phrases (each at most 500 characters) to locate evidence needed for an important task-relevant claim, apparent omission or contradiction; otherwise []. These search saved text only, not the web.\n\n"
         "Rules:\n"
         "- Do not produce long prose. This is a machine-readable brief for "
         "later synthesis and experiment design.\n"
         "- Do not claim novelty or performance unless it is explicit in the "
         "input.\n"
         "- Prefer useful uncertainty over confident hallucination.\n\n"
+        "- The displayed snippets are a window, not the entire saved source. Before asserting that an important result, condition or comparison is absent, request a specific followup query if more saved text may resolve it. Do not request generic background unrelated to the task.\n"
+        "- In revision, use the original snippets and actual lookup passages to correct the previous note. Preserve supported facts and references; revise mistaken missing-evidence claims. A lexical match or no match does not establish semantic support or absence from the original. Unresolved questions remain explicit; there is no further automatic round.\n\n"
+        "- Compare repeated statements of important results or assumptions. If values or claims differ, first check whether their conditions differ. Preserve an unresolved source disagreement with both locators in limitations/open_questions; do not silently choose one value or average them. Correcting a mistaken model note is different from resolving disagreement within the source.\n\n"
         f"Paper JSON:\n{paper_json}"
         f"{evidence_block}"
+        + (f"\n\nPrior note and bounded source lookup (model interpretation and original passages remain distinct):\n{revision_context_json}" if revision_context_json else "")
     )
 
 

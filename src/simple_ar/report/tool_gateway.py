@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
-from simple_ar.report.retrieval import ReportSourceResolver, rank_source_chunks, source_query_terms
+from simple_ar.report.retrieval import ReportSourceResolver, rank_source_chunks
+from simple_ar.research.store.retrieval import order_source_chunks, source_chunk_views as _chunk_views
 from simple_ar.research.documents.ingest import DocumentBundle
-from simple_ar.report.schema import ReportContext, ReportToolCall, ReportToolResult, ReportToolSpec
+from simple_ar.report.schema import ReportContext, ReportToolCall, ReportToolResult, ReportToolSpec, SourceHandle
 from simple_ar.report.tools import (
     GetCodeTaskResultArgs,
     GetMetricSourceArgs,
@@ -98,7 +98,8 @@ class ReportToolGateway:
             return ReportToolResult(
                 tool_name=name,
                 summary=f"Found {len(handles)} handle(s) for paper {source_label}.",
-                content={"handles": [_tool_handle_view(handle) for handle in handles]},
+                content={"handles": [_tool_handle_view(handle) for handle in handles],
+                         "source_front_matter": self._source_front_matter(handles)},
                 source_handles=[handle.handle for handle in handles],
             )
         if name == "get_neighbor_chunks":
@@ -108,7 +109,7 @@ class ReportToolGateway:
                 return ReportToolResult(tool_name=name, status="not_found", summary="Chunk handle not found.")
             if self.documents is not None:
                 document_id = str(handle.metadata.get("document_id") or handle.paper_id)
-                chunks = [item for item in self.documents.chunks if item.document_id == document_id]
+                chunks = order_source_chunks([item for item in self.documents.chunks if item.document_id == document_id])
                 anchor = args.chunk_id or handle.chunk_id
                 if not anchor:
                     passages = handle.metadata.get("evidence_passages", [])
@@ -120,10 +121,11 @@ class ReportToolGateway:
                         content={"available_chunk_ids": [item.chunk_id for item in chunks[:12]],
                                  "chunk_ids_truncated": len(chunks) > 12}, source_handles=[handle.handle])
                 # A fixed output window, centered on the actual cited passage.
-                # Keep ingest order; never cross into another paper or open an arbitrary path.
+                # Prefer source positions to ingest priority; unknown locations
+                # keep legacy retained order. Never cross source identity.
                 selected = chunks[max(0, index - args.before):index + args.after + 1]
                 rows = _chunk_views(selected)
-                return ReportToolResult(tool_name=name, summary=f"Read {len(rows)} persisted passages around {anchor}.",
+                return ReportToolResult(tool_name=name, summary=f"Read {len(rows)} retained passages around {anchor}; retained neighbors do not guarantee contiguous original text.",
                     content={"source_kind": "persisted_extracted_text", "anchor_chunk_id": anchor,
                              "chunks": rows, "document_chunk_count": len(chunks)}, source_handles=[handle.handle])
             related = self.resolver.find_by_paper(handle.paper_id) if handle.paper_id else [handle]
@@ -175,27 +177,39 @@ class ReportToolGateway:
             )
         return ReportToolResult(tool_name=name, status="blocked", summary="Unhandled report tool.")
 
+    def _source_front_matter(self, handles: list[SourceHandle]) -> list[dict[str, Any]]:
+        """Reread saved source headers by identity, never by title or live paths.
 
-def _chunk_views(chunks, *, query: str = "") -> list[dict[str, Any]]:
-    """Bound output and expose exact offsets within each persisted chunk."""
-    remaining = 4800
-    rows = []
-    terms = source_query_terms(query)
-    for chunk in chunks:
-        limit = remaining // (len(chunks) - len(rows))
-        exact = re.search(re.escape(query.strip()), chunk.text, re.I) if query.strip() else None
-        matches = [(len(hits), -len(term), hits[0].start()) for term in sorted(terms)
-                   if (hits := list(re.finditer(re.escape(term), chunk.text, re.I)))]
-        anchor = exact.start() if exact else (min(matches)[2] if matches else 0)
-        start = min(max(0, anchor - limit // 3), max(0, len(chunk.text) - limit))
-        text = chunk.text[start:start + limit]
-        remaining -= len(text)
-        rows.append({"chunk_id": chunk.chunk_id, "document_id": chunk.document_id,
-            "text": text, "character_start": start, "character_end": start + len(text),
-            "total_characters": len(chunk.text), "truncated": len(text) < len(chunk.text),
-            "source_path": chunk.source_path, "page": chunk.page, "line_start": chunk.line_start,
-            "line_end": chunk.line_end, "extraction_status": chunk.metadata.get("extraction_status", "unknown")})
-    return rows
+        Headers live in the existing section handoff even when a physical chunk
+        cap omits their indexed chunks. Original text and recorded metadata stay
+        distinct; this view does not certify identity or change the bibliography.
+        """
+        document_ids = list(dict.fromkeys(
+            str(handle.metadata.get("document_id") or handle.paper_id)
+            for handle in handles
+        ))
+        rows = []
+        remaining = 4800
+        for document_id in document_ids[:4]:
+            sections = [section for section in (self.documents.sections if self.documents else [])
+                        if section.document_id == document_id and section.section == "front_matter"]
+            passages = []
+            for section in sections:
+                text = section.text[:min(1600, remaining)]
+                if not text:
+                    break
+                remaining -= len(text)
+                passages.append({"section_id": section.section_id, "text": text,
+                                 "line_start": section.line_start, "line_end": section.line_end,
+                                 "total_characters": len(section.text), "truncated": len(text) < len(section.text)})
+            rows.append({"document_id": document_id,
+                         "status": "available" if passages else "omitted_from_tool_window" if sections else "not_retained",
+                         "source_kind": "persisted_extracted_text",
+                         "identity_verification": "not_performed",
+                         "passages": passages, "omitted_sections": len(sections) - len(passages)})
+        if len(document_ids) > 4:
+            rows.append({"omitted_documents": len(document_ids) - 4})
+        return rows
 
 
 def _tool_handle_view(handle: Any) -> dict[str, Any]:

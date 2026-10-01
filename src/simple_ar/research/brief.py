@@ -241,13 +241,22 @@ def evidence_pack_from_read(
         "method_cards": [card.to_row() for card in result.method_cards],
         "dataset_cards": [card.to_row() for card in result.dataset_cards],
         "screening_decisions": [dict(row) for row in result.screening_decisions],
-        "paper_notes": [dict(note) for note in result.paper_notes],
+        "paper_notes": [_current_paper_note(note) for note in result.paper_notes],
         "notes_markdown": result.notes_markdown,
         "evidence_refs": [chunk.chunk_id for chunk in result.bundle.chunks],
         "evidence_snippets": _evidence_snippets(result),
         "limitations": list(result.diagnostics),
         "execution_context": _execution_context_payload(execution_context),
     }
+
+
+def _current_paper_note(note: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep correction provenance, not superseded interpretations, in synthesis."""
+    current = dict(note)
+    followup = current.get("reading_followup")
+    if isinstance(followup, Mapping):
+        current["reading_followup"] = {key: value for key, value in followup.items() if key != "prior_note"}
+    return current
 
 
 def _evidence_snippets(result: ReadResult, *, max_chunks: int = 12, max_chars: int = 900) -> str:
