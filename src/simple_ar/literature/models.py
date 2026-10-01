@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 
 @dataclass(frozen=True)
@@ -81,17 +84,76 @@ def bibliographic_details(paper: Paper) -> dict[str, Any]:
     Missing dates must not turn into invented publication years.
     """
     published = (paper.published or "").strip()
-    year = published[:4] if re.fullmatch(r"\d{4}(?:-\d{2}(?:-\d{2})?)?", published) else ""
+    issues: list[str] = []
+    year = ""
+    if re.fullmatch(r"\d{4}(?:-\d{2}(?:-\d{2})?)?", published):
+        parts = [int(part) for part in published.split('-')]
+        parts += [1] * (3 - len(parts))
+        try:
+            date(*parts)
+            year = published[:4]
+        except ValueError:
+            issues.append("Recorded publication date is invalid; publication year was not inferred.")
     authors = [name.strip() for name in paper.authors if name.strip()]
     url = paper.url.strip()
     public_url = url if paper.source != "local_files" and url.lower().startswith(("https://", "http://")) else ""
-    doi = (paper.doi or "").strip()
+    doi = _doi_identifier(paper.doi or "")
+    if paper.doi and not doi:
+        issues.append("Recorded DOI format is unresolved; no DOI was inferred.")
+    url_doi = _doi_identifier(public_url)
+    if doi and url_doi and doi.casefold() != url_doi.casefold():
+        issues.append("Recorded DOI and DOI URL contain different identifiers; work/version relationship is unresolved.")
+    identifiers = [value for locator in (paper.source_id or '', public_url, paper.fulltext_url or '', doi)
+                   if (value := _arxiv_identifier(locator))]
+    if len({re.sub(r'v\d+$', '', value) for value in identifiers}) > 1:
+        issues.append("Recorded arXiv identifiers refer to different documents; identity is unresolved.")
+    elif len({match[0] for value in identifiers if (match := re.findall(r'v\d+$', value))}) > 1:
+        issues.append("Recorded arXiv identifiers refer to different explicit versions; identity is unresolved.")
     missing = [key for key, value in (("title", paper.title.strip()), ("authors", authors),
                                     ("year", year), ("public_locator", doi or public_url)) if not value]
     return {"title": paper.title, "authors": authors, "published": published,
             "year": year, "doi": doi, "url": public_url, "source": paper.source,
-            "missing_fields": missing, "notes": list(paper.bibliographic_notes),
+            "missing_fields": missing, "notes": list(dict.fromkeys([*paper.bibliographic_notes, *issues])),
+            "consistency_issues": issues,
             "verification_status": "not_independently_verified"}
+
+
+def _doi_identifier(value: str) -> str:
+    """Normalize known DOI wrappers, not titles or publication identities."""
+    value = value.strip()
+    if value.lower().startswith('doi:'):
+        value = unquote(value[4:].lstrip())
+    if value.lower().startswith(('https://', 'http://')):
+        try:
+            url = urlsplit(value)
+        except ValueError:
+            return ''
+        if url.hostname not in {'doi.org', 'dx.doi.org'}:
+            return ''
+        value = unquote(url.path.lstrip('/'))
+    prefix, separator, suffix = value.partition('/')
+    # DOI Handbook §3.3: no length cap, numeric subprefixes, Graphic Unicode
+    # suffix (including spaces). A common search regex is not a validity rule.
+    graphic = all(unicodedata.category(char)[0] in 'LMNPS' or
+                  unicodedata.category(char) == 'Zs' for char in suffix)
+    if separator and suffix and graphic and prefix != '10' and re.fullmatch(r'[0-9]+(?:\.[0-9]+)*', prefix):
+        return value
+    return ''
+
+
+def _arxiv_identifier(value: str) -> str:
+    value = _doi_identifier(value) or value
+    value = re.sub(r'^arxiv:\s*', '', value.strip(), flags=re.IGNORECASE)
+    value = re.sub(r'^10\.48550/arxiv\.', '', value, flags=re.IGNORECASE)
+    if value.lower().startswith(('https://', 'http://')):
+        try:
+            url = urlsplit(value)
+        except ValueError:
+            return ''
+        if url.hostname not in {'arxiv.org', 'export.arxiv.org'}:
+            return ''
+        value = re.sub(r'^/(?:abs|pdf)/', '', unquote(url.path)).removesuffix('.pdf')
+    return value if re.fullmatch(r'(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Za-z]{2})?/\d{7})(?:v\d+)?', value) else ''
 
 
 def normalize_paper_id(raw_id: str) -> str:

@@ -8,6 +8,7 @@ from itertools import count
 from typing import Any, Mapping
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
+from simple_ar.literature.models import Paper, bibliographic_details
 from simple_ar.report.projection import _declared_report_metrics, _verified_experiment_evidence
 from simple_ar.report.schema import (
     FACTUAL_REVIEW_FINDING_TYPES,
@@ -68,6 +69,7 @@ def build_report_audit(
         + _mechanical_findings(findings)
         + _reader_facing_handle_findings(report_body)
         + _source_scope_findings(report_body, context)
+        + _bibliographic_findings(report_body, context)
     )
     status = _overall_status([citation.status, metric.status, claim.status])
     if any(
@@ -93,6 +95,23 @@ def build_report_audit(
             "Semantic support of final prose is unchecked; metric visibility and section review do not prove final conclusions.",
         ],
     )
+
+
+def _bibliographic_findings(report_body: str, context: ReportContext) -> list[ReviewerFinding]:
+    """Only explicit recorded inconsistencies, not missing fields or self-certified identity."""
+    cited = set(CITATION_PATTERN.findall(report_body))
+    findings = []
+    for row in context.papers:
+        if str(row.get('id', '')) not in cited:
+            continue
+        paper = Paper.from_row(row)
+        issues = bibliographic_details(paper)['consistency_issues']
+        if issues:
+            findings.append(ReviewerFinding(finding_id=f'bibliography:{paper.id}',
+                type='citation_misuse', severity='minor', required_action='verify',
+                message=' '.join(issues), evidence_handles=[f'paper:{paper.id}'],
+                suggested_action='Check authoritative source metadata; preserve unknown identity and do not choose a version by title or earliest year.'))
+    return findings
 
 
 def _source_scope_findings(report_body: str, context: ReportContext) -> list[ReviewerFinding]:

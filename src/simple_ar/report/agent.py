@@ -2429,6 +2429,7 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
             "missing_fields": list(bibliography.get("missing_fields", [])),
             "notes": [str(note)[:240] for note in bibliography.get("notes", [])[:4]],
             "notes_omitted": max(0, len(bibliography.get("notes", [])) - 4),
+            "consistency_issues": [str(issue)[:240] for issue in bibliography.get("consistency_issues", [])[:4]],
         }
     for key in ("document_id", "extraction_status", "reading_artifact", "reading_state", "reading_notes_kind", "evidence_role"):
         if source_metadata.get(key):

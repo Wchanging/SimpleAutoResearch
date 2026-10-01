@@ -164,6 +164,11 @@ Known publication dates, DOI and author-list coverage notes survive document han
 and share one metadata projection for writing, references, BibTeX and `citation_map.json`.
 Missing details are displayed rather than inferred. Provider metadata is not independent
 identity/version verification: same-title records and complete-looking fields can still be wrong.
+The shared projection flags impossible ISO dates and explicit DOI/arXiv locator or
+version conflicts without choosing a record by title or earliest year. Known DOI
+wrappers are normalized, not resolved online; raw source records remain unchanged.
+Audit warns for cited conflicts. Missing metadata and unused conflicting sources
+do not by themselves block delivery, and consistent fields remain unverified.
 Extracted text before the first recognized heading is retained as front matter;
 Bounded chunk budgets prioritize body evidence and may leave front matter out of indexed chunks.
 Reading a byline does not automatically replace metadata.
