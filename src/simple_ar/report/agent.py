@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMResponseError
+from simple_ar.research.contracts import CLAIM_SCOPE_RULES
 from simple_ar.report.assembler import assemble_report_sections
 from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
 from simple_ar.report.editor import MAX_DOCUMENT_REVIEW_SECTIONS, review_document
@@ -16,7 +17,8 @@ from simple_ar.report.narrative import (
     adopted_claims, narrative_context, pending_document_revisions, pending_revision_review, revision_context,
 )
 from simple_ar.report.schema import (
-    FACTUAL_REVIEW_FINDING_TYPES,
+    finding_requires_resolution,
+    REVIEW_ACTION_RULES,
     AgentReportResult,
     ReportContext,
     ReportIterationRecord,
@@ -323,7 +325,7 @@ def run_report_agent(
                 )
                 tool_results = _run_context_requests(gateway, review, config)
                 all_tool_results.extend(tool_results)
-                if review.context_requests and not _needs_revision(review):
+                if _needs_evidence_recheck(review):
                     # A pass that asks for missing evidence is provisional.
                     # Rejections already go through revise -> verify with the
                     # fetched evidence, so they do not need an extra review.
@@ -470,7 +472,7 @@ def _edit_whole_document(
                 label=review_label)
 
         reviews = call(label)
-        provisional = [row for row in reviews if row.context_requests and not _needs_revision(row)]
+        provisional = [row for row in reviews if _needs_evidence_recheck(row)]
         if not provisional:
             return reviews
         fetched = []
@@ -580,7 +582,7 @@ def _edit_whole_document(
                     iterations.append(_iteration(len(iterations) + 1, plan, "document_context",
                         verification.verdict, revised.used_sources, tool_results=fetched))
                     checkpoint()
-                if fetched and not _needs_revision(verification):
+                if fetched and _needs_evidence_recheck(verification):
                     verification = _review_section_with_recovery(client=client, context=context, template=template,
                         memory=memory, section=plan, draft=revised, config=strict,
                         label=f"report-document-verifier-{plan.section_id}-evidence", emit=emit,
@@ -1695,6 +1697,8 @@ def _reviewer_prompt(
             "prefer_get_paper_brief_arguments": {"citation_key": "P1"},
         },
         "review_focus": [
+            *CLAIM_SCOPE_RULES,
+            *REVIEW_ACTION_RULES,
             "Does this section fulfill the requested template and its own purpose, rather than reading like a pipeline log? Analysis notes need not be a long academic survey.",
             "Are citations adjacent to paper-specific claims?",
             "If section_constraints include target_words, min_citations, or subsections, did the draft reasonably satisfy them without padding or unsupported citations?",
@@ -1723,6 +1727,7 @@ def _reviewer_prompt(
                     "finding_id": "stable id",
                     "type": "unsupported_claim|citation_misuse|missing_limitation|missing_visual|metric_mismatch|style",
                     "severity": "info|minor|major|critical",
+                    "required_action": "advisory|revise|verify",
                     "message": "specific issue",
                     "section_id": section.section_id,
                     "claim_id": "",
@@ -2422,14 +2427,14 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
             "notes": [str(note)[:240] for note in bibliography.get("notes", [])[:4]],
             "notes_omitted": max(0, len(bibliography.get("notes", [])) - 4),
         }
-    for key in ("document_id", "extraction_status", "reading_artifact", "reading_notes_kind", "evidence_role"):
+    for key in ("document_id", "extraction_status", "reading_artifact", "reading_state", "reading_notes_kind", "evidence_role"):
         if source_metadata.get(key):
             data["metadata"][key] = str(source_metadata[key])[:240]
     notes = source_metadata.get("reading_notes")
     if isinstance(notes, dict):
         projected_notes = {}
         notes_truncated = False
-        for key in ("method", "datasets", "metrics", "key_claims", "limitations", "open_questions", "confidence", "evidence_refs"):
+        for key in ("problem", "method", "datasets", "metrics", "key_claims", "limitations", "open_questions", "confidence", "evidence_refs"):
             value = notes.get(key)
             if isinstance(value, list):
                 projected_notes[key] = [str(item)[:400] for item in value[:6]]
@@ -2437,6 +2442,26 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
             elif isinstance(value, str):
                 projected_notes[key] = value[:600]
                 notes_truncated |= len(value) > 600
+        scopes = notes.get("claim_scopes", [])
+        if isinstance(scopes, list):
+            projected_notes["claim_scopes"] = []
+            for row in scopes[:4]:
+                if not isinstance(row, dict):
+                    continue
+                claim = {key: str(row.get(key) or "unknown")[:600]
+                         for key in ("claim_id", "claim", "object", "property", "evidence_kind", "scope")}
+                for key in ("conditions", "evidence_refs"):
+                    values = row.get(key, [])
+                    if not isinstance(values, list):
+                        claim[key] = []
+                        notes_truncated = True
+                        continue
+                    claim[key] = [str(value)[:240] for value in values[:6]]
+                    notes_truncated |= len(values) > 6 or any(len(str(value)) > 240 for value in values[:6])
+                notes_truncated |= any(len(str(row.get(key) or "")) > 600 for key in claim if key not in {"conditions", "evidence_refs"})
+                projected_notes["claim_scopes"].append(claim)
+            projected_notes["claim_scopes_omitted"] = max(0, len(scopes) - 4)
+            notes_truncated |= len(scopes) > 4
         coverage = notes.get("reading_coverage")
         if isinstance(coverage, dict):
             bounded_coverage = {key: value if type(value) is int else str(value)[:160]
@@ -2484,15 +2509,22 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
 def _needs_revision(review: ReportSectionReview) -> bool:
     if review.verdict in {"revise_required", "fail"}:
         return True
-    # Factual corrections still need a revision when the reviewer labels them
-    # minor. Informational/style suggestions do not spend another writing pass.
-    return any(
-        finding.severity in {"major", "critical"}
-        or (
-            finding.severity == "minor"
-            and finding.type in FACTUAL_REVIEW_FINDING_TYPES
-        )
-        for finding in review.findings
+    return any(finding_requires_resolution(finding) for finding in review.findings)
+
+
+def _needs_evidence_recheck(review: ReportSectionReview) -> bool:
+    """Check a verification-only request before spending a writing correction.
+
+    Mixed corrections already fetch context and revise, avoiding a redundant
+    model call. Missing/blocked evidence cannot turn the provisional check into
+    acceptance: the subsequent review still passes through pending-evidence guards.
+    """
+    return bool(review.context_requests) and (
+        not _needs_revision(review)
+        or (review.verdict not in {"revise_required", "fail"} and all(
+            not finding_requires_resolution(finding) or finding.required_action == "verify"
+            for finding in review.findings
+        ))
     )
 
 

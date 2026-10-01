@@ -6,6 +6,9 @@ or stale claim record must not become evidence for the next section.
 """
 
 from collections.abc import Sequence
+import re
+
+from simple_ar.research.contracts import CLAIM_SCOPE_RULES
 
 from simple_ar.report.schema import (
     ClaimEvidenceRecord, ReportIterationRecord, ReportMemory, ReportSectionDraft,
@@ -53,6 +56,7 @@ def narrative_context(
                 "section_id": row.section_id, "heading": row.heading,
                 "purpose": plan_by_id[row.section_id].goal if row.section_id in plan_by_id else "",
                 **_excerpt(row.draft_markdown),
+                "table_excerpt": _table_excerpt(row.draft_markdown),
                 "declared_claims": [claim.model_dump(mode="json") for claim in row.claims[:4]],
                 "declared_claims_omitted": max(0, len(row.claims) - 4),
                 "support_status": "not_independently_verified_by_this_projection",
@@ -61,14 +65,36 @@ def narrative_context(
         ],
         "adopted_sections_omitted": max(0, len(others) - len(visible)),
         "writing_rules": [
+            *CLAIM_SCOPE_RULES,
             "Address this section's purpose; use other sections' responsibilities to give each detailed fact a home.",
             "Use adopted prose to avoid contradictory or duplicated explanations; excerpts are not primary-source evidence.",
             "Abstract and conclusion synthesize the actual body, including negative results and limitations; do not add findings.",
             "Revisit a fact only for a different analytical purpose, not by repeating setup and provenance in every section.",
+            "Numeric tables in adopted sections already own those detailed values; refer to them when relevant instead of duplicating the table or listing all values again. The table excerpt is adopted prose, not source verification.",
             "Review the prose itself for important claims even when optional claim metadata is empty or incomplete.",
             "Request source context for material uncertainties; missing excerpts do not establish absence from the original source.",
         ],
     }
+
+
+def _table_excerpt(text: str, limit: int = 1000) -> dict:
+    """Expose literal table rows hidden between prose head/tail windows.
+
+    Character positions point to the adopted draft. No inferred facts, summaries
+    or persistent memory; this view cannot certify its table values.
+    """
+    matches = list(re.finditer(r"(?m)^[ \t]*\|[^\n]+\|[ \t]*$", text))
+    windows = []
+    remaining = limit
+    for match in matches[:12]:
+        if remaining <= 0:
+            break
+        end = min(match.end(), match.start() + remaining)
+        windows.append({"start": match.start(), "end": end, "text": text[match.start():end]})
+        remaining -= end - match.start()
+    return {"windows": windows, "position_unit": "unicode_characters",
+            "table_rows_available": len(matches), "table_rows_shown": len(windows),
+            "characters_omitted": sum(len(match.group()) for match in matches) - (limit - remaining)}
 
 
 def _excerpt(text: str, limit: int = 1000) -> dict:

@@ -141,6 +141,21 @@ prose is allowed; preserving supported facts and qualifications matters more tha
 word count. Checkpoints retain correction requests and editor candidates: resume reuses
 them and consumed correction/source-call allowances rather than generating a fresh allowance.
 These checks are model-assisted, not certification of every important claim or paper quality.
+
+Review findings can record `required_action`: `advisory` leaves an optional
+suggestion, `revise` requires a bounded correction, and `verify` requires source
+checking or qualification/removal of the unsupported assertion. Impact severity
+is separate from this action; minor necessary work is not automatically ignored.
+A verification-only request can use the existing source tools and rejudge the
+same draft before rewriting. Mixed correction/verification uses the ordinary
+fetch→revise→check path. No experiment is authorized by these findings, and
+recovery does not refill tool or correction allowances. Unresolved required work
+keeps audit at warning or worse. Old findings without this field retain their
+severity/type policy; explicit advice cannot demote existing factual safeguards.
+Agent-result/checkpoint `reviewer_findings` retains historical observations,
+including provisional and resolved issues; current unresolved findings belong
+to `memory.reviewer_findings`. Inspect the associated review/tool events before
+treating a historical finding as a remaining defect.
 Whole-document editing can select at most two section targets. Each target uses
 the existing `max_review_iterations` allowance, including rejected candidates.
 Saved iterations preserve consumed allowance and original findings/instructions;
@@ -654,6 +669,15 @@ read artifact, not the current synthesis input. No match is not evidence of
 absence. Unresolved requests keep the result partial, without recursive searches
 or downloads. Recovery uses the existing read attempt, not a new per-paper API
 checkpoint; a failed read may repeat its calls when resumed.
+
+Bounded notes may also retain `claim_scopes`: the claimed object, property,
+conditions, evidence kind and same-document passage references. Missing fields
+remain unknown; unresolved or cross-source references keep reading partial.
+Synthesis and report views preserve this scope. These are model interpretations,
+not independently verified claims. Parsed document access and a bounded model
+note are shown separately, including note coverage; neither means full-document
+comprehension. Adopted-report context includes bounded, position-labelled table
+rows alongside prose windows, not a second source of measured results.
 
 LLM-generated ideas and local novelty checks are research suggestions, not proof
 of originality. Offline fixture output is not model-backed scientific analysis.

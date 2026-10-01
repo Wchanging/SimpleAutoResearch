@@ -11,6 +11,7 @@ from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, Capabili
 from simple_ar.report.projection import _declared_report_metrics, _verified_experiment_evidence
 from simple_ar.report.schema import (
     FACTUAL_REVIEW_FINDING_TYPES,
+    finding_requires_resolution,
     CitationAudit,
     ClaimAudit,
     MetricAudit,
@@ -76,8 +77,7 @@ def build_report_audit(
     ):
         status = "failed"
     elif any(
-        finding.severity == "major"
-        or (finding.severity == "minor" and finding.type in FACTUAL_REVIEW_FINDING_TYPES)
+        finding_requires_resolution(finding)
         for finding in reviewer_findings
     ) and status == "passed":
         status = "warning"

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from simple_ar.integrations.llm import LLMResponseError
+from simple_ar.research.contracts import CLAIM_SCOPE_RULES
 from simple_ar.report.tools import report_tool_specs
 from simple_ar.report.schema import (
     ReportMemory,
@@ -15,6 +16,8 @@ from simple_ar.report.schema import (
     ReportSectionReview,
     ReportTemplateBundle,
     ReportToolResult,
+    finding_requires_resolution,
+    REVIEW_ACTION_RULES,
 )
 
 
@@ -39,7 +42,7 @@ def review_document(
         raise ValueError("Whole-document review exceeds its bounded source window; no complete review was performed.")
     known = {row.section_id for row in sections}
     unresolved = [finding.model_dump(mode="json") for finding in memory.reviewer_findings
-                  if finding.severity in {"major", "critical"}]
+                  if finding_requires_resolution(finding)]
     prompt = json.dumps({
         "task": "review_document_coherence",
         "objective": memory.objective,
@@ -64,7 +67,9 @@ def review_document(
         "unresolved_section_findings": unresolved[:12],
         "unresolved_section_findings_omitted": max(0, len(unresolved) - 12),
         "focus": [
-            "Prioritize unresolved major/critical section findings before stylistic repetition. Recheck them against the current draft and supplied evidence, not superseded prose. If still valid, target their sections for correction; if more remain than the two-section budget, retain them as unresolved rather than claiming complete repair.",
+            *CLAIM_SCOPE_RULES,
+            *REVIEW_ACTION_RULES,
+            "Prioritize unresolved required corrections and verification before optional polish. Recheck them against the current draft and supplied evidence, not superseded prose. If still valid, target their sections for correction; if more remain than the two-section budget, retain them as unresolved rather than claiming complete repair.",
             "Find contradictions between sections about the same method, setting, result or conclusion.",
             "Find substantial repetition of protocol, metrics or limitations across sections; assign each fact a clear home.",
             "Check that abstract and conclusion do not claim more than results, and that paper versus analysis-report tone matches the evidence.",
@@ -79,6 +84,7 @@ def review_document(
             "verdict": "pass|warning|revise_required|fail",
             "findings": [{"finding_id": "stable id", "type": "style|unsupported_claim|metric_mismatch|citation_misuse|missing_limitation|evidence_gap",
                           "severity": "info|minor|major|critical", "message": "specific cross-section issue",
+                          "required_action": "advisory|revise|verify",
                           "section_id": "same target section", "suggested_action": "bounded correction"}],
             "revision_instructions": ["specific change to this section without changing measured facts"],
             "context_requests": [{"tool_name": "get_paper_brief|get_metric_source|get_code_task_result|get_neighbor_chunks|search_source_chunks|get_synthesis_brief",

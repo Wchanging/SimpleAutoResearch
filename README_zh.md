@@ -91,7 +91,8 @@ SIMPLE_AR_LLM_STREAM=true
 uv run simple-ar start
 ```
 
-选择 `survey`、`bug_fix`、`reproduction`、`writing` 或 `data_analysis`。
+编号菜单说明各功能的用途与准备要求；输入编号，或选择
+`survey`、`bug_fix`、`reproduction`、`writing`、`data_analysis`。
 结构化引导收集相关输入，在 `runs/assistant/` 保存普通 TOML，再进入共享会话；
 不需要提前手写任务文件。`--prepare-only` 只保存配置，不执行或调用模型。
 目前不是自由多轮对话。

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from simple_ar.research.contracts import CLAIM_SCOPE_RULES
+
 PLAN_SYSTEM = (
     "You help scope small, reproducible research projects. "
     "Keep the plan concrete, modest, and testable."
@@ -155,6 +157,11 @@ def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topi
         "- `metrics`: list of metrics or evaluation criteria, if visible.\n"
         "- `key_claims`: list of conservative claims explicitly supported by "
         "the input.\n"
+        "- `claim_scopes`: at most eight objects for important task-relevant claims, each with "
+        "`claim`, `object` (what is predicted, measured or constructed), `property` (the specific guarantee "
+        "or observation), `conditions` (list), `evidence_kind` (theoretical, empirical, conjecture, proposal, "
+        "or unknown), and `evidence_refs` (exact supplied chunk ids). Missing details remain unknown; "
+        "do not turn a declaration into verified support.\n"
         "- `limitations`: list of limitations, risks, or missing evidence.\n"
         "- `relation_to_topic`: why this paper matters for the current topic.\n"
         "- `synthesis_hint`: one short sentence saying how synthesize should "
@@ -171,7 +178,8 @@ def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topi
         "- Do not claim novelty or performance unless it is explicit in the "
         "input.\n"
         "- Prefer useful uncertainty over confident hallucination.\n\n"
-        "- The displayed snippets are a window, not the entire saved source. Before asserting that an important result, condition or comparison is absent, request a specific followup query if more saved text may resolve it. Do not request generic background unrelated to the task.\n"
+        + "\n".join(CLAIM_SCOPE_RULES) + "\n"
+        + "- The displayed snippets are a window, not the entire saved source. Before asserting that an important result, condition or comparison is absent, request a specific followup query if more saved text may resolve it. Do not request generic background unrelated to the task.\n"
         "- In revision, use the original snippets and actual lookup passages to correct the previous note. Preserve supported facts and references; revise mistaken missing-evidence claims. A lexical match or no match does not establish semantic support or absence from the original. Unresolved questions remain explicit; there is no further automatic round.\n\n"
         "- Compare repeated statements of important results or assumptions. If values or claims differ, first check whether their conditions differ. Preserve an unresolved source disagreement with both locators in limitations/open_questions; do not silently choose one value or average them. Correcting a mistaken model note is different from resolving disagreement within the source.\n\n"
         f"Paper JSON:\n{paper_json}"
@@ -354,6 +362,7 @@ def synthesize_user_prompt(
         "be traced to notes, briefs, or snippets.\n\n"
         "Synthesis requirements:\n"
         + source_scope_guidance
+        + "\n".join(CLAIM_SCOPE_RULES) + "\n"
         + "- Identify concrete gaps that could become bounded experiments.\n"
         "- Propose the next experiment, not the whole eventual sequence. For an iterative task, "
         "distinguish the supplied original baseline, the first proposed candidate, and later alternatives "

@@ -15,6 +15,7 @@ from typing import Any, Callable, Literal, Mapping
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.integrations.llm import LLMError
 from simple_ar.research.contracts import (
+    CLAIM_SCOPE_RULES,
     IdeaCandidate,
     NoveltyCheck,
     ResearchExperimentContract,
@@ -336,6 +337,7 @@ def _add_llm_synthesis(
             "Preserve assumptions, actual reported empirical evidence and its conditions, disagreements, limitations and unresolved questions. "
             "Source measurements are prior work, not a local run. This task does not request innovative candidates or a new experiment protocol; "
             "do not return idea_candidates or a proposed hypothesis. Use the supplied source identifiers for provenance.\n\n"
+            + "\n".join(CLAIM_SCOPE_RULES) + "\n\n"
             + _evidence_notes_markdown(pack) + "\n\nStructured source context:\n" + _bounded_pack_json(pack)
             + "\n\nSource excerpts:\n" + str(pack.get("evidence_snippets") or "")
         )
@@ -640,7 +642,7 @@ def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
         (
             "paper_notes",
             "Model Reading Notes",
-            ("paper_id", "title", "method", "key_claims", "limitations", "open_questions",
+            ("paper_id", "title", "problem", "method", "key_claims", "claim_scopes", "limitations", "open_questions",
              "evidence_refs", "confidence", "relation_to_topic", "synthesis_hint",
              "reading_coverage", "reading_followup"),
         ),

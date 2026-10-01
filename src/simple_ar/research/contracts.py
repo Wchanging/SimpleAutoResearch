@@ -7,6 +7,13 @@ from typing import Any, Iterable, Literal, Mapping
 ResearchMode = Literal["lite", "standard", "strong"]
 ExtractionStatus = Literal["metadata_only", "pending", "parsed", "failed", "skipped"]
 
+# Shared interpretation boundary, not a semantic-verification certificate.
+CLAIM_SCOPE_RULES = (
+    "Preserve the source claim's object, property, conditions and evidence kind; topic relevance or similar method names do not make different claims comparable.",
+    "Separate theoretical guarantees, conjectures, empirical observations and proposals. A local conjecture or unobserved result is not a field-wide gap.",
+    "Parsed documents, selected passages and model notes are different reading depths. Missing or unread evidence is not proof of absence; request original context for consequential uncertainty.",
+)
+
 
 @dataclass(frozen=True)
 class ResearchContract:
@@ -318,6 +325,10 @@ class ClaimCard:
     limitations: list[str] = field(default_factory=list)
     confidence: str = "unknown"
     schema_version: str = "claim_card.v1"
+    object: str = "unknown"
+    property: str = "unknown"
+    conditions: list[str] = field(default_factory=list)
+    evidence_kind: str = "unknown"
 
     def to_row(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""

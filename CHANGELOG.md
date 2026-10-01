@@ -16,6 +16,10 @@ This file records implemented, user-visible changes in reverse chronological ord
 
 **Changed and fixed**
 
+- Report findings separate impact severity from the requested action (advice, correction or source verification). Verification-only requests can fetch and rejudge before rewriting; unresolved required work remains visible to audit and uses the existing correction/tool allowances. Historical findings retain their previous policy.
+- Interactive `start` presents a numbered bilingual function menu with preparation requirements; canonical `--kind` values and saved configuration remain unchanged.
+- Reading notes can retain bounded claim scopes (object, property, conditions and evidence kind) with source-owned passage references. Synthesis, Writer and Reviewer consume that scope; old notes remain readable. These are model interpretations, not semantic certificates.
+- Report evidence distinguishes parsed access from bounded reading notes. Adopted-section views retain bounded, position-labelled table rows even when prose head/tail excerpts omit them, helping avoid redundant numeric summaries without a second memory store.
 - Supplied-material writing defaults to `material_report`, not the failed-experiment analysis template. Section goals distinguish supplied assertions and checked computation without requiring local experiment artifacts; explicit templates and started automatic selections retain their meaning on resume.
 - Guided data-analysis configuration records no model, and resume hints omit it. Model-backed hints preserve the selected model instead of always suggesting `env`.
 - The console script resolves `simple_ar.cli.main:main` directly, removing an import-order-dependent package re-export. Python callers should import the function from `simple_ar.cli.main`; rebuild/reinstall after this entry-point change.

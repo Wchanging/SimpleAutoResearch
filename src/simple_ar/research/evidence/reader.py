@@ -904,6 +904,18 @@ def validate_read_evidence(result: ReadResult) -> tuple[str, ...]:
         if invalid:
             diagnostics.append(f"Reading note {owner!r} has unresolved or cross-document references: "
                                + ", ".join(invalid[:8]))
+        scopes = note.get("claim_scopes", [])
+        if not isinstance(scopes, list):
+            diagnostics.append(f"Reading note {owner!r} has malformed scoped claims; support is unverified.")
+            continue
+        for claim in scopes:
+            if not isinstance(claim, Mapping):
+                diagnostics.append(f"Reading note {owner!r} has a malformed scoped claim; support is unverified.")
+                continue
+            refs = claim.get("evidence_refs", [])
+            if not isinstance(refs, list) or not refs or any(chunks.get(str(ref)) != owner for ref in refs):
+                diagnostics.append(f"Scoped reading claim {claim.get('claim_id', owner)!r} lacks "
+                                   "same-document passage references; support is unverified.")
     return tuple(diagnostics)
 
 

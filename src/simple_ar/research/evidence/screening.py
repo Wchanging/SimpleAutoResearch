@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from simple_ar.integrations.llm import LLMRequest, llm_worker_limit
+from simple_ar.research.contracts import ClaimCard
 from simple_ar.research.prompts import (
     READ_SYSTEM,
     paper_note_user_prompt,
@@ -809,6 +810,7 @@ def _normalize_paper_note(
         "metrics": _string_list_field(row, "metrics"),
         "key_claims": _string_list_field(row, "key_claims")
         or _string_list_field(row, "main_claims"),
+        "claim_scopes": _normalize_claim_scopes(row.get("claim_scopes"), expected_id),
         "limitations": limitations or ["Not specified."],
         "relation_to_topic": relation or "Not specified.",
         "synthesis_hint": _text_field(row, "synthesis_hint"),
@@ -820,6 +822,33 @@ def _normalize_paper_note(
         "relevance": _text_field(row, "relevance") or relation or "Not specified.",
         "followup_queries": [query[:500] for query in _string_items(row.get("followup_queries"), limit=2)],
     }
+
+
+def _normalize_claim_scopes(value: object, paper_id: str) -> list[dict[str, Any]]:
+    """Keep optional scoped interpretations in the existing note, not a new ledger.
+
+    Unknown details remain unknown. The reader validates passage ownership;
+    even a valid reference does not independently establish semantic support.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 8:
+        raise ValueError("claim_scopes must be a list of at most eight claims.")
+    output = []
+    for index, row in enumerate(value, start=1):
+        if not isinstance(row, Mapping) or not _text_field(row, "claim"):
+            raise ValueError("Each claim_scopes entry requires a non-empty claim.")
+        output.append(ClaimCard(
+            claim_id=f"{paper_id}#note-claim-{index:03d}", paper_id=paper_id,
+            claim=_text_field(row, "claim"),
+            object=_text_field(row, "object") or "unknown",
+            property=_text_field(row, "property") or "unknown",
+            conditions=_string_list_field(row, "conditions"),
+            evidence_kind=_text_field(row, "evidence_kind") or "unknown",
+            evidence_refs=_string_list_field(row, "evidence_refs"),
+            scope="model_interpretation_not_independently_verified",
+        ).to_row())
+    return output
 
 
 def _string_items(value: object, *, limit: int) -> list[str]:

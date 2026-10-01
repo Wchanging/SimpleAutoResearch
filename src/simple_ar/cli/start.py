@@ -16,6 +16,15 @@ from simple_ar.app.session_roots import new_research_session_root
 from simple_ar.core.console import print_line
 
 
+FUNCTION_LABELS = {
+    "survey": "Direction survey / 方向调研 — compare sources and deliver a report",
+    "bug_fix": "Code repair / 修改代码 — project, allowed edits and validation required",
+    "reproduction": "Prepared reproduction / 有限复现 — ready environment and explicit command required",
+    "writing": "Material writing / 材料写作 — use notes, drafts or an analysis package",
+    "data_analysis": "Data and plots / 分析绘图 — table, numeric columns and row meaning; no API needed",
+}
+
+
 def add_data_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--data-file", type=Path, help="Data analysis: UTF-8 CSV/TSV or JSON records.")
     parser.add_argument("--value-column", action="append", default=[], help="Explicit numeric column; repeat for separate metrics/axes.")
@@ -55,7 +64,7 @@ def data_settings(args: argparse.Namespace) -> dict:
 
 def add_start_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("start", help="Set up a survey, code fix, prepared reproduction, writing or descriptive data analysis without TOML.")
-    parser.add_argument("--kind", choices=("survey", "bug_fix", "reproduction", "writing", "data_analysis"))
+    parser.add_argument("--kind", choices=tuple(FUNCTION_LABELS))
     add_data_options(parser)
     parser.add_argument("--goal", help="Describe the question or desired fix in your own words.")
     parser.add_argument("--document", action="append", default=[], type=Path)
@@ -167,9 +176,14 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
     interactive = sys.stdin.isatty()
     print_line("Available now: survey, bug_fix, prepared reproduction, material-based writing, data_analysis (descriptive tables and figures).")
     print_line("Free-form scientific illustrations and autonomous reproduction preparation are not yet offered.")
-    kind = _answer("Function / 功能 [survey / bug_fix / reproduction / writing / data_analysis]", args.kind, interactive=interactive)
-    if kind not in {"survey", "bug_fix", "reproduction", "writing", "data_analysis"}:
-        raise ValueError("Choose survey, bug_fix, reproduction, writing or data_analysis.")
+    if interactive and args.kind is None:
+        for index, (name, label) in enumerate(FUNCTION_LABELS.items(), 1):
+            print_line(f"{index}. {label} ({name})")
+    kind = _answer("Function number or name / 功能编号或名称", args.kind, interactive=interactive)
+    numbers = {str(index): name for index, name in enumerate(FUNCTION_LABELS, 1)}
+    kind = numbers.get(kind, kind)
+    if kind not in FUNCTION_LABELS:
+        raise ValueError("Choose 1–5 in the terminal, or survey, bug_fix, reproduction, writing or data_analysis.")
     goal = _answer("Goal / 目标", args.goal, interactive=interactive)
     analysis = None
     if kind == "data_analysis":

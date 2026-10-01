@@ -252,6 +252,29 @@ class StartTests(unittest.TestCase):
             self.assertTrue(config.is_file())
             prompt.assert_not_called()
 
+    def test_interactive_number_selects_existing_writing_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            material = Path(directory) / "notes.md"
+            material.write_text("# Supplied observations\n", encoding="utf-8")
+            args = build_parser().parse_args(["start", "--material", str(material),
+                "--goal", "Summarize supplied notes", "--prepare-only", "--output-root", directory])
+            output = io.StringIO()
+            with patch("sys.stdin.isatty", return_value=True), \
+                    patch("builtins.input", side_effect=["4"]), contextlib.redirect_stdout(output):
+                config = prepare_start(args)
+            self.assertEqual(tomllib.loads(config.read_text())["task"]["kind"], "writing")
+            self.assertIn("no API needed", output.getvalue())
+            self.assertIn("ready environment", output.getvalue())
+
+    def test_invalid_interactive_selection_creates_no_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "output"
+            args = build_parser().parse_args(["start", "--output-root", str(root)])
+            with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="6"), \
+                    contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "Choose"):
+                prepare_start(args)
+            self.assertFalse(root.exists())
+
     def test_main_dispatches_only_to_existing_session_cli(self):
         from simple_ar.cli.main import main
         with tempfile.TemporaryDirectory() as directory, patch("sys.stdin.isatty", return_value=False), \

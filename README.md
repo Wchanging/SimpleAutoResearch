@@ -106,7 +106,8 @@ paths, interpreters, data and task limits belong in task configuration.
 uv run simple-ar start
 ```
 
-Choose `survey`, `bug_fix`, `reproduction`, `writing` or `data_analysis`.
+The numbered menu explains each function and its preparation requirements.
+Select a number or `survey`, `bug_fix`, `reproduction`, `writing` or `data_analysis`.
 The structured guide collects relevant inputs, saves ordinary TOML under
 `runs/assistant/`, and starts the shared session. You do not have to write a task
 file first. `--prepare-only` saves configuration without execution or model calls.

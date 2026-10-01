@@ -212,6 +212,7 @@ class ReviewerFinding(ReportModel):
     claim_id: str = ""
     evidence_handles: list[str] = Field(default_factory=list)
     suggested_action: str = ""
+    required_action: Literal["advisory", "revise", "verify"] | None = None
 
 
 # A model may label a factual defect "minor" even when it remains unresolved.
@@ -219,6 +220,24 @@ class ReviewerFinding(ReportModel):
 FACTUAL_REVIEW_FINDING_TYPES = frozenset({
     "metric_mismatch", "unsupported_claim", "citation_misuse", "source_verification_incomplete",
 })
+
+
+# Severity ranks impact; it is not an instruction to ignore a correction.
+# Keep historical finding behavior when no explicit action was recorded.
+def finding_requires_resolution(finding: ReviewerFinding) -> bool:
+    return (
+        finding.severity in {"major", "critical"}
+        or (finding.severity == "minor" and finding.type in FACTUAL_REVIEW_FINDING_TYPES)
+        or finding.required_action in {"revise", "verify"}
+    )
+
+
+REVIEW_ACTION_RULES = (
+    "For each finding, separate impact severity from required_action: advisory, revise or verify.",
+    "Use advisory for optional polish or explicitly retained evidence limits. Use revise for a concrete change needed in this draft, including consequential repetition or missing qualifications, even if severity is minor.",
+    "Use verify when a consequential statement needs original evidence. Request an allowed source tool with a specific question, or instruct the Writer to remove or bound the unsupported assertion; do not call it verified without evidence.",
+    "A corrected draft may retain a candid limitation as advisory. Do not keep a resolved correction active or turn every optional limitation into required work. No new experiments are authorized by a writing review.",
+)
 
 
 class ReportContext(ReportModel):
@@ -386,6 +405,8 @@ class AgentReportResult(ReportModel):
     memory: ReportMemory
     sections: list[ReportSectionDraft] = Field(default_factory=list)
     iterations: list[ReportIterationRecord] = Field(default_factory=list)
+    # Historical observations, including resolved/provisional ones. Current
+    # unresolved findings live in memory.reviewer_findings and drive final audit.
     reviewer_findings: list[ReviewerFinding] = Field(default_factory=list)
     tool_results: list[ReportToolResult] = Field(default_factory=list)
     used_agent: bool = False

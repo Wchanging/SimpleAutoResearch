@@ -587,10 +587,13 @@ def attach_report_read_evidence(
     parsed_count = sum(status == "parsed" for status in statuses)
     metadata_count = sum(status == "metadata_only" for status in statuses)
     unavailable_count = sum(status in {"failed", "skipped"} for status in statuses)
+    noted_count = sum(record.document_id in notes for record in documents.records)
     coverage_note = (
         f"Source access: {parsed_count} parsed full/local text, {metadata_count} metadata/abstract-only, "
         f"{unavailable_count} unavailable or skipped. Do not describe metadata/abstract-only sources "
-        "as full-text reading."
+        "as full-text reading. "
+        f"Bounded model reading notes: {noted_count}/{len(documents.records)} source records. "
+        "Parsed access and model notes do not certify full-document comprehension or semantic support."
     )
     handles: list[SourceHandle] = []
     for handle in context.source_handles:
@@ -604,6 +607,7 @@ def attach_report_read_evidence(
             document_id=record.document_id,
             extraction_status=record.extraction_status,
             reading_artifact=read_ref.path,
+            reading_state="bounded_model_note" if note is not None else "no_model_note",
         )
         if handle.paper_id in title_sources:
             metadata["title_source"] = title_sources[handle.paper_id]
@@ -611,7 +615,7 @@ def attach_report_read_evidence(
         if note is not None:
             metadata["reading_notes"] = {
                 key: note[key]
-                for key in ("method", "datasets", "metrics", "key_claims", "limitations",
+                for key in ("problem", "method", "datasets", "metrics", "key_claims", "claim_scopes", "limitations",
                             "open_questions", "confidence", "evidence_refs", "reading_coverage")
                 if key in note
             }

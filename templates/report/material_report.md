@@ -22,6 +22,9 @@ paragraph. Use the supplied evidence roles without narrating tool calls or paths
 State the reader's question and what material is available. Explain relevant
 definitions, units and declared conditions. Distinguish supplied descriptions
 from checks actually performed. Do not assume an executed study or unmet goal.
+Keep this framing short. Do not enumerate the numeric series, reproduce the
+findings table, or inventory every absent research stage; those are not inputs
+the reader needs repeated before the findings.
 
 ## Findings
 
@@ -44,6 +47,7 @@ replication. Avoid padding the section with inapplicable experimental caveats.
 Answer the original question at the supported evidence level without repeating
 the findings table. Include follow-up options only if useful; distinguish advice
 from completed or authorized work. No fabricated stopping decision is required.
+Do not repeat the full list of limitations or narrate the framework workflow.
 
 ## References
 
