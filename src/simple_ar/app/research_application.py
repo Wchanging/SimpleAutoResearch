@@ -1377,6 +1377,8 @@ class ResearchApplication:
                     papers=papers, source_plan=plan.source_plan,
                     cache_dir=self._cache_dir("literature"), extraction_dir=self._extraction_dir(),
                     max_chunks=self.services.max_chunks,
+                    analysis_paths=tuple(Path(asset.locator) for asset in self.assets
+                        if self._task_kind() == "writing" and asset.role == "material" and Path(asset.locator).suffix.lower() == ".json"),
                 ), self._input_refs("plan", "search") if has_search else self._input_refs("plan", "assets"), allow_partial=True,
             )
             if accepted:
@@ -2031,6 +2033,8 @@ class ResearchApplication:
             report_context = ReportContext.model_validate(snapshot["context"])
             memory = ReportMemory.model_validate(writer["memory"])
             if action == "report":
+                table_analyses = tuple(self.controller.store.ref(row["artifact"], kind="table_analysis", schema="table_analysis.v1")
+                                      for row in report_context.results.get("supplied_analyses", []))
                 return self._execute("report", "report",
                     ReportAssemblyRequest(title=report_context.topic,
                         sections=_append_verified_experiment_evidence(tuple(writer["sections"]), report_context),
@@ -2038,7 +2042,8 @@ class ResearchApplication:
                         template_name=snapshot["template"]["name"], papers=tuple(report_context.papers),
                         citation_key_map=report_context.citation_key_map,
                         paired_comparisons=tuple(report_context.results.get("comparisons", [])) if "matrix_results" in self.controller.manifest.state_refs else (),
-                        paired_summaries=tuple(report_context.results.get("paired_summary", []))), (writer_ref, snapshot_ref))
+                        paired_summaries=tuple(report_context.results.get("paired_summary", [])),
+                        table_analyses=table_analyses), (writer_ref, snapshot_ref, *table_analyses))
             report_ref = self.controller.manifest.state_refs["report"]
             body_ref = self.controller.store.ref(Path(report_ref.path).parent / "report_body.md", kind="report_body")
             cleanup_ref = self.controller.store.ref(Path(report_ref.path).parent / "citation_cleanup.json", kind="citation_cleanup")
@@ -5036,7 +5041,9 @@ class ResearchApplication:
             if asset.availability != "missing"
             and asset.role in {"paper", "document", "reference", "material"}
             and Path(asset.locator).is_file()
-            and Path(asset.locator).suffix.lower() in {".md", ".markdown", ".txt", ".pdf"}
+            and (Path(asset.locator).suffix.lower() in {".md", ".markdown", ".txt", ".pdf"}
+                 or (self._task_kind() == "writing" and asset.role == "material"
+                     and Path(asset.locator).suffix.lower() == ".json"))
         ))
 
     def _cache_dir(self, name: str) -> Path:

@@ -24,8 +24,9 @@ uv run simple-ar start --kind data_analysis --goal "描述测量结果" \
 
 恢复使用 `research-session --session-root PATH`，原文件更新/删除不替换已固化数据。
 交付目录可以搬迁，在安装项目包的环境中执行 `python -m simple_ar.result_analysis.table analysis.json`
-重建 SVG；计算记录不一致则拒绝重建，不宣称全量文件完整性认证。后续写作可使用 `analysis.md`；
-跨会话图附件自动连接和复杂统计仍待补齐。
+重建 SVG；计算记录不一致则拒绝重建，不宣称全量文件完整性认证。后续写作可将完成的
+`analysis.json` 作为 `--material`，重新核对数值并附带可编辑图；保留其同目录的数据副本，
+不要把原始表格 JSON 当作写作分析包。复杂统计仍不自动推断。
 
 服务器数值验收：`python scripts/validate_table_nist.py --output-root runs/nist-NEW`。
 对照两份 NIST StRD 官方认证数值，评价器另用 Decimal 独立计算；仅验证算术和 CLI 交付，
@@ -39,9 +40,20 @@ uv run simple-ar start --kind writing --goal "说明已有结果、条件和局�
 ```
 
 草稿、笔记、结果说明用可重复的 `--material`；另有参考论文则用 `--document`。
-支持 Markdown/text/PDF，不把原始数值表当成已验证的实验结果。提取文本后直接进入共享的
+支持 Markdown/text/PDF 或已完成的 `table_analysis.v1` 分析包，不把原始数值表当成已验证的实验结果。提取文本后直接进入共享的
 Writer、Reviewer、装配和审计，不需要检索、创新候选、空综合产物或重新实验。
 用户提供的结果仍是外部陈述，不会因此成为本会话独立测量。
+
+分析后写作：将分析任务打印的 `analysis.json` 路径传给 `--material`，也可同时提供笔记。
+同目录必须保留 `input.csv`、`input.tsv` 或 `input.json` 副本。系统用副本重新计算并核对记录，
+固化分析包，重新生成原生 SVG；不执行附带脚本、不信任外部图链接。缺数据、路径逃逸、
+无效包或数值不一致会在写作前失败。写作导入的 JSON/数据文件各限 20 MiB；独立重建
+仍使用分析时明确配置的输入上限，不受写作导入上限限制。
+
+报告附确定性的描述数值表和相对路径 `analyses/`，内含数据副本、分析 JSON/Markdown、SVG。
+搬迁时复制整个报告目录。`report.figures.enabled = false` 或 `mode = "off"` 只关闭正文插图，
+不丢弃证据包；显式总图数上限超出则报错，不悄悄丢图。分享前核查数据隐私。
+复算只检查算术，不证明采集、语义、独立性、显著性或科学有效性，也不是本次重新实验。
 
 默认输出简短分析报告；`--template experiment` 请求诚实的论文体草稿，不授权实验，
 也不保证论文质量。本地论文书目信息可能不完整，需核对，不能编造。

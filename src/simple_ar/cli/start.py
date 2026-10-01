@@ -49,7 +49,7 @@ def add_start_parser(subparsers: argparse._SubParsersAction) -> None:
     add_data_options(parser)
     parser.add_argument("--goal", help="Describe the question or desired fix in your own words.")
     parser.add_argument("--document", action="append", default=[], type=Path)
-    parser.add_argument("--material", action="append", default=[], type=Path, help="Writing: draft, notes or result description (Markdown/text/PDF), not a bibliographic paper.")
+    parser.add_argument("--material", action="append", default=[], type=Path, help="Writing: Markdown/text/PDF or a table_analysis.v1 analysis.json with copied data; not a bibliographic paper.")
     parser.add_argument("--template", help="Writing: built-in report template or Markdown template path; default analysis_report. Use experiment for an honest paper-style draft.")
     parser.add_argument("--sources", choices=("materials", "search"), help="Use only supplied documents, or allow online search.")
     parser.add_argument("--fulltext", action="store_true", help="Allow remote full-text retrieval and PDF downloads for an online survey; otherwise read available abstracts/local materials.")
@@ -193,8 +193,13 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
             raise ValueError("Writing requires at least one --material or --document.")
         if len(set([*documents, *materials])) != len(documents) + len(materials):
             raise ValueError("Each writing file must have one role; do not repeat papers as material.")
-        if any(path.suffix.lower() not in {".md", ".markdown", ".txt", ".pdf"} for path in [*documents, *materials]):
-            raise ValueError("Writing material must be Markdown, text or PDF; raw data is not a verified result description.")
+        if any(path.suffix.lower() not in {".md", ".markdown", ".txt", ".pdf"} for path in documents) or any(
+            path.suffix.lower() not in {".md", ".markdown", ".txt", ".pdf", ".json"} for path in materials):
+            raise ValueError("Writing material must be text/PDF or a table_analysis.v1 package; raw tables are not writing results.")
+        from simple_ar.result_analysis.table import load_analysis_package
+        for path in materials:
+            if path.suffix.lower() == ".json":
+                load_analysis_package(path)
     project = None
     validation = None
     allowed = list(args.allow)
@@ -265,7 +270,7 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
             print_line("Reading: remote full-text/PDF retrieval enabled (best effort)." if args.fulltext else
                        "Reading: abstracts and supplied local materials only. Use --fulltext for remote full-text/PDF retrieval.")
         if kind == "writing":
-            print_line("Writes from supplied text only; user results are not independently verified. No experiment, research synthesis, or online search is requested.")
+            print_line("Writes from supplied material; analysis packages copy data and recheck arithmetic, not data collection or scientific validity. No experiment, synthesis, or online search is requested.")
 
     # Persist before the final confirmation: an EOF/decline here loses no inputs.
     root = new_research_session_root(args.output_root, goal)

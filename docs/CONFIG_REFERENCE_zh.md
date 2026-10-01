@@ -9,6 +9,10 @@
 `task.outputs = ["report"]`、`assets.materials = ["notes.md"]`、`model.name = "env"`。
 `assets.papers` 可另提供论文；不要把同一文件重复标成论文和笔记。
 材料路径相对配置文件解析，支持 Markdown、文本和 PDF。
+`assets.materials` 还可接受已完成的 `table_analysis.v1` `analysis.json`，同目录保留数据副本。
+沿用同一配置字段，不新增运行时：重新计算核对数值、生成原生 SVG，报告附可搬迁数据表与分析包。
+写作导入的 JSON/数据文件各限 20 MiB；缺项或数值不一致会在写作前失败。
+复算不证明采集或科学主张；原始表格应先使用 `data_analysis`，不能直接冒充分析包。
 
 默认 `report.template = "analysis_report"`；`"experiment"` 请求论文体草稿，而不授权实验。
 引导写作默认开启 `report.document_review = true`。执行配置、在线搜索及研究创新不属于此任务。
@@ -123,7 +127,7 @@ value_unit = "秒"
 | `[research]` | `providers`、`queries`、`max_results`、`max_chunks`、`max_pdf_pages`、`read_max_shortlist`、`idea_limit`、`cache_dir` | 列表可省略；CLI 默认 `max_results = 10`、`max_chunks = 300`、`idea_limit = 3`。`max_pdf_pages` 是正整数，限制本地 PDF 最多提取页数（默认 `20`）；更改后应创建新会话，不能把已冻结的阅读证据当成新版本。`read_max_shortlist` 可选，显式提供的论文优先保留；若数量超过上限则显式报错。`cache_dir` 可选，未持久化，不能作为安全的恢复变更。 |
 | `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`max_fulltext_documents`、`max_pdf_mb`、`materials_only` | 开关默认 false，可选上限默认不设。`materials_only = true` 使用本地输入（`assets.papers`，或写作的 `assets.materials`）并禁用 search，仍允许模型阅读；writing 始终仅用本地输入。引导入口的 `--fulltext --sources search` 会允许缓存 PDF，默认最多 4 份、每份 20 MiB；专家可在 TOML 中调整正整数上限。远程 PDF 需要下载许可与缓存许可；获取失败仍明确标注只读摘要或不可用。 |
 | `[research]` | `max_iterations`、`interaction` | `max_iterations` 默认 `1`，`0` 表示首轮分析后停止。`interaction` 新 CLI 默认 `checkpoints`，可选 `assisted`、`checkpoints`、`autonomous`；硬事实和权限缺口在任何模式下都是阻塞。 |
-| `[assets]` | `papers`、`materials` | 只读本地 Markdown/text/PDF 路径，相对 TOML 所在目录解析。`papers` 表示书目来源；`materials` 用于 `writing` 的草稿、笔记和外部结果说明，不当成本次实测指标。写作至少需要一份输入，不接受重复文件或同一文件兼任两种角色。 |
+| `[assets]` | `papers`、`materials` | 只读本地 Markdown/text/PDF 路径，相对 TOML 所在目录解析。`papers` 表示书目来源；`materials` 用于 `writing` 的草稿、笔记、外部结果说明或附有数据副本的完整 `table_analysis.v1` 分析包，不当成本次实测实验指标。写作至少需要一份输入，不接受重复文件或同一文件兼任两种角色。 |
 
 未知分区/字段和类型错误会显式拒绝。accepted plan 是短顺序计划，动作唯一且输入由
 能力适配函数绑定，不是任意模型调度器。只调研不会创建实验进程；`bug_fix` 必须提供

@@ -1629,6 +1629,12 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
         }
 
     compact: dict[str, Any] = {}
+    analyses = results.get("supplied_analyses")
+    if isinstance(analyses, list):
+        compact["supplied_analyses"] = [{"document_id": row["document_id"], "evidence_role": row["evidence_role"],
+            "spec": row["spec"], "records": row["records"][:12], "records_truncated": len(row["records"]) > 12}
+            for row in analyses[:6]]
+        compact["supplied_analyses_truncated"] = len(analyses) > 6
     implementation = _mapping(results.get("implementation"))
     if implementation is not None:
         compact["implementation"] = {

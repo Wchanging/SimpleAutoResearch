@@ -6,7 +6,9 @@
 
 `simple-ar start --kind writing --goal "写一份诚实的分析报告" --material notes.md`
 使用已有草稿、笔记或结果说明；可重复 `--material`，论文来源另用 `--document`。
-输入支持本地 Markdown、文本及 PDF；默认 `analysis_report`，用 `--template experiment`
+输入支持本地 Markdown、文本及 PDF；`--material` 还可接收已完成的 `table_analysis.v1`
+`analysis.json`（同目录保留数据副本），复算后附带可编辑图；不接受原始表格 JSON。
+默认 `analysis_report`，用 `--template experiment`
 请求论文体草稿。材料提取后直接写作、审阅、装配和审计，不搜索、不造研究综合、不执行实验。
 用户提供的数字与方法不等于本会话独立验证；审计状态也不等于发表质量。
 高级入口为 `research-session --task-kind writing --topic "说明已有结果" --material PATH --model env`，模板选项为

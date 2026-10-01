@@ -187,31 +187,104 @@ def analyze_table_capability(context: CapabilityContext, request: ArtifactRef) -
     figures = render_table_figures(result, context.store.root)
     result["figures"] = figures
     ref = context.store.write_json("analysis.json", result, kind="table_analysis", schema="table_analysis.v1")
-    lines = ["# Descriptive data analysis", "", f"Input: `{payload['source_name']}`; rows: {result['row_count']}.",
+    report = context.store.write_text("analysis.md", table_markdown(result), kind="table_report")
+    outputs = (ref, copied, report, *[context.store.ref(item["path"], kind="figure") for item in figures])
+    return CapabilityResult("completed", tuple(outputs))
+
+
+def table_markdown(result: dict) -> str:
+    """Describe computed values without changing their evidence role."""
+    spec = TableSpec.from_config(result["spec"])
+    lines = ["# Descriptive data analysis", "", f"Input: `{result['source_name']}`; rows: {result['row_count']}.",
              f"Observation unit (user-declared): {spec.observation_unit}. Value unit: {spec.value_unit or 'not supplied'}.",
              f"Mode: {spec.mode}; missing policy: {spec.missing}.", ""]
     for row in result["records"]:
         metric = f"mean={row['mean']:.12g}, sample_std={row['sample_std']}" if spec.mode == "observations" else f"value={row['value']:.12g}"
         lines.append(f"- {row['group']!r} / {row['column']!r}: {metric}; n={row['count']}; missing={row['missing']}.")
-    lines.extend(["", *[f"![Descriptive values]({item['path']})\n\n{item['caption']}\n" for item in figures],
+    lines.extend(["", *[f"![Descriptive values]({item['path']})\n\n{item['caption']}\n" for item in result["figures"]],
                   "## Limits", "", *result["limitations"], "", "Rebuild from this directory (no model/API calls):", "", "```sh",
                   "python -m simple_ar.result_analysis.table analysis.json", "```", "",
                   "The copied input can contain sensitive data; review before sharing this directory."])
-    report = context.store.write_text("analysis.md", "\n".join(lines) + "\n", kind="table_report")
-    outputs = (ref, copied, report, *[context.store.ref(item["path"], kind="figure") for item in figures])
-    return CapabilityResult("completed", tuple(outputs))
+    return "\n".join(lines) + "\n"
+
+
+def load_analysis_package(path: Path, *, max_mb: int | None = 20) -> tuple[dict, bytes, str]:
+    """Recheck a v1 result against its package-local input, not its prose/SVG.
+
+    Imported packages are external input, not trusted just because they name
+    our schema. Limit reads and reject paths/symlinks outside the selected pack.
+    Never execute a supplied script or follow its figure/resource links.
+    """
+    path = path.resolve()
+    limit = max_mb * 1024 * 1024 if max_mb is not None else None
+    with path.open("rb") as handle:
+        raw_result = handle.read(limit + 1) if limit is not None else handle.read()
+    if limit is not None and len(raw_result) > limit:
+        raise ValueError(f"Analysis package result exceeds the {max_mb} MiB writing import limit.")
+    payload = json.loads(raw_result.decode("utf-8-sig"))
+    if not isinstance(payload, dict) or payload.get("schema_version") != "table_analysis.v1" or payload.get("status") != "completed":
+        raise ValueError("Writing JSON material must be a completed table_analysis.v1 package with its copied input.")
+    if not isinstance(payload.get("spec"), dict) or not isinstance(payload.get("source"), dict):
+        raise ValueError("Analysis package must include its column settings and copied input reference.")
+    if not isinstance(payload["source"].get("path"), str) or not payload["source"]["path"]:
+        raise ValueError("Analysis package must name its copied input with a relative path.")
+    spec = TableSpec.from_config(payload["spec"])
+    source_ref = ArtifactRef.from_dict(payload["source"])
+    source = (path.parent / source_ref.path).resolve()
+    if not source.is_relative_to(path.parent) or source == path:
+        raise ValueError("Analysis input must stay inside the selected package directory.")
+    input_limit = spec.max_mb * 1024 * 1024
+    if limit is not None:
+        input_limit = min(limit, input_limit)
+    with source.open("rb") as handle:
+        raw = handle.read(input_limit + 1)
+    if len(raw) > input_limit:
+        raise ValueError("Analysis input exceeds the configured size limit.")
+    result = describe_table(parse_table(raw.decode("utf-8-sig"), source.suffix.lower()), spec)
+    if result["records"] != payload.get("records") or result["row_count"] != payload.get("row_count"):
+        raise ValueError("Copied data no longer matches the saved analysis; refusing stale or altered results.")
+    result["source_name"] = Path(str(payload.get("source_name") or source.name)).name
+    return result, raw, source.suffix.lower()
+
+
+def copy_analysis_package(path: Path, output_dir: Path) -> dict:
+    """Freeze rechecked data and rebuild native figures for a new consumer."""
+    from simple_ar.core.capabilities import ArtifactStore
+    from simple_ar.report.figures import render_table_figures
+    result, raw, suffix = load_analysis_package(path)
+    store = ArtifactStore(output_dir)
+    source = store.ref("input" + suffix, kind="user_data")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    store.resolve(source).write_bytes(raw)
+    result["source"] = source.to_dict()
+    result["figures"] = render_table_figures(result, output_dir)
+    store.write_json("analysis.json", result, kind="table_analysis", schema="table_analysis.v1")
+    store.write_text("analysis.md", table_markdown(result), kind="table_report")
+    return result
+
+
+def table_values_markdown(result: dict) -> str:
+    """Deterministic numerical evidence for a report, without inferred tests."""
+    from html import escape
+    def cell(value):
+        return escape(str(value)).replace("|", "&#124;").replace("\n", " ").replace("\r", " ")
+    fields = ("mean", "sample_std", "min", "max") if result["spec"]["mode"] == "observations" else ("value",)
+    lines = ["| Group | Column | Count | Missing | " + " | ".join(fields) + " |",
+             "| --- | --- | ---: | ---: | " + " | ".join("---:" for _ in fields) + " |"]
+    for row in result["records"]:
+        numbers = ["not defined" if row[field] is None else f"{row[field]:.12g}" for field in fields]
+        lines.append("| " + " | ".join([cell(row["group"]), cell(row["column"]), str(row["count"]), str(row["missing"]), *numbers]) + " |")
+    spec = result["spec"]
+    return "\n".join([f"Row unit (user-declared): {cell(spec['observation_unit'])}. Value unit: {cell(spec['value_unit'] or 'not supplied')}.",
+                      f"Mode: {spec['mode']}; missing policy: {spec['missing']}.", "", *lines])
 
 
 def rebuild(path: Path) -> None:
     from simple_ar.report.figures import render_table_figures
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "table_analysis.v1":
-        raise ValueError("Expected a table_analysis.v1 result.")
-    source = path.parent / ArtifactRef.from_dict(payload["source"]).path
-    result = describe_table(parse_table(source.read_bytes().decode("utf-8-sig"), source.suffix.lower()), TableSpec.from_config(payload["spec"]))
-    if result["records"] != payload["records"]:
-        raise ValueError("Copied data no longer matches the saved results; not overwriting the original analysis.")
-    render_table_figures(payload, path.parent)
+    # Rebuilding one's own package keeps its explicitly configured input limit.
+    # The narrower external-writing limit must not restrict this expert entry.
+    result, _, _ = load_analysis_package(path, max_mb=None)
+    render_table_figures(result, path.parent)
 
 
 if __name__ == "__main__":

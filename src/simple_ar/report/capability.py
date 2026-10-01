@@ -9,7 +9,7 @@ choose sections, call an LLM, or run an audit.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,7 @@ class ReportAssemblyRequest:
     citation_key_map: Mapping[str, str] = field(default_factory=dict)
     paired_comparisons: tuple[Mapping[str, Any], ...] = ()
     paired_summaries: tuple[Mapping[str, Any], ...] = ()
+    table_analyses: tuple[ArtifactRef, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.title.strip():
@@ -79,6 +80,9 @@ def assemble_report_document(
     figure_renderer: FigureRenderer | None = None,
 ) -> ReportAssemblyResult:
     """Assemble explicit section drafts without changing their meaning."""
+
+    if request.table_analyses:
+        raise ValueError("Analysis packages require run_report_capability with registered inputs.")
 
     sections = tuple(
         section
@@ -205,6 +209,7 @@ def run_report_capability(
     """Persist one assembled report through the session capability boundary."""
 
     renderer = figure_renderer or DeterministicFigureRenderer()
+    request, attachments, imported_figures = _attach_table_analyses(context, request)
     # Leave the default renderer implicit so the assembly boundary can choose
     # the structured paired-measurement renderer when experiment comparisons
     # are present.  A caller-supplied renderer remains authoritative.
@@ -213,6 +218,11 @@ def run_report_capability(
         report_dir=context.store.root,
         figure_renderer=figure_renderer,
     )
+    if imported_figures:
+        result = replace(result, figures=(*result.figures, *imported_figures))
+    config = request.config if isinstance(request.config, ReportRuntimeConfig) else ReportRuntimeConfig.model_validate(request.config)
+    if config.figures.max_figures > 0 and len(result.figures) > config.figures.max_figures:
+        raise ValueError("Supplied and generated figures exceed the explicit report max_figures; no figures were silently dropped.")
     report_ref = context.store.write_text(
         "report.md",
         result.report_markdown,
@@ -243,7 +253,7 @@ def run_report_capability(
         schema="citation_map.v1",
         producer="report.assembly",
     )
-    artifacts: list[ArtifactRef] = [report_ref, body_ref, references_ref, citation_map_ref]
+    artifacts: list[ArtifactRef] = [report_ref, body_ref, references_ref, citation_map_ref, *attachments]
     artifacts.append(context.store.write_json(
         "citation_cleanup.json", {"removed_citations": list(result.removed_citations)},
         kind="citation_cleanup", schema="citation_cleanup.v1", producer="report.assembly",
@@ -280,7 +290,7 @@ def run_report_capability(
         artifacts.append(manifest_ref)
     return CapabilityResult(
         status="partial" if diagnostics else "completed",
-        artifacts=tuple(artifacts),
+        artifacts=tuple({ref.path: ref for ref in artifacts}.values()),
         diagnostics=tuple(diagnostics),
         usage={
             "section_count": len(request.sections),
@@ -293,6 +303,39 @@ def run_report_capability(
             "result_schema": "report.v1",
         },
     )
+
+
+def _attach_table_analyses(
+    context: CapabilityContext, request: ReportAssemblyRequest,
+) -> tuple[ReportAssemblyRequest, list[ArtifactRef], list[ReportFigureRecord]]:
+    """Copy registered data into the report; leave pure text assembly unchanged."""
+    from simple_ar.result_analysis.table import copy_analysis_package, table_values_markdown
+
+    config = request.config if isinstance(request.config, ReportRuntimeConfig) else ReportRuntimeConfig.model_validate(request.config)
+    attachments: list[ArtifactRef] = []
+    figures: list[ReportFigureRecord] = []
+    sections: list[ReportSectionDraft] = []
+    for index, ref in enumerate(request.table_analyses, start=1):
+        prefix = f"analyses/analysis-{index:03d}"
+        result = copy_analysis_package(context.require_input(ref), context.store.root / prefix)
+        # Keep the recoverable package even when report figure inclusion is off.
+        blocks = [f"[Rechecked descriptive data and editable figures]({prefix}/analysis.md).",
+                  "Arithmetic was checked against copied user data; collection and scientific validity were not verified.",
+                  "", table_values_markdown(result)]
+        if config.figures.enabled and config.figures.mode != "off":
+            for figure in result["figures"]:
+                path = f"{prefix}/{figure['path']}"
+                blocks.extend(["", f"![Descriptive data]({path})", "", figure["caption"]])
+                figures.append(ReportFigureRecord(figure_id=f"supplied-analysis-{index}-{len(figures)+1}",
+                    title="Supplied descriptive data", path=path, anchor=f"supplied_analysis_{index}",
+                    caption=figure["caption"], source_artifacts=[ref.path]))
+        sections.append(ReportSectionDraft(section_id=f"supplied_analysis_{index}",
+            heading=f"Supplied Descriptive Data {index}", draft_markdown="\n".join(blocks)))
+        attachments.extend(context.store.ref(item.relative_to(context.store.root), kind="analysis_attachment")
+                           for item in (context.store.root / prefix).rglob("*") if item.is_file())
+    if sections:
+        request = replace(request, sections=(*request.sections, *sections), table_analyses=())
+    return request, attachments, figures
 
 
 def _cited_papers_from_request(

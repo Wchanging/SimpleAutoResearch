@@ -18,7 +18,9 @@ discover implementations or install dependencies. Other kinds reject these execu
 
 Material-based writing accepts repeatable `--material` for drafts, notes or result descriptions,
 optional `--document` for bibliographic sources, and `--template` (default `analysis_report`;
-`experiment` requests a paper-style draft). Inputs must be local Markdown/text/PDF.
+`experiment` requests a paper-style draft). Inputs can be local Markdown/text/PDF,
+or a completed `table_analysis.v1` `analysis.json` with its adjacent copied data.
+The latter is rechecked and its SVGs attached; raw table JSON is not accepted here.
 It extracts these inputs then writes, reviews, assembles and audits; it does not search,
 synthesize a research direction or execute an experiment. Supplied results are not independently
 verified measurements. Use `research-session --task-kind writing --topic "Explain my results" --material PATH --model env`

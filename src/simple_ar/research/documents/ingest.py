@@ -8,7 +8,7 @@ the returned bundle.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -104,6 +104,7 @@ class DocumentIngestRequest:
     max_chunks: int | None = None
     resolver: DocumentResolver | None = None
     parser: DocumentParser | None = None
+    analysis_paths: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "papers", tuple(self.papers))
@@ -196,15 +197,37 @@ def run_document_ingest_capability(
     stable status mapping for downstream Read capabilities.
     """
 
+    analysis_paths = {str(path.resolve()) for path in request.analysis_paths}
+    source_plan = replace(request.source_plan, local_documents=[path for path in request.source_plan.local_documents
+                         if str(Path(path).resolve()) not in analysis_paths])
     bundle = build_document_bundle(
         papers=list(request.papers),
-        source_plan=request.source_plan,
+        source_plan=source_plan,
         cache_dir=request.cache_dir,
         extraction_dir=request.extraction_dir,
         max_chunks=request.max_chunks,
         resolver=request.resolver,
         parser=request.parser,
     )
+    imported = []
+    for index, path in enumerate(request.analysis_paths, start=1):
+        from simple_ar.result_analysis.table import copy_analysis_package, table_markdown
+        prefix = f"analyses/analysis-{index:03d}"
+        result = copy_analysis_package(path, context.store.root / prefix)
+        document_id = f"supplied-analysis-{index:03d}"
+        text = table_markdown(result)
+        artifact = f"{prefix}/analysis.json"
+        bundle.records.append(DocumentRecord(document_id=document_id, title=f"Descriptive analysis: {result['source_name']}",
+            source="local_analysis", source_id=str(path.resolve()), extraction_status="parsed", parser="table_analysis.v1",
+            metadata={"table_analysis": {"artifact": artifact, "records": result["records"], "spec": result["spec"]},
+                      "evidence_role": "recomputed_from_user_supplied_data"}))
+        bundle.sections.append(DocumentSection(section_id=f"{document_id}:results", document_id=document_id,
+            section="results", heading="Rechecked descriptive data", text=text, source_path=f"{prefix}/analysis.md"))
+        imported.extend(context.store.ref(item.relative_to(context.store.root), kind="table_analysis" if item.name == "analysis.json" else "analysis_attachment",
+            schema="table_analysis.v1" if item.name == "analysis.json" else None)
+            for item in (context.store.root / prefix).rglob("*") if item.is_file())
+    if request.analysis_paths:
+        bundle.chunks[:] = build_text_chunks(bundle.records, sections=bundle.sections, max_chunks=request.max_chunks)
     output = context.store.write_json(
         "document_bundle.json",
         bundle.to_handoff_dict(),
@@ -227,7 +250,7 @@ def run_document_ingest_capability(
         status = "completed"
     return CapabilityResult(
         status=status,  # type: ignore[arg-type]
-        artifacts=(output,),
+        artifacts=(output, *imported),
         diagnostics=tuple(diagnostics),
         usage={
             "documents": len(bundle.records),

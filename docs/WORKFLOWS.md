@@ -40,8 +40,10 @@ Resume with `research-session --session-root PATH` even if the original data cha
 completed input snapshots are reused. Copy the completed analysis directory, then rebuild figures
 there with `python -m simple_ar.result_analysis.table analysis.json` using an installed package.
 The rebuilder refuses changed computed records; it is not a full file-integrity certification.
-Feed `analysis.md` into a later writing task to explain results; automated cross-session
-figure attachment and complex statistics are not yet offered.
+Supply the completed `analysis.json` as `--material` in a later writing task to
+recheck the values and attach its editable figures. Keep its copied `input.csv`,
+`input.tsv` or `input.json` beside it; do not submit a raw table as writing JSON.
+Complex statistics are not inferred.
 
 Server numerical acceptance: `python scripts/validate_table_nist.py --output-root runs/nist-NEW`.
 It compares two official NIST StRD datasets with certified mean/sample-standard-deviation values
@@ -60,8 +62,23 @@ Repeat `--material` for drafts, notes or result descriptions; `--document` ident
 a separate bibliographic paper. Writing extracts and persists the supplied text, then
 uses the shared Writer, Reviewer, assembly and audit capabilities. It does not search,
 create innovation candidates, execute experiments or manufacture an empty synthesis.
-Inputs are Markdown/text/PDF, not raw numerical tables. Supplied results remain
-external assertions, not independent measurements by this session.
+Inputs are Markdown/text/PDF or a completed `table_analysis.v1` analysis package.
+For data-backed writing, pass the analysis task's printed `analysis.json` path
+to `--material` (optionally alongside notes). The system checks the saved records
+against the package-local copied data, freezes that package and regenerates its
+native SVGs instead of trusting supplied figure paths or executing scripts.
+Malformed packages, missing data, escaping paths and stale values fail before writing.
+Writing imports are limited to 20 MiB per JSON/input file; standalone figure
+rebuilding retains the original analysis's configured input limit.
+
+The report contains an exact descriptive-value appendix plus a relative-path
+`analyses/` directory with copied data, analysis JSON/Markdown and editable SVGs.
+Copy the whole report directory to retain those links and rebuildable figures.
+`report.figures.enabled = false` or `mode = "off"` omits figures from the report,
+not the evidence package; an explicit total figure limit fails instead of dropping figures.
+Review copied data for privacy before sharing. Arithmetic rechecking does not
+verify collection, semantics, independence, significance or scientific validity;
+these are not experiments independently repeated by this session.
 
 The default is a concise analysis report. Add `--template experiment` for a
 paper-style draft with explicit evidence gaps. It does not authorize experiments or

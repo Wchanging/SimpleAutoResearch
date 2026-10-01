@@ -64,7 +64,12 @@ saves ordinary TOML: `task.kind = "writing"`, `task.outputs = ["report"]`,
 `--document`/`assets.papers` identifies a bibliographic source, not a draft;
 repeat `--material` for additional drafts, notes or result descriptions.
 Paths resolve from the configuration directory. Supported inputs are Markdown, text and PDF;
-raw tables are not automatically treated as verified experiment results. Execution configuration
+`assets.materials` also accepts completed `table_analysis.v1` `analysis.json` files with
+their adjacent copied data. They use the same config field, not a second task/runtime.
+Arithmetic is rechecked, native SVGs regenerated and the report receives a portable data appendix.
+Writing imports cap each JSON/input at 20 MiB; incomplete/stale packages fail before writing.
+This verifies the calculation, not data collection or scientific claims.
+Raw tables are not automatically treated as verified experiment results. Execution configuration
 is rejected. Extracted text is persisted and reused on resume; search, synthesis and experiments
 are not prerequisites. Supplied results remain unverified external assertions.
 Guided writing defaults to `report.template = "analysis_report"` and `report.document_review = true`.
@@ -144,7 +149,7 @@ reuse the saved choice).
 | `[research]` | `providers`, `queries`, `max_results`, `max_chunks`, `max_pdf_pages`, `read_max_shortlist`, `idea_limit`, `cache_dir` | Lists are optional; CLI defaults are `max_results = 10`, `max_chunks = 300`, `idea_limit = 3`. `max_pdf_pages` is an optional positive local-PDF extraction ceiling (default `20`); changing it requires a new session because existing extracted evidence is frozen. `read_max_shortlist` is optional (default: all papers up to 24); explicitly supplied papers are retained within this reading limit, and an over-limit request fails visibly. `cache_dir` is optional and is not a safe resume-change because it is not persisted. |
 | `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `max_fulltext_documents`, `max_pdf_mb`, `materials_only` | These switches default false and optional caps are unset. `materials_only = true` consumes supplied local inputs (`assets.papers`, or writing `assets.materials`) and disables search; it does not disable model reading. Writing always uses local-only scope. Guided `start --fulltext --sources search` enables PDF cache retention with a 4-document, 20 MiB-per-PDF limit; expert TOML may adjust the positive caps. Remote PDFs require both PDF permission and cache retention. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
 | `[research]` | `max_iterations`, `interaction` | `max_iterations` defaults to `1`; `0` stops after the first analysis. `interaction` defaults to `checkpoints` for a new CLI session and accepts `assisted`, `checkpoints`, or `autonomous`. Critical facts and permissions block every mode. |
-| `[assets]` | `papers`, `materials` | Read-only local Markdown/text/PDF paths, resolved from the TOML directory. `papers` identifies bibliographic sources; `materials` is for `writing` drafts, notes and external result descriptions, not independently measured metrics. Writing requires at least one input and rejects duplicate/dual-role files. |
+| `[assets]` | `papers`, `materials` | Read-only local Markdown/text/PDF paths, resolved from the TOML directory. `papers` identifies bibliographic sources; `materials` is for `writing` drafts, notes, result descriptions or completed `table_analysis.v1` packages with copied data, not independently measured experiment metrics. Writing requires at least one input and rejects duplicate/dual-role files. |
 
 Explicitly supplied local PDFs are parsed best-effort (the default parser reads
 at most 20 pages unless `max_pdf_pages` is set) even when `use_fulltext = false`; that flag governs remote

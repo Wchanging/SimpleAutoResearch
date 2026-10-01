@@ -385,8 +385,10 @@ def _print_research_session(args: argparse.Namespace) -> None:
         supplied = [Path(path).expanduser().resolve() for path in [*materials, *args.local_document]]
         if len(supplied) != len(set(supplied)):
             raise SystemExit("Writing material must have one unambiguous role per file; do not repeat a paper as material.")
-        if any(not path.is_file() or path.suffix.lower() not in {".md", ".markdown", ".txt", ".pdf"} for path in supplied):
-            raise SystemExit("Writing requires existing Markdown, text or PDF files. Use result descriptions, not raw tables, as writing material.")
+        text_suffixes = {".md", ".markdown", ".txt", ".pdf"}
+        for paths, suffixes in ((args.local_document, text_suffixes), (materials, text_suffixes | {".json"})):
+            if any(not Path(path).expanduser().is_file() or Path(path).suffix.lower() not in suffixes for path in paths):
+                raise SystemExit("Writing requires text/PDF or a table_analysis.v1 analysis package; raw tables are not writing results.")
     if outputs and task_kind != "bug_fix" and "experiments" not in outputs and (command or execution_details or getattr(args, "code_task_config", None)):
         raise SystemExit("Execution configuration requires experiments in --outputs/task.outputs.")
     if task_kind == "bug_fix" and outputs and set(outputs) != {"bug_fix"}:

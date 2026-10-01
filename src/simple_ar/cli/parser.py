@@ -106,7 +106,7 @@ def build_parser(
     from simple_ar.cli.start import add_data_options
     add_data_options(session_parser)
     session_parser.add_argument("--material", action="append", default=[],
-                                help="Writing: supplied draft, notes or result description (Markdown/text/PDF); not a verified experiment or bibliographic paper.")
+                                help="Writing: text/PDF or table_analysis.v1 analysis.json with copied data; not a verified experiment or bibliographic paper.")
     session_parser.add_argument("--total-tokens", type=int, default=None, help="Optional session API token budget; omitted means unlimited.")
     session_parser.add_argument("--llm-requests", type=int, default=None, help="Optional session API request budget; omitted means unlimited.")
     session_parser.add_argument("--max-output-tokens", type=int, default=None)

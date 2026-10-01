@@ -291,7 +291,7 @@ def build_material_report_inputs(
         )
         metadata = {**handle.metadata, "document_id": record.document_id,
                     "extraction_status": record.extraction_status,
-                    "evidence_role": "bibliographic_source_not_independently_verified" if record.document_id in paper_handles else "user_supplied_unverified",
+                    "evidence_role": record.metadata.get("evidence_role") or ("bibliographic_source_not_independently_verified" if record.document_id in paper_handles else "user_supplied_unverified"),
                     "document_chunk_count": len(chunks),
                     "evidence_passages": [{"chunk_id": chunks[index].chunk_id,
                         "text": chunks[index].text[:1200], "truncated": len(chunks[index].text) > 1200}
@@ -315,6 +315,16 @@ def build_material_report_inputs(
         citation_key_map=_citation_key_map(search.selected_papers),
         evidence_summary=" ".join(limitations),
         results={"evidence_origin": "user_supplied_unverified", "session_execution": "not_requested"})
+    analyses = []
+    for record in documents.records:
+        table = record.metadata.get("table_analysis")
+        if table is not None:
+            analyses.append({**table, "artifact": (Path(documents_ref.path).parent / table["artifact"]).as_posix(),
+                             "document_id": record.document_id, "evidence_role": "recomputed_from_user_supplied_data"})
+    if analyses:
+        context.results["supplied_analyses"] = analyses
+        limitations.append("Descriptive values were recomputed from the copied input. This checks arithmetic, not data collection, semantics, significance or an independently repeated experiment.")
+        context.evidence_summary = " ".join(limitations)
     return context, ReportMemory(objective=topic, report_mode=context.report_mode,
                                  source_handles=handles, limitations=limitations)
 
