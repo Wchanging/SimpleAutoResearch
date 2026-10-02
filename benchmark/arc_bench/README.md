@@ -32,8 +32,9 @@ benchmark/arc_bench/
   batch_logs/             # command logs
 ```
 
-`benchmark/` is gitignored. Only the adapter scripts and lightweight docs are
-tracked.
+Adapter scripts and lightweight docs are tracked. Generated `prepared/`,
+`runs/`, `submissions/`, `batch_state/` and `batch_logs/` directories are ignored;
+they are not bundled task inputs or official benchmark scores.
 
 ## One-Time Prepare
 

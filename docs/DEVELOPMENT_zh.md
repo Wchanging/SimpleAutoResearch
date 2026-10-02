@@ -148,6 +148,11 @@ facade、registry 分支和 projection 应直接删除，不继续保留“以�
 
 ## 职责边界表
 
+CLI/TOML 合并后的输入校验归 `cli.research_config.validate_session_arguments`；行动分发、
+执行决策与持久化仍归应用，普通行动处理方法不另建运行时。有界报告提示视图归
+`report.narrative`，不保存第二份报告记忆。编辑上下文选择归 `code_task.editing.scope`，
+初次改码与修复共用。整理纯视图不意味着可以改变 checkpoint、预算或采用稿语义。
+
 决定改动放在哪里时先看这张表。稳定入口是新调用方可以依赖的最小公开边界；
 最后一列同样重要，它用来防止领域策略泄漏进 core。
 

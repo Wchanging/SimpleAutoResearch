@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import codecs
 import json
 import os
 import re
@@ -76,15 +77,20 @@ TEXT_SUFFIXES = {
 }
 
 STAGE_DIR_RE = re.compile(r"^(?P<number>\d{2})-(?P<slug>[a-z0-9-]+)(?:/|$)")
-MAX_SUMMARY_BYTES = 8192
+MAX_SUMMARY_CHARS = 8192
+MAX_SEARCH_FILE_BYTES = 8 * 1024 * 1024
 
 
-def build_artifact_index(run_dir: Path, *, write: bool = True) -> dict[str, Any]:
+def build_artifact_index(
+    run_dir: Path, *, write: bool = True, hash_files: bool = False,
+) -> dict[str, Any]:
     """Index inspectable files under a run directory.
 
     Args:
         run_dir: Root run directory to scan.
         write: When true, save the index to ``artifact_index.json`` in ``run_dir``.
+        hash_files: Explicitly read file contents to compute hashes. Inspection
+            and search do not need these hashes; omitted hashes are null.
 
     Returns:
         A JSON-serializable index containing relative paths, file kinds, stages,
@@ -100,7 +106,7 @@ def build_artifact_index(run_dir: Path, *, write: bool = True) -> dict[str, Any]
     if not root.is_dir():
         raise NotADirectoryError(f"Run path is not a directory: {root}")
 
-    artifacts = [_index_file(root, path) for path in _iter_artifact_files(root)]
+    artifacts = [_index_file(root, path, hash_files=hash_files) for path in _iter_artifact_files(root)]
     artifacts.sort(key=lambda item: item["path"])
 
     index = {
@@ -151,7 +157,7 @@ def _iter_artifact_files(root: Path) -> list[Path]:
         ]
         for filename in filenames:
             path = current_path / filename
-            if _should_ignore_file(path):
+            if _should_ignore_file(path) or path.is_symlink() or not path.is_file():
                 continue
             rel = path.relative_to(root)
             if _has_ignored_parent(rel):
@@ -160,7 +166,7 @@ def _iter_artifact_files(root: Path) -> list[Path]:
     return files
 
 
-def _index_file(root: Path, path: Path) -> dict[str, Any]:
+def _index_file(root: Path, path: Path, *, hash_files: bool) -> dict[str, Any]:
     rel_path = path.relative_to(root).as_posix()
     stat = path.stat()
     kind = kind_for_path(path)
@@ -170,7 +176,11 @@ def _index_file(root: Path, path: Path) -> dict[str, Any]:
         "stage": stage,
         "kind": kind,
         "bytes": stat.st_size,
-        "sha256": _sha256(path),
+        "sha256": _sha256(path) if hash_files else None,
+        "search_skip_reason": (
+            "unsupported_file_type" if kind == "other" else
+            "file_too_large" if stat.st_size > MAX_SEARCH_FILE_BYTES else None
+        ),
         "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(
             timespec="seconds"
         ),
@@ -198,13 +208,14 @@ def _has_ignored_parent(relative_path: Path) -> bool:
 
 def _looks_like_text(path: Path) -> bool:
     try:
-        sample = path.read_bytes()[:2048]
+        with path.open("rb") as handle:
+            sample = handle.read(2048)
     except OSError:
         return False
     if b"\0" in sample:
         return False
     try:
-        sample.decode("utf-8")
+        codecs.getincrementaldecoder("utf-8")().decode(sample, final=len(sample) < 2048)
         return True
     except UnicodeDecodeError:
         return False
@@ -222,10 +233,10 @@ def _summary_for_file(path: Path, kind: str) -> str:
     if kind == "other":
         return ""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            preview = handle.read(MAX_SUMMARY_CHARS)
     except OSError:
         return ""
-    preview = text[:MAX_SUMMARY_BYTES]
     if kind == "json":
         summary = _json_summary(preview)
         if summary:

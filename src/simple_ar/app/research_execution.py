@@ -1,6 +1,6 @@
 """Translate a bounded execution specification to the existing runner."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -11,6 +11,73 @@ from simple_ar.research.contracts import ResearchExperimentContract
 from simple_ar.research.implementation import ImplementationRequest
 from simple_ar.code_task.editing.budget import VALID_BUDGET_PROFILES
 from simple_ar.code_task.execution.environment import resolve_code_task_command
+from simple_ar.result_analysis.metrics import normalize_direction
+
+
+def analysis_contract_context(
+    *, task_id: str, objective: str, contract: Mapping[str, Any],
+    design: Mapping[str, Any], schema: Mapping[str, Any],
+    hard_constraints: Sequence[str],
+) -> dict[str, Any]:
+    """Project selected, declared conditions without reading or persisting state."""
+    context: dict[str, Any] = {
+        "task_id": task_id, "title": objective, "research_question": objective,
+    }
+    contract = dict(contract)
+    if contract:
+        selected = design.get("selected_idea")
+        selected_id = (
+            selected.get("idea_id")
+            if isinstance(selected, Mapping) and selected.get("idea_id")
+            else contract.get("contract_id") or "research-hypothesis"
+        )
+        hypothesis = str(contract.get("hypothesis") or "").strip()
+        if hypothesis:
+            context["hypotheses"] = [{
+                "id": str(selected_id),
+                "statement": hypothesis,
+                "metric_refs": list(contract.get("metrics") or []),
+                "evidence": [
+                    {"source": str(ref)}
+                    for ref in contract.get("motivation_refs", [])
+                    if str(ref).strip()
+                ],
+                "expected_outcome": str(contract.get("expected_outcome") or ""),
+            }]
+        if hard_constraints:
+            contract["hard_constraints"] = list(hard_constraints)
+        context["task_contract"] = contract
+
+    names: list[str] = []
+    primary = str(schema.get("primary_metric") or "").strip()
+    if primary:
+        names.append(primary)
+    required = schema.get("required_metrics")
+    if isinstance(required, (list, tuple)):
+        names.extend(str(name).strip() for name in required if str(name).strip())
+    for row in contract.get("metric_specs", []):
+        if isinstance(row, Mapping) and str(row.get("name") or "").strip():
+            names.append(str(row["name"]).strip())
+    names.extend(str(name).strip() for name in contract.get("metrics", []) if str(name).strip())
+    names = list(dict.fromkeys(names))
+    raw_directions = schema.get("metric_directions")
+    raw_directions = raw_directions if isinstance(raw_directions, Mapping) else {}
+    if names:
+        context["expected_metrics"] = [
+            {
+                "name": name,
+                "direction": normalize_direction(raw_directions.get(name)),
+            }
+            for name in names
+        ]
+    directions = {
+        str(name): normalize_direction(value)
+        for name, value in raw_directions.items()
+        if str(name).strip()
+    }
+    if directions:
+        context["metric_directions"] = directions
+    return context
 
 
 def normalize_execution_config(

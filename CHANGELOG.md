@@ -6,6 +6,13 @@ This file records implemented, user-visible changes in reverse chronological ord
 
 ## Unreleased (source-visible preview)
 
+### 2026-10-02 — Structural cleanup and bounded artifact inspection
+
+- Artifact inspection uses bounded file-type/summary reads instead of reading complete files for a preview. Hashing is opt-in for Python callers (`hash_files=True`); otherwise the existing `sha256` field is null. Scientific asset fingerprints are unaffected.
+- Artifact search reports files above its 8 MiB per-file bound in `skipped_files` and CLI output. Read-only chunking no longer writes an implicit index, and JSON chunking reuses the loaded content instead of reading twice.
+- Canonical session cleanup recognizes `session_manifest.json` and provider-query metadata while retaining downloaded full text, documents, attempts and outputs needed for reading/recovery. Historical-layout cleanup remains available.
+- Editing and repair share one editable-context selection policy. CLI argument validation, application action handlers and pure report prompt projections have clearer owners without a new runtime, configuration format or checkpoint schema.
+
 ### 2026-10-01 — Native analysis, reading and delivery
 
 **Added**

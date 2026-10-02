@@ -483,11 +483,13 @@ uv run simple-ar inspect runs/<run-id>
 **生成产物**：
 
 - `artifact_index.json`
-- `artifact_chunks.jsonl`
 
 **注意**：
 
-用户可读产物和运行管理 metadata 会区分索引。
+只读取元数据和有界预览，不等于全文阅读；不再默认计算所有文件的哈希。
+不追踪文件符号链接，也不打开命名管道等非普通文件。
+`sha256` 默认为 null，Python 调用方可显式使用 `build_artifact_index(..., hash_files=True)`。
+实验资产指纹与保护逻辑不变。
 
 ### `simple-ar search-artifacts`
 
@@ -510,11 +512,14 @@ uv run simple-ar search-artifacts runs/<run-id> "accuracy" --top-k 5
 
 **生成产物**：
 
-- 无文件写入；打印匹配片段和来源路径
+- 打印匹配片段和来源路径，并写入 `artifact_index.json`、`artifact_chunks.jsonl`、`artifact_search_results.json`。
 
 **注意**：
 
-如果 index 不存在或过期，先运行 `inspect`。
+搜索会自行建立当前索引，不必先运行 `inspect`。大于 8 MiB 的文件不参与全文分块，
+在 `skipped_files` 和 CLI 中明确显示 `file_too_large`，不把文件前缀当完整来源。
+二进制文件不分块。此限制只针对产物搜索，不改变表格分析或论文读取的限制；
+需要搜索大日志时先缩小范围或导出所需日志。
 
 ### `simple-ar clean`
 
@@ -543,12 +548,18 @@ uv run simple-ar clean --shared-cache
 
 **生成产物**：
 - 先打印 Rich tree 预览：红色为将删除的缓存，绿色为会保留的审计产物。
-- 删除 `02-search/documents/fulltext_cache/`、`02-search/documents/extracted_text/`、`artifact_search_results.json` 等可重建缓存。
+- 当前会话按 `session_manifest.json`（schema `session_manifest.v2`）识别布局，清理 `cache/literature/` 中识别出的查询元数据 JSON 和 `artifact_search_results.json`；下载原文仍可能被保存的阅读直接引用，因此保留。
+- 历史布局清理已知 `02-search/documents/fulltext_cache/`、`02-search/documents/extracted_text/` 等缓存。
 - 如果 `index_meta.json` 指向当前 workspace 下的共享 SQLite research index，会删除该 run 对应的 SQLite rows。
-- 使用 `--all-caches` 时，还会删除可重建的 research index、artifact search index/chunks、code-task repo map、locate outputs 和 context packs。
+- 使用 `--all-caches` 时，当前会话另清 artifact index/chunks；历史布局另清已知 research index、code-task repo map、locate outputs 和 context packs。
 
 **注意**：
-`clean` 不会删除 run 目录本身，也不会删除报告、manifest、papers、`fulltext_extraction.json` 等解析审计文件、read 阶段 Paper Brief、synthesis brief、已保留的 debug coverage 和 portable chunks。`--all-caches` 会把 portable chunks 也视为可重建索引缓存删除，但仍会保留最终报告、metadata、manifest 和 benchmark outputs。
+`clean` 不删除 run 目录本身。当前会话的 `attempts`、`outputs`、`documents`、下载原文及
+未识别缓存继续保留，不追踪自定义外部缓存路径。
+超过 1 MiB 检查边界的查询元数据会保留并列为未检查，不凭文件名删除。
+历史布局保留报告、manifest、papers、解析审计、Paper Brief 和 synthesis brief；
+其 `--all-caches` 会移除 portable 索引 chunks，
+但仍保留最终报告、metadata、manifest 和 benchmark outputs。
 
 `--shared-index` 比 `--all-caches` 更强：它会清空跨 run 共享的 SQLite/LanceDB 加速索引，后续运行需要重新构建索引状态。它不触碰 run 目录，因此 run-local 审计产物仍会保留。
 

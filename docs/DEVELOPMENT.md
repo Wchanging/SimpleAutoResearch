@@ -174,6 +174,13 @@ retirement; shared projections alone do not establish one execution owner.
 
 ## Ownership Map
 
+CLI/TOML input validation belongs to `cli.research_config.validate_session_arguments`;
+the application owns action dispatch, execution decisions and persistence. Ordinary
+action handlers remain in that same owner. Bounded report prompt views belong to
+`report.narrative`, not a second report memory. Editable-context selection belongs
+to `code_task.editing.scope` and is shared by initial edits and repair. Moving pure
+views does not authorize changing checkpoint, budget or adopted-draft semantics.
+
 Use this map when deciding where a change belongs. The stable entry is the
 small public boundary a new caller may depend on; the final column is equally
 important because it prevents domain policy from leaking into the core.

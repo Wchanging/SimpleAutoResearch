@@ -181,6 +181,42 @@ def normalize_workspace_path(path: str) -> str:
     return pure.as_posix()
 
 
+def editable_context_files(
+    index: dict[str, Any], selected_files: list[str], *,
+    allowed_patterns: tuple[str, ...], protected_patterns: tuple[str, ...],
+    max_files: int,
+) -> list[str]:
+    """Select editable context, using indexed source files only as a fallback."""
+    limit = max(1, max_files)
+    selected = editable_paths(
+        selected_files, allowed_patterns=allowed_patterns,
+        protected_patterns=protected_patterns,
+    )
+    if selected:
+        return selected[:limit]
+    files = index.get("files", [])
+    if not isinstance(files, list):
+        return []
+    fallback: list[str] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        raw_path = item.get("path")
+        path = raw_path.strip() if isinstance(raw_path, str) else ""
+        if not path or not is_edit_allowed_path(
+            path, allowed_patterns=allowed_patterns, protected_patterns=protected_patterns,
+        ):
+            continue
+        raw_kind = item.get("kind")
+        kind = raw_kind.strip() if isinstance(raw_kind, str) else ""
+        role_tags = [tag for tag in item.get("role_tags", []) if isinstance(tag, str)]
+        if kind == "python" or "source" in role_tags:
+            fallback.append(path)
+        if len(fallback) >= limit:
+            break
+    return fallback
+
+
 def _normalize_pattern(value: object) -> str:
     if not isinstance(value, str):
         return ""

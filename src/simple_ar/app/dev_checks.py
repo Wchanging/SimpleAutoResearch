@@ -42,6 +42,7 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
             "tests.test_metrics",
             "tests.test_prompts",
             "tests.test_cli",
+            "tests.test_structure_cleanup",
         ),
     ),
     "code-task": CheckGroup(

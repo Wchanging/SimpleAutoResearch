@@ -8,7 +8,7 @@ from typing import Any, Callable
 from simple_ar.core.artifacts import read_json, read_text, write_json
 from simple_ar.code_task.editing.scope import (
     allowed_patterns_from_manifest,
-    editable_paths,
+    editable_context_files as _editable_repair_context_files,
     edit_scope_rejection_reason,
     is_edit_allowed_path,
     protected_patterns_from_manifest,
@@ -306,41 +306,6 @@ def _repair_context_files(
         if path not in selected:
             selected.append(path)
     return selected[: max(1, max_files)]
-
-
-def _editable_repair_context_files(
-    index: dict[str, Any],
-    selected_files: list[str],
-    *,
-    allowed_patterns: tuple[str, ...],
-    protected_patterns: tuple[str, ...],
-    max_files: int,
-) -> list[str]:
-    selected = editable_paths(
-        selected_files,
-        allowed_patterns=allowed_patterns,
-        protected_patterns=protected_patterns,
-    )
-    if selected:
-        return selected[: max(1, max_files)]
-    fallback: list[str] = []
-    for item in _index_files(index):
-        path = _string(item.get("path"))
-        if not path:
-            continue
-        if not is_edit_allowed_path(
-            path,
-            allowed_patterns=allowed_patterns,
-            protected_patterns=protected_patterns,
-        ):
-            continue
-        kind = _string(item.get("kind"))
-        role_tags = [str(tag) for tag in item.get("role_tags", []) if isinstance(tag, str)]
-        if kind == "python" or "source" in role_tags:
-            fallback.append(path)
-        if len(fallback) >= max(1, max_files):
-            break
-    return fallback
 
 
 def _source_snippets(

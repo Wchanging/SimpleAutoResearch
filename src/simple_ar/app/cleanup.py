@@ -79,10 +79,19 @@ def build_clean_plan(run_dir: Path, *, all_caches: bool = False) -> CleanPlan:
 
     targets: list[CleanTarget] = []
     skipped: list[str] = []
+    manifest_path = root / "session_manifest.json"
+    if not manifest_path.is_file():
+        manifest_path = root / "manifest.json"
+    try:
+        manifest = read_json(manifest_path) if manifest_path.is_file() else {}
+    except (OSError, ValueError) as exc:
+        raise CleanError(f"Cannot determine run layout from {manifest_path}: {exc}") from exc
+    canonical = isinstance(manifest, dict) and manifest.get("schema_version") == "session_manifest.v2"
     kept = _existing_relative_paths(
         root,
         [
             "manifest.json",
+            "session_manifest.json",
             "state.json",
             "02-search/papers.jsonl",
             "02-search/search_meta.json",
@@ -104,13 +113,23 @@ def build_clean_plan(run_dir: Path, *, all_caches: bool = False) -> CleanPlan:
             "05-design/evidence",
             "08-report",
             "code_task/summary.md",
+            "attempts",
+            "outputs",
+            "documents",
+            "inputs",
         ],
     )
 
-    selected_targets = _ALL_CACHE_TARGETS if all_caches else _RUN_LOCAL_CLEAN_TARGETS
+    selected_targets = (
+        _CANONICAL_ALL_CACHE_TARGETS if all_caches else _CANONICAL_CLEAN_TARGETS
+    ) if canonical else (_ALL_CACHE_TARGETS if all_caches else _RUN_LOCAL_CLEAN_TARGETS)
     seen: set[Path] = set()
     for relative, reason in selected_targets:
         _append_path_target(root, targets, seen, relative, reason)
+
+    if canonical:
+        _append_literature_metadata_targets(root, targets, seen, kept, skipped)
+        skipped.append("Canonical documents and downloaded full text are retained for reading and recovery; external cache paths are not followed.")
 
     sqlite_target, sqlite_skipped = _sqlite_clean_target(root)
     if sqlite_target is not None:
@@ -366,6 +385,44 @@ _RUN_LOCAL_CLEAN_TARGETS: tuple[tuple[str, str], ...] = (
     ("02-search/documents/extracted_text", "parsed full-text cache"),
     ("artifact_search_results.json", "last artifact search output"),
 )
+
+_CANONICAL_CLEAN_TARGETS = (("artifact_search_results.json", "last artifact search output"),)
+_CANONICAL_ALL_CACHE_TARGETS = (
+    *_CANONICAL_CLEAN_TARGETS,
+    ("artifact_index.json", "rebuildable run artifact index"),
+    ("artifact_chunks.jsonl", "rebuildable artifact retrieval chunks"),
+)
+
+
+def _append_literature_metadata_targets(
+    root: Path, targets: list[CleanTarget], seen: set[Path],
+    kept: list[str], skipped: list[str],
+) -> None:
+    """Clean provider metadata, not full text which can still be a source path."""
+    cache = root / "cache" / "literature"
+    if not cache.is_dir():
+        return
+    _assert_inside(root, cache)
+    kept.append("cache/literature (full text and unrecognized files are kept)")
+    for path in sorted(cache.glob("*.json")):
+        _assert_inside(root, path)
+        try:
+            if not path.is_file() or path.stat().st_size > 1024 * 1024:
+                skipped.append(f"Uninspected literature cache retained: {path.name}")
+                continue
+            payload = read_json(path)
+        except (OSError, ValueError):
+            skipped.append(f"Unrecognized literature cache retained: {path.name}")
+            continue
+        if not isinstance(payload, dict) or not (
+            isinstance(payload.get("query"), str)
+            and isinstance(payload.get("source"), str)
+            and isinstance(payload.get("limit"), int)
+            and isinstance(payload.get("papers"), list)
+            and "timestamp" in payload
+        ):
+            continue
+        _append_path_target(root, targets, seen, path.relative_to(root).as_posix(), "rebuildable literature provider metadata")
 
 _ALL_CACHE_TARGETS: tuple[tuple[str, str], ...] = (
     ("02-search/documents/fulltext_cache", "downloaded full-text cache"),

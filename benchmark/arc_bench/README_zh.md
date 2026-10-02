@@ -30,7 +30,8 @@ benchmark/arc_bench/
   batch_logs/             # 命令日志
 ```
 
-`benchmark/` 默认被 gitignore；只跟踪适配脚本和轻量文档。
+适配脚本和轻量文档受 Git 管理；生成的 `prepared/`、`runs/`、`submissions/`、
+`batch_state/` 和 `batch_logs/` 被忽略，不是随仓库交付的任务输入或正式 benchmark 成绩。
 
 ## 一次性准备
 

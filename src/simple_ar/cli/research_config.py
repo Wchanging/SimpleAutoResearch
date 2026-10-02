@@ -1,5 +1,6 @@
 """Map research TOML onto the same options used by the CLI."""
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 import tomllib
 
@@ -53,6 +54,130 @@ FIELDS = {
 PATHS = {"output_root", "cache_dir", "cwd", "code_task_config", "local_document", "material", "data_file"}
 LIST_FLAGS = {"providers": "--provider", "queries": "--query", "local_document": "--local-document", "material": "--material",
               "metric": "--metric", "metric_direction": "--metric-direction", "value_column": "--value-column"}
+
+
+@dataclass(frozen=True)
+class SessionArguments:
+    """Validated CLI/TOML input, not another persisted task model."""
+    task_kind: str
+    command: tuple[str, ...]
+    execution_details: dict
+    outputs: list[str] | None
+    materials: list[Path]
+    data_analysis: dict | None
+
+
+def data_settings(args: argparse.Namespace) -> dict:
+    """Validate table settings shared by guided and direct session input."""
+    from simple_ar.result_analysis.table import TableSpec, read_table_source, validate_table_columns
+    spec = TableSpec(tuple(args.value_column), args.observation_unit, args.group_column,
+                     args.value_unit, args.data_mode, args.data_missing, args.figure_width, args.data_max_mb, args.data_max_figures,
+                     args.data_plot, args.x_column, args.x_unit, args.data_max_points)
+    if args.data_file is None:
+        raise ValueError("Data analysis requires --data-file.")
+    path = args.data_file.expanduser().resolve()
+    if not path.is_file() or path.suffix.lower() not in {".csv", ".tsv", ".json"}:
+        raise ValueError("Provide an existing CSV/TSV or JSON records file.")
+    # Preview checks shape and names; ingestion freezes and validates fresh bytes.
+    _, rows = read_table_source(path, max_mb=spec.max_mb)
+    validate_table_columns(rows, spec)
+    from dataclasses import asdict
+    return {"file": str(path), **asdict(spec)}
+
+
+def validate_session_arguments(args: argparse.Namespace) -> SessionArguments:
+    """Validate merged arguments before model setup or session writes."""
+    if getattr(args, "reanalyze", False) and not getattr(args, "session_root", None):
+        raise SystemExit("--reanalyze requires --session-root.")
+    if getattr(args, "recover_interrupted", False) and not getattr(args, "session_root", None):
+        raise SystemExit("--recover-interrupted requires --session-root.")
+    if args.max_results < 1 or args.max_chunks < 1 or args.idea_limit < 1:
+        raise SystemExit(
+            "--max-results, --max-chunks, and --idea-limit must be positive."
+        )
+    if getattr(args, "research_max_pdf_pages", None) is not None and args.research_max_pdf_pages < 1:
+        raise SystemExit("research.max_pdf_pages must be positive.")
+    for name in ("research_max_fulltext_documents", "research_max_pdf_mb"):
+        value = getattr(args, name, None)
+        if value is not None and value < 1:
+            raise SystemExit(f"{name.removeprefix('research_')} must be positive when provided.")
+    if args.timeout_sec is not None and args.timeout_sec < 1:
+        raise SystemExit("--timeout-sec must be positive when provided.")
+    if args.max_review_iterations < 0:
+        raise SystemExit("--max-review-iterations cannot be negative.")
+    if args.max_research_iterations < 0:
+        raise SystemExit("--max-research-iterations cannot be negative.")
+    task_kind = str(getattr(args, "task_kind", "auto") or "auto").strip().lower()
+    if task_kind not in {"auto", "survey", "bug_fix", "measurement", "reproduction", "writing", "data_analysis"}:
+        raise SystemExit("--task-kind must be auto, survey, bug_fix, measurement, reproduction, writing or data_analysis.")
+    command = tuple(args.command_argv or ())
+    execution_details = getattr(args, "execution_details", {})
+    if command and execution_details.get("pairs"):
+        raise SystemExit("Use execution.pairs or a single command, not both; paired argv must be explicit.")
+    outputs = getattr(args, "outputs", None)
+    materials = getattr(args, "material", [])
+    if outputs and "data_analysis" in outputs and task_kind != "data_analysis":
+        raise SystemExit("data_analysis output requires an explicit data_analysis task.")
+    data_analysis = None
+    if task_kind == "data_analysis":
+        if command or execution_details or args.code_task_config or args.local_document or materials or args.queries or args.providers or args.with_report or outputs not in (None, ["data_analysis"]):
+            raise SystemExit("Data analysis accepts only a supplied table and descriptive settings, without research, CodeTask or experiment execution.")
+        if not getattr(args, "session_root", None):
+            try:
+                data_analysis = data_settings(args)
+            except (OSError, ValueError) as exc:
+                raise SystemExit(str(exc)) from exc
+    elif any((args.data_file, args.value_column, args.group_column, args.observation_unit, args.value_unit,
+              args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100,
+              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000)):
+        raise SystemExit("Data options require --task-kind data_analysis.")
+    if materials and task_kind != "writing":
+        raise SystemExit("--material/assets.materials currently requires task.kind=writing.")
+    if task_kind == "writing":
+        if command or execution_details or getattr(args, "code_task_config", None) or args.no_report or outputs not in (None, ["report"]):
+            raise SystemExit("Writing requests only a report without execution or CodeTask configuration.")
+        if not getattr(args, "session_root", None) and not (materials or args.local_document):
+            raise SystemExit("Writing requires --material and/or --local-document.")
+        if args.queries or args.providers or getattr(args, "research_materials_only", None) is False or getattr(args, "research_allow_pdf_download", None):
+            raise SystemExit("Writing uses supplied local material only; online research is a survey task.")
+        supplied = [Path(path).expanduser().resolve() for path in [*materials, *args.local_document]]
+        if len(supplied) != len(set(supplied)):
+            raise SystemExit("Writing material must have one unambiguous role per file; do not repeat a paper as material.")
+        text_suffixes = {".md", ".markdown", ".txt", ".pdf"}
+        for paths, suffixes in ((args.local_document, text_suffixes), (materials, text_suffixes | {".json"})):
+            if any(not Path(path).expanduser().is_file() or Path(path).suffix.lower() not in suffixes for path in paths):
+                raise SystemExit("Writing requires text/PDF or a table_analysis.v1 analysis package; raw tables are not writing results.")
+    if outputs and task_kind != "bug_fix" and "experiments" not in outputs and (command or execution_details or getattr(args, "code_task_config", None)):
+        raise SystemExit("Execution configuration requires experiments in --outputs/task.outputs.")
+    if task_kind == "bug_fix" and outputs and set(outputs) != {"bug_fix"}:
+        raise SystemExit("--task-kind bug_fix requires --outputs bug_fix or no explicit outputs.")
+    if task_kind == "survey" and (command or execution_details or getattr(args, "code_task_config", None)):
+        raise SystemExit("--task-kind survey cannot include execution or CodeTask configuration.")
+    if task_kind == "measurement":
+        if outputs != ["experiments"]:
+            raise SystemExit("--task-kind measurement requires --outputs experiments.")
+        if not command or getattr(args, "code_task_config", None) or execution_details.get("pairs") or execution_details.get("baseline_policy") in {"run", "reuse"}:
+            raise SystemExit("--task-kind measurement requires one explicit command without CodeTask, paired runs, or baseline comparison.")
+    if task_kind == "reproduction":
+        if not outputs or "experiments" not in outputs or set(outputs) - {"experiments", "report"}:
+            raise SystemExit("--task-kind reproduction requires outputs experiments and optionally report.")
+        if not command or getattr(args, "code_task_config", None) or execution_details.get("pairs") or execution_details.get("baseline_policy") in {"run", "reuse"}:
+            raise SystemExit("Prepared reproduction requires one explicit command without CodeTask or paired runs.")
+        protocol = execution_details.get("protocol")
+        if not isinstance(protocol, dict) or any(not str(protocol.get(key) or "").strip()
+                                                for key in ("hypothesis", "dataset", "expected_outcome")):
+            raise SystemExit("Prepared reproduction requires execution.protocol hypothesis, dataset and expected_outcome.")
+        if not getattr(args, "local_document", None) or not getattr(args, "research_materials_only", False):
+            raise SystemExit("Prepared reproduction requires local documents and research.materials_only=true.")
+    if outputs and (args.with_report or args.no_report):
+        raise SystemExit("Use explicit outputs or --with-report/--no-report, not both.")
+    for field in ("total_tokens", "llm_requests", "max_output_tokens", "process_invocations", "process_wall_seconds"):
+        value = getattr(args, field, None)
+        if value is not None and value < (0 if field.startswith("process_") else 1):
+            raise SystemExit(f"Invalid {field}: {value}")
+    if task_kind == "bug_fix" and not getattr(args, "code_task_config", None):
+        raise SystemExit("--task-kind bug_fix requires --code-task-config for an existing project.")
+    return SessionArguments(task_kind, command, execution_details, outputs, materials, data_analysis)
 
 
 def research_defaults(

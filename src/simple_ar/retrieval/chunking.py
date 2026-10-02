@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.core.artifacts import write_jsonl
-from simple_ar.retrieval.index import build_artifact_index
+from simple_ar.retrieval.index import MAX_SEARCH_FILE_BYTES, build_artifact_index
 
 
 MAX_CHUNK_CHARS = 4000
@@ -101,14 +101,14 @@ def build_artifact_chunks(
         Ordered chunks for supported source artifacts.
     """
     root = Path(run_dir)
-    artifact_index = index or build_artifact_index(root)
+    artifact_index = index if index is not None else build_artifact_index(root, write=write)
     chunks: list[ArtifactChunk] = []
     for artifact in artifact_index.get("artifacts", []):
         if not isinstance(artifact, dict):
             continue
         rel_path = str(artifact.get("path", ""))
         kind = str(artifact.get("kind", "other"))
-        if not rel_path or kind == "other":
+        if not rel_path or kind == "other" or artifact.get("search_skip_reason"):
             continue
         if not include_operational and is_operational_artifact(rel_path):
             continue
@@ -134,6 +134,8 @@ def is_operational_artifact(relative_path: str) -> bool:
 
 def chunk_file(path: Path, *, rel_path: str, kind: str) -> list[ArtifactChunk]:
     """Chunk one file according to its artifact kind."""
+    if path.stat().st_size > MAX_SEARCH_FILE_BYTES:
+        return []
     lines = _read_lines(path)
     if not lines:
         return []
@@ -190,7 +192,7 @@ def _chunk_markdown(rel_path: str, kind: str, lines: list[str]) -> list[Artifact
 
 def _chunk_json(path: Path, rel_path: str, kind: str, lines: list[str]) -> list[ArtifactChunk]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        data = json.loads("\n".join(lines))
     except json.JSONDecodeError:
         return _chunk_text_windows(rel_path, kind, lines, chunk_kind="json-text-window")
 
@@ -365,8 +367,11 @@ def _find_json_key_line(lines: list[str], key: str) -> int | None:
 
 
 def _read_lines(path: Path) -> list[str]:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return text.splitlines()
+    with path.open("rb") as handle:
+        data = handle.read(MAX_SEARCH_FILE_BYTES + 1)
+    if len(data) > MAX_SEARCH_FILE_BYTES:
+        return []
+    return data.decode("utf-8", errors="replace").splitlines()
 
 
 def _truncate(text: str, max_chars: int = MAX_CHUNK_CHARS) -> str:

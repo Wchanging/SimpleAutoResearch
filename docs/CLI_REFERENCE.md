@@ -583,11 +583,13 @@ uv run simple-ar inspect runs/<run-id>
 **Outputs**:
 
 - `artifact_index.json`
-- `artifact_chunks.jsonl`
 
 **Notes**:
 
-Operational metadata is indexed separately from user-facing artifacts.
+Inspection records metadata and bounded previews, not full-text reading. It does
+not follow file symlinks or open special files such as named pipes. It does
+not hash every file: `sha256` is null unless a Python caller explicitly uses
+`build_artifact_index(..., hash_files=True)`. Experiment asset fingerprints are unchanged.
 
 ### `simple-ar search-artifacts`
 
@@ -611,10 +613,15 @@ uv run simple-ar search-artifacts runs/<run-id> "accuracy" --top-k 5
 **Outputs**:
 
 - prints matching artifact chunks and their source paths
+- writes `artifact_index.json`, `artifact_chunks.jsonl`, and `artifact_search_results.json`
 
 **Notes**:
 
-Run `inspect` first when the artifact index is missing or stale.
+Search builds its own current index; running `inspect` first is unnecessary.
+Files larger than 8 MiB are listed as `file_too_large` in `skipped_files` and in
+CLI output, not searched as if a prefix were the complete source. Binary files
+are not chunked. This artifact-search bound does not change table-analysis or
+paper-ingest limits. Narrow/export a large log when text retrieval is needed.
 
 ### `simple-ar clean`
 
@@ -647,19 +654,23 @@ uv run simple-ar clean --shared-cache
 **Outputs**:
 
 - prints a Rich tree preview before deletion
-- deletes run-local rebuildable caches such as `02-search/documents/fulltext_cache/`, `02-search/documents/extracted_text/`, and `artifact_search_results.json`
+- canonical sessions (`session_manifest.json`, schema `session_manifest.v2`): deletes recognized provider-query JSON metadata in `cache/literature/` and `artifact_search_results.json`; full text is retained because saved reading can reference it
+- historical layouts: deletes known caches such as `02-search/documents/fulltext_cache/` and `02-search/documents/extracted_text/`
 - removes this run's rows from the shared SQLite research index when `index_meta.json` points to a workspace-local shared store
-- with `--all-caches`, also deletes rebuildable research indexes, artifact search indexes/chunks, code-task repo maps, locate outputs, and context packs
+- with `--all-caches`, canonical sessions also delete artifact indexes/chunks; historical layouts additionally include their known research indexes, code-task repo maps, locate outputs and context packs
 
 **Notes**:
 
 `clean` keeps reports, manifests, papers, parser audit files such as
 `fulltext_extraction.json`, read-stage Paper Briefs, synthesis briefs, retained
 debug coverage reports when present, and portable `research_index/chunks.jsonl`.
-It does not delete the run directory itself. `--all-caches` removes
-`research_index/chunks.jsonl` because it treats all indexes and retrieval
-accelerators as rebuildable cache data, but it still keeps final reports,
-metadata, manifests, and benchmark outputs.
+It does not delete the run directory itself. Canonical `attempts`, `outputs`,
+`documents`, downloaded full text and unrecognized cache files remain intact;
+custom external cache paths are not followed.
+Provider metadata above the 1 MiB inspection bound is retained and listed as
+uninspected, not deleted based only on its filename. In historical layouts,
+`--all-caches` removes `research_index/chunks.jsonl` as rebuildable index data,
+but still keeps final reports, metadata, manifests and benchmark outputs.
 
 `--shared-index` is stronger than `--all-caches`: it clears the shared
 SQLite/LanceDB accelerator store across runs, so future runs must rebuild index

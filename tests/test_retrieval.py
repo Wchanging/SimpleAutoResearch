@@ -83,7 +83,7 @@ class RetrievalTests(unittest.TestCase):
             write_text(run_dir / "__pycache__" / "ignored.pyc", "ignored")
             write_text(run_dir / ".hidden" / "secret.txt", "ignored")
 
-            index = build_artifact_index(run_dir)
+            index = build_artifact_index(run_dir, hash_files=True)
 
             paths = {item["path"] for item in index["artifacts"]}
             self.assertIn("topic.txt", paths)

@@ -13,6 +13,7 @@ import shlex
 import sys
 
 from simple_ar.app.session_roots import new_research_session_root
+from simple_ar.cli.research_config import data_settings
 from simple_ar.core.console import print_line
 
 
@@ -41,25 +42,6 @@ def add_data_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--x-column", default="", help="line/scatter: explicit numeric x column, distinct from value columns.")
     parser.add_argument("--x-unit", default="", help="Unit of the x coordinate; omission is recorded as unknown.")
     parser.add_argument("--data-max-points", type=int, default=10000, help="Physical points per coordinate figure; excess fails without sampling.")
-
-
-def data_settings(args: argparse.Namespace) -> dict:
-    from simple_ar.result_analysis.table import TableSpec, read_table_source, validate_table_columns
-    spec = TableSpec(tuple(args.value_column), args.observation_unit, args.group_column,
-                     args.value_unit, args.data_mode, args.data_missing, args.figure_width, args.data_max_mb, args.data_max_figures,
-                     args.data_plot, args.x_column, args.x_unit, args.data_max_points)
-    if args.data_file is None:
-        raise ValueError("Data analysis requires --data-file.")
-    path = args.data_file.expanduser().resolve()
-    if not path.is_file() or path.suffix.lower() not in {".csv", ".tsv", ".json"}:
-        raise ValueError("Provide an existing CSV/TSV or JSON records file.")
-    # Setup checks the bounded shape and selected names before creating files.
-    # Ingestion later freezes fresh bytes and validates values; this preview is
-    # not a cached measurement or a replacement for the saved input snapshot.
-    _, rows = read_table_source(path, max_mb=spec.max_mb)
-    validate_table_columns(rows, spec)
-    from dataclasses import asdict
-    return {"file": str(path), **asdict(spec)}
 
 
 def add_start_parser(subparsers: argparse._SubParsersAction) -> None:

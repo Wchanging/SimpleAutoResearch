@@ -19,7 +19,7 @@ from simple_ar.code_task.editing.attempts import (
 from simple_ar.code_task.editing.budget import EditBudget, budget_profiles_json, edit_budget_for_profile
 from simple_ar.code_task.editing.scope import (
     allowed_patterns_from_manifest,
-    editable_paths,
+    editable_context_files as _editable_context_files,
     edit_scope_rejection_reason,
     is_edit_allowed_path,
     is_protected_edit_path,
@@ -1648,41 +1648,6 @@ def _relative_to_run(run_dir: Path, path: Path) -> str:
         return path.resolve().relative_to(run_dir.resolve()).as_posix()
     except ValueError:
         return str(path)
-
-
-def _editable_context_files(
-    index: dict[str, Any],
-    selected_files: list[str],
-    *,
-    protected_patterns: tuple[str, ...],
-    allowed_patterns: tuple[str, ...],
-    max_files: int,
-) -> list[str]:
-    selected = editable_paths(
-        selected_files,
-        allowed_patterns=allowed_patterns,
-        protected_patterns=protected_patterns,
-    )
-    if selected:
-        return selected[: max(1, max_files)]
-    fallback: list[str] = []
-    for item in _index_files(index):
-        path = _string(item.get("path"))
-        if not path:
-            continue
-        if not is_edit_allowed_path(
-            path,
-            allowed_patterns=allowed_patterns,
-            protected_patterns=protected_patterns,
-        ):
-            continue
-        kind = _string(item.get("kind"))
-        role_tags = [str(tag) for tag in item.get("role_tags", []) if isinstance(tag, str)]
-        if kind == "python" or "source" in role_tags:
-            fallback.append(path)
-        if len(fallback) >= max(1, max_files):
-            break
-    return fallback
 
 
 def _paths_from_patch_plan(patch_plan: str, known_paths: set[str]) -> list[str]:

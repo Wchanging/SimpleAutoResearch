@@ -50,6 +50,11 @@ def search_artifacts(
         "query": query,
         "top_k": top_k,
         "include_operational": include_operational,
+        "skipped_files": [
+            {"path": row["path"], "reason": row["search_skip_reason"], "bytes": row["bytes"]}
+            for row in index["artifacts"]
+            if row.get("search_skip_reason") and row.get("kind") != "other"
+        ],
         "generated_at": _utcnow_iso(),
         "chunk_count": len(chunks),
         "match_count": len(matches),
