@@ -9,6 +9,7 @@ command and expected outputs. Run commands from the repository root.
 | [Data analysis](data-analysis/README.md) | Descriptive statistics and editable plots of existing data | `research-session --config examples/data-analysis/research.toml`; no model, GPU or plotting library |
 | [Data curves](data-curves/README.md) | Supplied numeric coordinates, explicit gaps, editable line/scatter figures | `research-session --config examples/data-curves/research.toml`; no model, GPU or plotting library |
 | [Conformal reproduction](conformal_reproduction/README.md) | Low-cost, fixed-protocol synthetic check of a published conclusion | Download the supplied paper, then run the checked-in research config; standard-library simulation, no GPU |
+| [ICML 2025 RCP subset](rcp_reproduction/README.md) | Author-code-assisted House comparison, two fixed methods and ten paired seeds | Prepare the pinned author source, paper, data and scientific Python first; actual CPU measurement case, not whole-paper or benchmark reproduction. Review the report separately. |
 | [Continual learning](continual_learning/README.md) | Mammoth/CIFAR-100 research improvement | Prepare the case-declared project, data and split under `runs/assets`, then run the checked-in research config |
 | [Digits MLP](code_task_digits_mlp/README.md) | Small CPU model-code improvement | Included project/task/config; requires NumPy and scikit-learn |
 | [Medium review](code_task_medium_review/README.md) | Small multi-file code improvement | Included project/task/config; Python standard library |

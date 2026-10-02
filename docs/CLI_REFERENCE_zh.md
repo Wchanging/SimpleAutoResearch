@@ -2,6 +2,16 @@
 
 [English version](CLI_REFERENCE.md)
 
+文章规划：`research-session --report-outline-strategy auto|template|adaptive`；
+另写报告使用 `research-report --outline-strategy auto|template|adaptive`。
+非综述自适应需显式启用，自定义模板与保存的 checkpoint 计划不变；
+TOML 对应 `[report].outline_strategy`。
+
+数据展示：`research-session --report-data-tables linked|full` 或
+`research-report --data-tables linked|full`，对应 `[report].data_tables`。
+默认 `linked` 保留完整分析包并链接全部数值记录；`full` 另将逐行表格放入正文。
+有唯一冻结来源归属时图表进入对应章节，否则保留独立数据节，不猜测科学含义。
+
 `start` 提供五类已支持的结构化任务选择；`research-session` 执行/恢复保存任务，
 `report-export` 导出已有报告。下面的底层命令是专家接口，不是每个功能都必须走的步骤。
 最短路径见[使用指南](USAGE_zh.md)，completed/审计的含义见[工作流边界](WORKFLOWS_zh.md)。
@@ -29,6 +39,8 @@ baseline、失败目标或实验继续决策。模型会话的引导续跑提示
 条形图的 `--data-mode values` 保留已有汇总值，不再次平均，且要求唯一标签；默认 `observations` 做描述统计。
 `--data-plot line|scatter --data-mode values --x-column step` 改为数值坐标图，不设分组列；
 `--x-unit` 记录横轴单位。折线要求 x 唯一、缺失 y 断线，散点保留重复 x，不聚合、不拟合。
+`--series-layout shared` 显式选择共享坐标轴/图例（TOML `analysis.series_layout`）；
+默认 separate。共享图使用共同声明单位，不归一化，所有系列位置共同计入点数上限。
 `--data-max-points 10000` 为每图行数的可调整物理上限，超出不抽样。详见[工作流](WORKFLOWS_zh.md)。
 `--data-missing reject|omit` 默认 reject；`--value-unit` 记录单位；`--figure-width column|wide` 默认 wide。
 物理上限 `--data-max-mb 20`、`--data-max-figures 100`，超出报错而非丢数据，可明确调整。
@@ -104,6 +116,9 @@ Pandoc 转换已有正文，不调用模型或重跑实验。目录内的图复�
 数据集和来源产物。正文事实审计仍需单独查看。
 
 输出为单栏 `acmart` 演示工程，含 `main.tex`、`body.tex`、文献、图和 `export.json`。
+若已有图表清单，导出将登记 caption 绑定到对应图，仅移除紧邻且完全相同的重复图注段；
+没有清单则保留输入图注，不自行编造内容。
+生成的图优先就近放置（`htbp`），仍允许正常 LaTeX 浮动，不强制原地；编译通过不等于视觉验收。
 它不替用户选择具体会议投稿选项，也不认证科研结论。需安装 Pandoc；加 `--compile`
 还需 `pdflatex`、`bibtex` 和 acmart 依赖。缺编译器或编译失败时返回非零状态，保留
 源码和诊断；实际编译写入 `build.log`。当前使用 pdfLaTeX，中文等非拉丁文字需自行

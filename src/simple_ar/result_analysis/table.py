@@ -32,6 +32,7 @@ class TableSpec:
     x_column: str = ""
     x_unit: str = ""
     max_points: int = 10000
+    series_layout: str = "separate"
 
     def __post_init__(self):
         if not self.value_columns or any(not isinstance(v, str) or not v.strip() for v in self.value_columns):
@@ -50,6 +51,10 @@ class TableSpec:
             raise ValueError("max_figures must be a positive physical output limit.")
         if self.plot not in {"bar", "line", "scatter"}:
             raise ValueError("plot must be bar/line/scatter.")
+        if self.series_layout not in {"separate", "shared"}:
+            raise ValueError("series_layout must be separate/shared.")
+        if self.series_layout == "shared" and self.plot == "bar":
+            raise ValueError("Shared coordinate axes require line/scatter; bar groups retain their own layout.")
         if not isinstance(self.x_column, str) or not isinstance(self.x_unit, str):
             raise ValueError("x_column and x_unit must be strings.")
         if type(self.max_points) is not int or self.max_points < 1:
@@ -74,7 +79,7 @@ class TableSpec:
                    config.get("mode", "observations"), config.get("missing", "reject"),
                    config.get("width", "wide"), config.get("max_mb", 20), config.get("max_figures", 100),
                    config.get("plot", "bar"), config.get("x_column", ""), config.get("x_unit", ""),
-                   config.get("max_points", 10000))
+                   config.get("max_points", 10000), config.get("series_layout", "separate"))
 
 
 def parse_table(text: str, suffix: str) -> list[dict]:

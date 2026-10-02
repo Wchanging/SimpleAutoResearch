@@ -7,7 +7,7 @@ from simple_ar.core.artifacts import write_text
 def render_table_figures(result: dict, output_dir: Path) -> list[dict]:
     """Render explicit computed table values, not numbers mined from prose.
 
-    Separate metrics have separate axes. Pagination preserves all categories;
+    Metrics have separate axes unless shared coordinate axes are explicitly selected. Pagination preserves all categories;
     no aggregate, error bar or comparison verdict is inferred by the renderer.
     SVG is both output and editable source; the result/data retain full labels.
     """
@@ -81,6 +81,7 @@ def render_table_figures(result: dict, output_dir: Path) -> list[dict]:
             filename = f"figures/value-{metric_index}-{offset // 12 + 1}.svg"
             write_text(output_dir / filename, "\n".join(svg))
             caption = (f"{column}: {'row means' if spec['mode'] == 'observations' else 'supplied values without re-aggregation'}; "
+                       f"value unit (user-declared): {unit}; "
                        f"user-declared row unit: {spec['observation_unit']}; no inferred uncertainty bars. "
                        "Full category labels, counts and omissions are in analysis.json; long labels may be shortened in the figure.")
             figures.append({"path": filename, "caption": caption, "width": spec["width"], "visual_check": "not_performed"})
@@ -88,13 +89,15 @@ def render_table_figures(result: dict, output_dir: Path) -> list[dict]:
 
 
 def _coordinate_figures(result: dict, output_dir: Path) -> list[dict]:
-    """One metric per axis, with original point identities and explicit gaps."""
+    """Explicit coordinate panels, with original identities and per-series gaps."""
     from html import escape
     import textwrap
 
     spec = result["spec"]
     columns = spec["value_columns"]
-    if len(columns) > spec["max_figures"]:
+    shared = spec.get("series_layout", "separate") == "shared"
+    panels = [columns] if shared else [[column] for column in columns]
+    if len(panels) > spec["max_figures"]:
         raise ValueError("Selected columns exceed physical max_figures; no figures were silently dropped.")
     wide = spec["width"] == "wide"
     width, height = (720, 420) if wide else (360, 300)
@@ -117,47 +120,76 @@ def _coordinate_figures(result: dict, output_dir: Path) -> list[dict]:
     for row in result["records"]:
         by_column[row["column"]].append(row)
     figures = []
-    for index, column in enumerate(columns, start=1):
-        points = by_column[column]
+    colors = ("#286a9b", "#ba5818", "#25734a", "#8b469c", "#a04159", "#626565")
+    for index, panel in enumerate(panels, start=1):
+        column = " / ".join(panel)
+        points = [row for name in panel for row in by_column[name]]
         if len(points) > spec["max_points"]:
             raise ValueError("Figure exceeds physical max_points; no points were sampled.")
-        if spec["plot"] == "line":
-            points = sorted(points, key=lambda row: row["x"])
         present = [row for row in points if row["value"] is not None]
+        legend_height = 20 * len(panel) if shared else 0
+        panel_top, panel_bottom = top + legend_height, bottom + legend_height
+        labels = (f'{spec["x_column"]} ({spec["x_unit"] or "unit not supplied"})',
+                  f'{"Values" if shared else column} ({spec["value_unit"] or "unit not supplied"})')
+        label_lines = []
+        for label in labels:
+            wrapped = textwrap.wrap(label, width=85 if wide else 40) or [label]
+            shown = wrapped[:3]
+            if len(wrapped) > 3:
+                shown[-1] = shown[-1][:-1] + "…"
+            label_lines.append((label, shown))
+        line_count = sum(len(lines) for _, lines in label_lines)
+        panel_height = height + legend_height + max(0, line_count - 2) * 16
         x, xticks = axis([row["x"] for row in points], left, right)
-        y, yticks = axis([row["value"] for row in present], bottom, top)
+        y, yticks = axis([row["value"] for row in present], panel_bottom, panel_top)
         physical = 7 if wide else 3.5
-        svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{physical}in" height="{height / width * physical:.4f}in" viewBox="0 0 {width} {height}">',
+        svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{physical}in" height="{panel_height / width * physical:.4f}in" viewBox="0 0 {width} {panel_height}">',
                f'<title>{escape(column)} versus {escape(spec["x_column"])}; supplied coordinates</title>',
                '<rect width="100%" height="100%" fill="white"/>',
                '<g font-family="sans-serif" font-size="13" fill="#203040">',
                f'<text x="8" y="22">{escape(textwrap.shorten(column, width=70 if wide else 34, placeholder="…"))}</text>',
-               f'<path d="M {left} {top} V {bottom} H {right}" fill="none" stroke="#687583"/>']
+               f'<path d="M {left} {panel_top} V {panel_bottom} H {right}" fill="none" stroke="#687583"/>']
         for position, value in xticks:
-            svg.append(f'<text x="{position:.4f}" y="{bottom + 20}" text-anchor="middle">{value:.3g}</text>')
+            svg.append(f'<text x="{position:.4f}" y="{panel_bottom + 20}" text-anchor="middle">{value:.3g}</text>')
         for position, value in yticks:
             svg.append(f'<text x="{left - 7}" y="{position + 4:.4f}" text-anchor="end">{value:.3g}</text>')
-        if spec["plot"] == "line":
-            commands, connected = [], False
-            for row in points:
-                if row["value"] is None:
-                    connected = False
-                    continue
-                commands.append(f'{"L" if connected else "M"} {x(row["x"]):.4f} {y(row["value"]):.4f}')
-                connected = True
-            svg.append(f'<path d="{" ".join(commands)}" fill="none" stroke="#286a9b" stroke-width="1.5"/>')
-        for row in present:
-            svg.append(f'<circle cx="{x(row["x"]):.4f}" cy="{y(row["value"]):.4f}" r="2.5" fill="#286a9b"><title>{escape(row["group"])}: x={row["x"]:.12g}, y={row["value"]:.12g}</title></circle>')
-        for offset, label in enumerate((f'{spec["x_column"]} ({spec["x_unit"] or "unit not supplied"})',
-                                       f'{column} ({spec["value_unit"] or "unit not supplied"})')):
-            shortened = textwrap.shorten(label, width=85 if wide else 40, placeholder="…")
-            svg.append(f'<text x="{(left + right) / 2}" y="{bottom + 40 + offset * 16}" text-anchor="middle"><title>{escape(label)}</title>{escape(shortened)}</text>')
+        for series_index, name in enumerate(panel):
+            color = colors[series_index % len(colors)]
+            dash = ("", "5 3", "2 2")[series_index % 3]
+            series = by_column[name]
+            if shared:
+                legend_y = top + series_index * 20
+                if spec["plot"] == "scatter":
+                    svg.append(f'<circle cx="{left + 11}" cy="{legend_y}" r="2.5" fill="{color}"/>')
+                else:
+                    svg.append(f'<line x1="{left}" y1="{legend_y}" x2="{left + 22}" y2="{legend_y}" stroke="{color}" stroke-dasharray="{dash}"/>')
+                label = textwrap.shorten(name, width=70 if wide else 28, placeholder="…")
+                svg.append(f'<text x="{left + 30}" y="{legend_y + 4}"><title>{escape(name)}</title>{escape(label)}</text>')
+            if spec["plot"] == "line":
+                commands, connected = [], False
+                for row in sorted(series, key=lambda row: row["x"]):
+                    if row["value"] is None:
+                        connected = False
+                        continue
+                    commands.append(f'{"L" if connected else "M"} {x(row["x"]):.4f} {y(row["value"]):.4f}')
+                    connected = True
+                svg.append(f'<path d="{" ".join(commands)}" fill="none" stroke="{color}" stroke-width="1.5" stroke-dasharray="{dash}"/>')
+            for row in series:
+                if row["value"] is not None:
+                    svg.append(f'<circle cx="{x(row["x"]):.4f}" cy="{y(row["value"]):.4f}" r="2.5" fill="{color}"><title>{escape(name)}; {escape(row["group"])}: x={row["x"]:.12g}, y={row["value"]:.12g}</title></circle>')
+        offset = 0
+        for label, lines in label_lines:
+            for line in lines:
+                svg.append(f'<text x="{(left + right) / 2}" y="{panel_bottom + 40 + offset * 16}" text-anchor="middle"><title>{escape(label)}</title>{escape(line)}</text>')
+                offset += 1
         svg.append('</g></svg>')
         filename = f'figures/{spec["plot"]}-{index}.svg'
         write_text(output_dir / filename, "\n".join(svg))
         caption = (f'{column} versus {spec["x_column"]}: {spec["plot"]} of supplied coordinates; '
+                   f'x unit (user-declared): {spec["x_unit"] or "not supplied"}; value unit: {spec["value_unit"] or "not supplied"}. '
                    f'{len(present)} plotted, {len(points) - len(present)} missing y values; no sampling, aggregation or inferred uncertainty. '
                    + ('Ordered by numeric x; missing y values break the line. ' if spec["plot"] == "line" else 'Duplicate x coordinates are retained. ')
-                   + 'Original row identities, full labels and values are in analysis.json; each value column has its own axis.')
+                   + 'Original row identities, full labels and values are in analysis.json. '
+                   + ('Explicit shared axes and user-declared common unit; no normalization or independent unit verification.' if shared else 'Each value column has its own axis.'))
         figures.append({"path": filename, "caption": caption, "width": spec["width"], "visual_check": "not_performed"})
     return figures

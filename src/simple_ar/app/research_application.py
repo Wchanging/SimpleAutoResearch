@@ -1528,6 +1528,17 @@ class ResearchApplication:
             self._persist_application_views()
             return False
         sources = tuple(ref for key, ref in self.controller.manifest.state_refs.items() if key not in {"work_plan", "work_plan_markdown", "readiness"})
+        # Attachment handles come from measured results, but read permission
+        # comes from the producing attempt's registered outputs, not model text.
+        output_paths = {handle.artifact for handle in report_context.source_handles if handle.kind == "experiment_output"}
+        attachments = tuple(
+            self.controller.store.ref(Path("attempts") / attempt.attempt_id / ref.path,
+                                      kind=ref.kind, schema=ref.schema, producer=ref.producer, status=ref.status)
+            for attempt in self.controller.list_attempts() for ref in attempt.outputs
+            if ref.kind == "experiment_output"
+            and str(Path("attempts") / attempt.attempt_id / ref.path).replace("\\", "/") in output_paths
+        )
+        sources += attachments
         resume_ref = None
         for attempt in reversed(self.controller.list_attempts()):
             if attempt.capability == "report_write":
@@ -2030,6 +2041,8 @@ class ResearchApplication:
         if action == "report":
             table_analyses = tuple(self.controller.store.ref(row["artifact"], kind="table_analysis", schema="table_analysis.v1")
                                   for row in report_context.results.get("supplied_analyses", []))
+            source_handles = {str(handle.metadata.get("document_id")): handle.handle
+                              for handle in report_context.source_handles if handle.metadata.get("document_id")}
             return self._execute("report", "report",
                 ReportAssemblyRequest(title=report_context.topic,
                     sections=_append_verified_experiment_evidence(tuple(writer["sections"]), report_context),
@@ -2038,7 +2051,10 @@ class ResearchApplication:
                     citation_key_map=report_context.citation_key_map,
                     paired_comparisons=tuple(report_context.results.get("comparisons", [])) if "matrix_results" in self.controller.manifest.state_refs else (),
                     paired_summaries=tuple(report_context.results.get("paired_summary", [])),
-                    table_analyses=table_analyses), (writer_ref, snapshot_ref, *table_analyses))
+                    table_analyses=table_analyses,
+                    analysis_handles={row["artifact"]: source_handles.get(row["document_id"], "")
+                                      for row in report_context.results.get("supplied_analyses", [])
+                                      if row.get("document_id")}), (writer_ref, snapshot_ref, *table_analyses))
         report_ref = self.controller.manifest.state_refs["report"]
         body_ref = self.controller.store.ref(Path(report_ref.path).parent / "report_body.md", kind="report_body")
         cleanup_ref = self.controller.store.ref(Path(report_ref.path).parent / "citation_cleanup.json", kind="citation_cleanup")

@@ -208,6 +208,9 @@ def run_experiment_capability(
     execution to a failed capability result; it never turns a timeout into a
     successful experiment and never retries implicitly.
     """
+    from simple_ar.experiment.execution.outputs import capture_outputs, output_files
+
+    declared_outputs = output_files(request.result_schema)
     implementation_refs = [ref for ref in context.inputs if ref.kind == "implementation_result"]
     if len(implementation_refs) > 1:
         raise ValueError("An experiment must name at most one producing implementation revision.")
@@ -250,8 +253,10 @@ def run_experiment_capability(
     artifact_paths["diagnosis"] = "diagnosis.json"
     artifact_paths["diagnosis_markdown"] = "diagnosis.md"
     process_refs = []
+    output_directory = None
     if local_backend and result.run.process_record:
         process_dir = request.run.output_dir / result.run.process_record["invocation_id"]
+        output_directory = process_dir / "outputs"
         if (process_dir / "outputs").is_dir():
             output_ref = context.store.ref(process_dir / "outputs", kind="experiment_outputs", producer="research.experiment")
             process_refs.append(output_ref)
@@ -264,6 +269,10 @@ def run_experiment_capability(
             ref = context.store.ref(process_dir / filename, kind=kind, schema=schema, producer="research.experiment")
             process_refs.append(ref)
             artifact_paths[f"process_{filename}"] = ref.path
+    output_evidence, output_refs = capture_outputs(context.store, output_directory, declared_outputs)
+    if declared_outputs:
+        canonical["output_evidence"] = output_evidence
+    process_refs.extend(output_refs)
     canonical["artifacts"] = artifact_paths
     guard = (
         dict(request.guard)

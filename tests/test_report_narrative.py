@@ -81,6 +81,38 @@ class NarrativeTests(unittest.TestCase):
         self.assertEqual(row["declared_claims"], [])
         self.assertIn("not_independently_verified", row["support_status"])
 
+    def test_frozen_responsibilities_have_one_prompt_owner_including_format_retry(self):
+        from simple_ar.report.agent import _writer_prompt, _writer_recovery_prompt, _reviewer_prompt
+        from simple_ar.report.schema import ReportDocumentPlan
+        goal = "Explain the precise recorded scope and qualifications. " * 20
+        plans = [ReportSectionPlan(section_id='setup', heading='Setup', goal=goal),
+                 ReportSectionPlan(section_id='end', heading='Conclusion', goal='Interpret the setup')]
+        memory = ReportMemory(section_plan=plans, document_plan=ReportDocumentPlan(sections=plans))
+        context = ReportContext(topic='Shared evidence', report_mode='supplied_materials')
+        config = ReportRuntimeConfig()
+        template = load_report_template_bundle(report_mode=context.report_mode, config=config)
+        adopted = [ReportSectionDraft(section_id='setup', heading='Setup', draft_markdown='One measured run only.')]
+        draft = ReportSectionDraft(section_id='end', heading='Conclusion', draft_markdown='Limited conclusion.')
+        common = dict(context=context, memory=memory, section=plans[1], adopted_sections=adopted)
+        prompts = [
+            _writer_prompt(**common, template=template, config=config, extra_context=[], previous_draft=None,
+                           review=None, source_batch_index=1, source_batch_count=1,
+                           include_previous_draft=True, draft_mode='section'),
+            _writer_recovery_prompt(**common, config=config, previous_draft=None, review=None, draft_mode='section'),
+            _reviewer_prompt(**common, template=template, draft=draft),
+        ]
+        for prompt in prompts:
+            payload = json.loads(prompt[prompt.index('{'):])
+            self.assertEqual(payload['document_plan']['sections'][0]['goal'], goal)
+            view = payload['narrative_context']
+            self.assertEqual(view['responsibilities_source'], 'document_plan.sections')
+            self.assertNotIn('section_responsibilities', view)
+            row = view['adopted_sections'][0]
+            self.assertEqual(row['purpose_section_id'], 'setup')
+            self.assertNotIn('purpose', row)
+            self.assertEqual(row['prose_windows'][0]['text'], adopted[0].draft_markdown)
+            self.assertEqual(prompt.count(goal), 1)
+
     def test_long_unicode_prose_keeps_qualification_and_explicit_coverage(self):
         text = "观测" * 1000 + "NOT independently reproduced."
         plan = ReportSectionPlan(section_id="end", heading="End", goal="Summarize")

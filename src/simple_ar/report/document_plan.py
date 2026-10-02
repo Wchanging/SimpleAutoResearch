@@ -14,6 +14,7 @@ from typing import Any
 
 from simple_ar.report.schema import (
     ReportDocumentPlan,
+    ReportContext,
     ReportRuntimeConfig,
     ReportSectionPlan,
     ReportVisualIntent,
@@ -35,6 +36,8 @@ def resolve_document_plan(
     config: ReportRuntimeConfig,
     visual_candidates: Sequence[Mapping[str, Any]] = (),
     status: str = "resolved",
+    title: str = "",
+    supplied_figure_handles: Sequence[str] = (),
 ) -> ReportDocumentPlan:
     """Freeze sections, budgets, and feasible visual intents in one artifact.
 
@@ -56,9 +59,11 @@ def resolve_document_plan(
         sections=frozen_sections,
         table_limit=visual_budget["tables"],
         figure_limit=visual_budget["figures"],
+        supplied_figure_handles=supplied_figure_handles,
     )
     return ReportDocumentPlan(
         status="fallback" if status == "fallback" else "resolved",
+        title=title,
         sections=frozen_sections,
         target_words=_target_words(contract),
         visual_budget=visual_budget,
@@ -89,8 +94,29 @@ def visual_requirements(plan: ReportDocumentPlan | None, section: ReportSectionP
             output["tables"].append(payload)
         else:
             payload["view"] = intent.view
+            payload["assembly_owned"] = intent.view == "supplied-data"
+            if payload["assembly_owned"]:
+                payload["delivery"] = "Existing figures are attached after drafting in this frozen owning section. Explain recorded values; do not generate image paths or duplicate the chart. Missing image links in a pre-assembly draft are not a missing deliverable."
             output["figures"].append(payload)
     return output
+
+
+def supplied_figure_sources(context: ReportContext | None) -> list[dict[str, Any]]:
+    """Identify existing analysis figures by registered document identity only."""
+    if context is None:
+        return []
+    analyses = context.results.get("supplied_analyses", [])
+    if not isinstance(analyses, list):
+        return []
+    by_document = {str(row.get("document_id")): row for row in analyses
+                   if isinstance(row, Mapping) and row.get("document_id")
+                   and isinstance(row.get("figures"), list) and row["figures"]}
+    return [{"handle": handle.handle, "title": handle.title,
+             "figure_count": len(by_document[str(handle.metadata["document_id"])]["figures"]),
+             "captions": [row.get("caption", "") for row in
+                          by_document[str(handle.metadata["document_id"])]["figures"]]}
+            for handle in context.source_handles
+            if str(handle.metadata.get("document_id")) in by_document]
 
 
 def visual_plan_for_renderer(plan: ReportDocumentPlan | None) -> list[ReportVisualIntent]:
@@ -169,6 +195,7 @@ def _normalize_visual_intents(
     sections: Sequence[ReportSectionPlan],
     table_limit: int,
     figure_limit: int,
+    supplied_figure_handles: Sequence[str] = (),
 ) -> list[ReportVisualIntent]:
     by_id = {section.section_id: section for section in sections}
     by_heading = {_key(section.heading): section for section in sections}
@@ -176,8 +203,33 @@ def _normalize_visual_intents(
     used_figure_views: set[str] = set()
     counts = {"table": 0, "figure": 0}
     intents: list[ReportVisualIntent] = []
+    assigned_sources: set[str] = set()
     for index, raw in enumerate(candidates, start=1):
         kind = str(raw.get("kind") or "").strip().lower()
+        # Placement of existing registered figures is not a new rendering job
+        # and does not consume the generated-figure quota. Final physical
+        # output limits still apply at the report capability boundary.
+        if kind == "figure" and raw.get("view") == "supplied-data":
+            section = by_id.get(str(raw.get("section_id") or ""))
+            if section is None:
+                # An explicit heading names the planner's own section; it is
+                # not a semantic guess about where arbitrary data belong.
+                matches = [row for row in sections if row.heading == raw.get("section_heading")]
+                section = matches[0] if len(matches) == 1 else None
+            evidence = _text_list(raw.get("evidence_handles"), limit=8)
+            title = _clean_text(raw.get("title"), limit=100)
+            purpose = _clean_text(raw.get("purpose"), limit=260)
+            if (section is None or not title or not purpose or len(evidence) != 1
+                    or evidence[0] not in supplied_figure_handles
+                    or evidence[0] not in section.evidence_handles):
+                raise ValueError("supplied-data placement requires one registered analysis figure source in its owning section")
+            if evidence[0] in assigned_sources:
+                raise ValueError("A supplied figure source cannot have multiple placement owners")
+            assigned_sources.add(evidence[0])
+            intents.append(ReportVisualIntent(visual_id=f"figure-{index:02d}", kind="figure",
+                title=title, purpose=purpose, section_id=section.section_id,
+                evidence_handles=evidence, view="supplied-data"))
+            continue
         if kind not in counts:
             continue
         if kind == "table" and counts[kind] >= table_limit:

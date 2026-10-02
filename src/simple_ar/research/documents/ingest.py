@@ -215,11 +215,15 @@ def run_document_ingest_capability(
         prefix = f"analyses/analysis-{index:03d}"
         result = copy_analysis_package(path, context.store.root / prefix)
         document_id = f"supplied-analysis-{index:03d}"
-        text = table_markdown(result)
+        # Package-local image links are not report-local paths. Keep the
+        # numerical material readable; registered figures travel separately
+        # to planning and assembly rather than being copied into writer prose.
+        text = table_markdown({**result, "figures": []})
         artifact = f"{prefix}/analysis.json"
         bundle.records.append(DocumentRecord(document_id=document_id, title=f"Descriptive analysis: {result['source_name']}",
             source="local_analysis", source_id=str(path.resolve()), extraction_status="parsed", parser="table_analysis.v1",
-            metadata={"table_analysis": {"artifact": artifact, "records": result["records"], "spec": result["spec"]},
+            metadata={"table_analysis": {"artifact": artifact, "records": result["records"], "spec": result["spec"],
+                                        "row_count": result["row_count"], "figures": result["figures"]},
                       "evidence_role": "recomputed_from_user_supplied_data"}))
         bundle.sections.append(DocumentSection(section_id=f"{document_id}:results", document_id=document_id,
             section="results", heading="Rechecked descriptive data", text=text, source_path=f"{prefix}/analysis.md"))

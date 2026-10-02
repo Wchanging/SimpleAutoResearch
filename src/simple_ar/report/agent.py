@@ -10,7 +10,8 @@ from pydantic import ValidationError
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMResponseError
 from simple_ar.research.contracts import CLAIM_SCOPE_RULES
 from simple_ar.report.assembler import assemble_report_sections
-from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
+from simple_ar.report.document_plan import resolve_document_plan, supplied_figure_sources, visual_requirements
+from simple_ar.report.templates import drafting_template_guidance
 from simple_ar.report.editor import MAX_DOCUMENT_REVIEW_SECTIONS, review_document
 from simple_ar.report.execution_evidence import report_execution_evidence
 from simple_ar.report.narrative import (
@@ -21,7 +22,8 @@ from simple_ar.report.narrative import (
     _compact_source_metadata,
     _prompt_handle_view,
     _prompt_metrics,
-    adopted_claims, narrative_context, pending_document_revisions, pending_revision_review, revision_context,
+    adopted_claims, evidence_outline_context, narrative_context, pending_document_revisions,
+    pending_revision_review, revision_context,
 )
 from simple_ar.report.schema import (
     finding_requires_resolution,
@@ -40,6 +42,8 @@ from simple_ar.report.schema import (
 )
 from simple_ar.report.survey import is_survey_report, route_section_sources
 from simple_ar.report.tool_gateway import ReportToolGateway
+from simple_ar.report.tools import report_tool_specs
+from simple_ar.report.templates import BUILTIN_TEMPLATE_NAMES
 
 
 _EXPERIMENT_EVIDENCE_RULES = """
@@ -134,8 +138,8 @@ and section structure over requests to add more paper-by-paper detail.
 Return one JSON object matching the requested schema.""" + _EXPERIMENT_EVIDENCE_RULES
 
 
-OUTLINE_PLANNER_SYSTEM = """You are the SimpleAutoResearch survey Outline Planner.
-Create a topic-specific academic survey outline from the current run evidence.
+OUTLINE_PLANNER_SYSTEM = """You are the SimpleAutoResearch Outline Planner.
+Organize the requested document around the current evidence and its limitations.
 Do not use external gold outlines, benchmark references, or hidden evaluator
 expectations. Keep the outline broad, readable, and evidence-bounded.
 Return one JSON object matching the requested schema."""
@@ -176,7 +180,7 @@ def run_report_agent(
         return None
 
     current = memory.model_copy(deep=True)
-    current = _maybe_adapt_survey_outline(
+    current = _maybe_adapt_outline(
         client=client,
         context=context,
         template=template,
@@ -184,7 +188,7 @@ def run_report_agent(
         config=config,
         emit=emit,
     ) if completed_checkpoint is None else current
-    current = _resolve_document_plan(current, config=config)
+    current = _resolve_document_plan(current, config=config, context=context)
     sections: list[ReportSectionDraft] = []
     iterations: list[ReportIterationRecord] = []
     all_findings: list[ReviewerFinding] = []
@@ -332,10 +336,12 @@ def run_report_agent(
                 )
                 tool_results = _run_context_requests(gateway, review, config)
                 all_tool_results.extend(tool_results)
-                if _needs_evidence_recheck(review):
+                lookup_failed = any(row.status in {"not_found", "error"} for row in tool_results)
+                if _needs_evidence_recheck(review) or lookup_failed:
                     # A pass that asks for missing evidence is provisional.
-                    # Rejections already go through revise -> verify with the
-                    # fetched evidence, so they do not need an extra review.
+                    # A rejected draft with a failed lookup also needs one
+                    # bounded query correction before spending a prose edit.
+                    # Successful mixed corrections keep the direct path.
                     iterations.append(_iteration(section_index, section, "review_context", review.verdict,
                         draft.used_sources, findings=review.findings, tool_results=tool_results))
                     all_findings.extend(review.findings)
@@ -346,6 +352,16 @@ def run_report_agent(
                             label=f"report-reviewer-{section.section_id}{label_suffix}-evidence", emit=emit,
                             extra_context=[*review_context, *tool_results], adopted_sections=sections,
                             revision_review=revision_request, previous_draft=revision_baseline)
+                        # Do not retry a denied/exhausted tool. A successful
+                        # verification-only read keeps its existing one-recheck
+                        # contract; only a failed lookup gets query repair.
+                        corrected_results = _run_context_requests(gateway, review, config) if lookup_failed else []
+                        tool_results.extend(corrected_results)
+                        all_tool_results.extend(corrected_results)
+                        if corrected_results:
+                            iterations.append(_iteration(section_index, section, "review_context", review.verdict,
+                                draft.used_sources, findings=review.findings, tool_results=tool_results))
+                            checkpoint()
                     review = _mark_pending_evidence(review)
                 review_context = tool_results
                 section_findings.extend(review.findings)
@@ -438,7 +454,8 @@ def run_report_agent(
         # review is disabled or inapplicable. Persist the memory we return,
         # not the earlier append-only history from the last section checkpoint.
         checkpoint()
-        body = assemble_report_sections(title=context.topic, sections=_final_sequence(current.section_plan, sections))
+        title = current.document_plan.title if current.document_plan and current.document_plan.title else context.topic
+        body = assemble_report_sections(title=title, sections=_final_sequence(current.section_plan, sections))
         return AgentReportResult(
             report_body=body,
             memory=current,
@@ -670,7 +687,7 @@ def _edit_whole_document(
             memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, unavailable])
 
 
-def _maybe_adapt_survey_outline(
+def _maybe_adapt_outline(
     *,
     client: LLMClient,
     context: ReportContext,
@@ -680,21 +697,28 @@ def _maybe_adapt_survey_outline(
     emit: Callable[[str], None] | None,
 ) -> ReportMemory:
     contract = memory.survey_contract if isinstance(memory.survey_contract, dict) else {}
-    if not contract.get("enabled"):
+    if memory.document_plan is not None:
         return memory
+    survey = bool(contract.get("enabled")) and is_survey_report(
+        template_name=template.name, style=config.style, report_mode=context.report_mode,
+    )
     strategy = str(contract.get("outline_strategy") or config.outline_strategy or "auto").lower()
     if strategy == "template":
         return memory
-    if not is_survey_report(template_name=template.name, style=config.style, report_mode=context.report_mode):
+    # Non-survey planning is explicit until real-content validation supports
+    # changing its default. Custom templates keep their author's topology.
+    if not survey and (config.outline_strategy != "adaptive" or template.name not in BUILTIN_TEMPLATE_NAMES
+                       or config.template not in {"", "auto", *BUILTIN_TEMPLATE_NAMES}):
         return memory
-    if len(memory.section_plan) < 3:
+    if not memory.section_plan or (survey and len(memory.section_plan) < 3):
         return memory
     errors: list[str] = []
     planned: list[ReportSectionPlan] = []
     visual_candidates: list[dict[str, Any]] = []
+    title = ""
     for attempt in (1, 2):
         try:
-            planned, visual_candidates = _plan_topic_specific_outline(
+            planned, visual_candidates, title = _plan_topic_specific_outline(
                 client=client,
                 context=context,
                 template=template,
@@ -706,16 +730,16 @@ def _maybe_adapt_survey_outline(
         except (LLMError, ValidationError, ValueError, TypeError) as exc:
             errors.append(str(exc))
             if attempt == 1:
-                _emit(emit, f"Survey outline planner did not yield a usable plan; retrying once. {exc}")
+                _emit(emit, f"Outline planner did not yield a usable plan; retrying once. {exc}")
             else:
                 if config.allow_llm_fallback:
-                    _emit(emit, f"Survey outline planner fallback used; keeping template outline. {exc}")
+                    _emit(emit, f"Outline planner fallback used; keeping template outline. {exc}")
                 else:
-                    _emit(emit, f"Survey outline planner failed after retry; fallback is disabled. {exc}")
+                    _emit(emit, f"Outline planner failed after retry; fallback is disabled. {exc}")
     if not planned:
         if not config.allow_llm_fallback:
             raise LLMError(
-                "Survey outline planner failed after bounded retries and LLM fallback is disabled"
+                "Outline planner failed after bounded retries and LLM fallback is disabled"
             )
         return memory.model_copy(
             update={
@@ -730,31 +754,34 @@ def _maybe_adapt_survey_outline(
                 },
                 "key_decisions": memory.key_decisions
                 + [
-                    "Survey outline planner fallback retained the configured evidence budget for every section."
+                    "Outline planner fallback retained the template and configured evidence budget."
                 ],
             }
         )
-    _emit(emit, f"Survey outline planner produced {len(planned)} topic-specific section(s).")
+    _emit(emit, f"Outline planner produced {len(planned)} evidence-organized section(s).")
     return memory.model_copy(
         update={
             "section_plan": planned,
             "outline_planning": {
                 "schema_version": "report_outline_planning.v1",
                 "status": "adapted",
-                "strategy": "topic_specific_outline",
+                "strategy": "topic_specific_outline" if survey else "evidence_organized_outline",
                 "attempts": len(errors) + 1,
                 "errors": errors,
                 "section_source_budget": _outline_source_budget(memory.survey_contract, config),
                 "visual_candidates": visual_candidates,
+                "title": title,
             },
             "key_decisions": memory.key_decisions
-            + ["Survey section plan adapted to the topic and current-run evidence before drafting."],
+            + ["Section plan adapted to the requested document and current evidence before drafting."],
         }
     )
 
 
-def _resolve_document_plan(memory: ReportMemory, *, config: ReportRuntimeConfig) -> ReportMemory:
+def _resolve_document_plan(memory: ReportMemory, *, config: ReportRuntimeConfig, context: ReportContext | None = None) -> ReportMemory:
     """Freeze the only plan that Writer, Reviewer, renderer, and audit consume."""
+    if memory.document_plan is not None:
+        return memory
     candidates = memory.outline_planning.get("visual_candidates", [])
     if not isinstance(candidates, list):
         candidates = []
@@ -764,6 +791,8 @@ def _resolve_document_plan(memory: ReportMemory, *, config: ReportRuntimeConfig)
         config=config,
         visual_candidates=[row for row in candidates if isinstance(row, dict)],
         status=str(memory.outline_planning.get("status") or "resolved"),
+        title=str(memory.outline_planning.get("title") or ""),
+        supplied_figure_handles=[row["handle"] for row in supplied_figure_sources(context)],
     )
     planning = dict(memory.outline_planning)
     planning["document_plan"] = {
@@ -790,7 +819,28 @@ def _plan_topic_specific_outline(
     memory: ReportMemory,
     config: ReportRuntimeConfig,
     retry: bool = False,
-) -> tuple[list[ReportSectionPlan], list[dict[str, Any]]]:
+) -> tuple[list[ReportSectionPlan], list[dict[str, Any]], str]:
+    if not (memory.survey_contract.get("enabled") and is_survey_report(
+        template_name=template.name, style=config.style, report_mode=context.report_mode,
+    )):
+        response = client.ask_json(
+            OUTLINE_PLANNER_SYSTEM,
+            _json_prompt(evidence_outline_context(context, memory, config, retry=retry)),
+            label="report-outline-planner-retry" if retry else "report-outline-planner",
+        )
+        sections = _evidence_outline_sections(response, memory=memory, config=config)
+        title = response.get("title", "")
+        if not isinstance(title, str) or len(title) > 240 or any(ord(char) < 32 for char in title) or title.startswith("#"):
+            raise ValueError("document title must be plain single-line text of at most 240 characters")
+        visuals = response.get("visual_intents", [])
+        if not isinstance(visuals, list) or any(not isinstance(row, dict) for row in visuals):
+            raise ValueError("visual_intents must be a list of visual intent objects")
+        # Validate placement inside the existing one-correction outline call,
+        # not after its allowance has ended. Freeze the same plan later.
+        resolve_document_plan(sections=sections, contract=memory.survey_contract, config=config,
+            visual_candidates=visuals,
+            supplied_figure_handles=[row["handle"] for row in supplied_figure_sources(context)])
+        return sections, visuals, title.strip()
     response = client.ask_json(
         OUTLINE_PLANNER_SYSTEM,
         _outline_planner_prompt(
@@ -865,7 +915,48 @@ def _plan_topic_specific_outline(
             )
         )
     candidates = response.get("visual_intents") if isinstance(response.get("visual_intents"), list) else []
-    return _dedupe_section_ids(planned), [row for row in candidates if isinstance(row, dict)]
+    return _dedupe_section_ids(planned), [row for row in candidates if isinstance(row, dict)], ""
+
+
+def _evidence_outline_sections(
+    response: dict[str, Any], *, memory: ReportMemory, config: ReportRuntimeConfig,
+) -> list[ReportSectionPlan]:
+    """Validate organization, not scientific truth; never manufacture evidence."""
+    raw = response.get("sections")
+    if not isinstance(raw, list) or not 2 <= len(raw) <= 12:
+        raise ValueError("evidence outline requires 2-12 sections")
+    if any(not isinstance(row, dict) or not str(row.get("heading") or "").strip()
+           or not str(row.get("goal") or "").strip() for row in raw):
+        raise ValueError("each evidence section needs a heading and reader-facing goal")
+    available = {handle.handle for handle in memory.source_handles}
+    budget = config.max_section_sources
+    default_handles = list(dict.fromkeys(
+        handle for section in memory.section_plan for handle in section.evidence_handles
+        if handle in available
+    ))
+    default_words = sum(section.target_words for section in memory.section_plan) // len(raw)
+    sections = []
+    for index, row in enumerate(raw, 1):
+        heading = _clean_outline_heading(str(row["heading"]))
+        if not heading or heading.lower() == "references":
+            raise ValueError("evidence outline must not include an empty or References section")
+        handles = row.get("evidence_handles", default_handles)
+        if not isinstance(handles, list) or any(not isinstance(handle, str) or handle not in available for handle in handles):
+            raise ValueError("evidence outline references unknown or malformed source handles")
+        handles = list(dict.fromkeys(handles))
+        if budget > 0 and len(handles) > budget:
+            raise ValueError("evidence outline exceeds the configured per-section source limit")
+        sections.append(ReportSectionPlan(
+            section_id=_section_slug(heading) or f"section_{index}", heading=heading,
+            goal=str(row["goal"]).strip(), evidence_handles=handles,
+            target_words=_coerce_int(row.get("target_words"), default=default_words, lower=0, upper=8000),
+            # Survey citation quotas and filler subsection templates do not
+            # apply to supplied results, negative findings or reproductions.
+            min_citations=0, subsections=_string_items(row.get("subsections"))[:6],
+            required=True, final_order=index,
+            draft_order=_survey_draft_order(heading, index, len(raw)),
+        ))
+    return _dedupe_section_ids(sections)
 
 
 def _outline_planner_prompt(
@@ -1470,7 +1561,7 @@ def _writer_prompt(
                 batch_count=source_batch_count,
             ),
         },
-        "template_markdown": template.template_markdown,
+        "template_markdown": drafting_template_guidance(template, memory),
         "objective": memory.objective,
         "document_plan": _compact_document_plan(memory),
         "narrative_context": narrative_context(memory, section, adopted_sections or []),
@@ -1572,6 +1663,7 @@ def _writer_recovery_prompt(
         ),
         "topic": context.topic,
         "objective": memory.objective,
+        "document_plan": _compact_document_plan(memory),
         "narrative_context": narrative_context(memory, section, adopted_sections or []),
         "execution_context": _compact_execution_context(context.execution_context),
         "experiment_plan": _compact_experiment_plan(context.experiment_plan),
@@ -1698,6 +1790,8 @@ def _reviewer_prompt(
             "search_source_chunks_arguments": {"handle": "one allowed source handle", "query": "specific claim or condition"},
             "prefer_get_paper_brief_arguments": {"citation_key": "P1"},
         },
+        "context_tools": [{"name": spec.name, "description": spec.description, "input_schema": spec.input_schema}
+                          for spec in report_tool_specs()],
         "review_focus": [
             *CLAIM_SCOPE_RULES,
             *REVIEW_ACTION_RULES,

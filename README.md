@@ -54,6 +54,23 @@ These are intended workflow benefits, not evidence that the assistant outperform
 a general coding Agent. Cross-task quality and first-time user experience remain
 under validation.
 
+For writing from existing evidence, built-in templates also support opt-in
+evidence-organized sections (`report.outline_strategy = "adaptive"`). See the
+[writing configuration](docs/CONFIG_REFERENCE.md#writing-from-supplied-material).
+This organizes the draft; it does not certify claims or create missing experiments.
+Writing keeps imported analysis packages complete but links full row records by
+default, instead of filling the prose with raw tables. Set `report.data_tables = "full"`
+if row-by-row tables are part of the requested report.
+With adaptive planning, existing data figures can have an explicit owning section
+even when several sections cite the same material; assembly supplies the actual
+registered images rather than relying on model-created file links.
+
+For line/scatter data, axes remain separate by default. Select
+`analysis.series_layout = "shared"` (or `start --series-layout shared`) when the
+columns have a common declared unit. Shared plots preserve every supplied value;
+they do not normalize, sample or infer uncertainty. Analysis packages can be
+moved, rebuilt and supplied directly to writing.
+
 ## Quick start
 
 Requirements: **Python 3.12+**, Git and [uv](https://docs.astral.sh/uv/).
@@ -140,6 +157,7 @@ templates into `runs/` first.
 | [Descriptive analysis](examples/data-analysis/README.md) | Tables, descriptive bars and rebuilding | No API; explicit data/row semantics |
 | [Literature survey](examples/survey/README.md) | Research report without training | Model API and internet |
 | [Conformal reproduction](examples/conformal_reproduction/README.md) | Bounded, adapted numerical reproduction | Follow the case environment/protocol; not whole-paper or benchmark acceptance |
+| [ICML 2025 RCP subset](examples/rcp_reproduction/README.md) | Fixed author-code-assisted real-data comparison | Prepare pinned code, data, paper and scientific Python; two methods, ten paired seeds. Not whole-paper reproduction; writing quality needs separate review. |
 | [Multi-file code review](examples/code_task_medium_review/README.md) | Scoped editing and validation | Model API for generated edits; Python standard-library project |
 | [Digits MLP](examples/code_task_digits_mlp/README.md) | Small model-code task | NumPy/scikit-learn; `uv sync --extra examples`, retain the extra in `uv run` |
 | [Continual learning](examples/continual_learning/README.md) | Experimental research improvement | Prepared Mammoth/CIFAR-100 project, fixed split, environment and GPU budget |
@@ -191,6 +209,9 @@ Start with the function and desired delivery, not an internal stage sequence:
 
 For writing, provide the completed descriptive-analysis package as material,
 rather than presenting arbitrary JSON as validated experimental results.
+Prepared evaluators can explicitly retain raw text results for report review
+through task-local [`execution.output_files`](docs/CONFIG_REFERENCE.md#research-toml-sections-and-defaults);
+recorded attachments are not automatically certified scientific evidence.
 For a prepared project, put configuration beside the case, use `{config_dir}`
 where supported for case-local paths and explicit paths for machine assets.
 The assistant does not automatically provision environments or download datasets.

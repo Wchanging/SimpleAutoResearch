@@ -96,6 +96,21 @@ class StartTests(unittest.TestCase):
             self.assertTrue(config.is_file())
             self.assertEqual(research_defaults(["research-session", "--config", str(config)])["value_column"], ["loss"])
 
+    def test_shared_coordinate_start_roundtrips_explicit_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "paired.csv"
+            source.write_text("step,A,B\n0,1,2\n1,2,3\n", encoding="utf-8")
+            config = self.prepare("--kind", "data_analysis", "--goal", "Compare supplied coordinates",
+                                  "--data-file", str(source), "--value-column", "A", "--value-column", "B",
+                                  "--observation-unit", "one paired point", "--data-mode", "values",
+                                  "--data-plot", "scatter", "--x-column", "step", "--value-unit", "points",
+                                  "--series-layout", "shared", "--output-root", str(root / "runs"), "--prepare-only")
+            defaults = research_defaults(["research-session", "--config", str(config)])
+            self.assertEqual(defaults["series_layout"], "shared")
+            self.assertEqual(defaults["value_column"], ["A", "B"])
+            self.assertEqual(defaults["data_plot"], "scatter")
+
     def test_writing_roundtrips_material_role_template_and_no_execution(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

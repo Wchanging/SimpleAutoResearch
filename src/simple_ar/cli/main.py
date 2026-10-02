@@ -460,6 +460,9 @@ def _print_research_session(args: argparse.Namespace) -> None:
             raise SystemExit("execution.protocol requires a command, pairs or code_task_config.")
         if execution_details.get("pairs") and code_task_spec is not None and code_task_baseline_policy not in {"auto", "run"}:
             raise SystemExit("Paired experiments require CodeTask baseline_policy=auto/run.")
+        execution_details = dict(execution_details)
+        if "output_files" in execution_details:
+            execution["result_schema"]["output_files"] = execution_details.pop("output_files")
         execution.update(execution_details)
         if execution_details.get("pairs"):
             execution.pop("baseline", None)  # Pair rows own both commands.
@@ -481,6 +484,10 @@ def _print_research_session(args: argparse.Namespace) -> None:
     }
     if getattr(args, "report_document_review", None) is not None:
         report_config["document_review"] = args.report_document_review
+    if getattr(args, "report_outline_strategy", None) is not None:
+        report_config["outline_strategy"] = args.report_outline_strategy
+    if getattr(args, "report_data_tables", None) is not None:
+        report_config["data_tables"] = args.report_data_tables
     if getattr(args, "max_section_tokens", None) is not None:
         if args.max_section_tokens < 0:
             raise SystemExit("--max-section-tokens cannot be negative; use 0 to omit the cap.")
@@ -1039,6 +1046,8 @@ def _report_config_overrides(args: argparse.Namespace, app: Any) -> dict[str, ob
             "reviewer": "reviewer",
             "max_review_iterations": "max_review_iterations",
             "document_review": "document_review",
+            "outline_strategy": "outline_strategy",
+            "data_tables": "data_tables",
             "max_section_tokens": "max_section_tokens",
         }
     else:
@@ -1047,6 +1056,8 @@ def _report_config_overrides(args: argparse.Namespace, app: Any) -> dict[str, ob
             "report_reviewer": "reviewer",
             "max_review_iterations": "max_review_iterations",
             "report_document_review": "document_review",
+            "report_outline_strategy": "outline_strategy",
+            "report_data_tables": "data_tables",
             "max_section_tokens": "max_section_tokens",
             "report_figures": "figures",
             "report_max_cited_sources": "max_cited_sources",

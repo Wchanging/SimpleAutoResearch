@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import tempfile
 import unittest
 from pathlib import Path
@@ -325,6 +326,19 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             self.assertEqual(len(figure_refs), 1)
             self.assertEqual(figure_refs[0].status, "missing")
             self.assertEqual(controller.manifest.status, "running")
+
+    def test_assembly_uses_frozen_title_and_preserves_legacy_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            section = ReportSectionDraft(section_id="findings", heading="Findings", draft_markdown="Observed values.")
+            request = ReportAssemblyRequest(title="Long task instructions, not an article title", sections=(section,),
+                document_plan=ReportDocumentPlan(title="A bounded observation"))
+            result = assemble_report_document(request, report_dir=root)
+            self.assertTrue(result.report_markdown.startswith("# A bounded observation\n"))
+            self.assertTrue(result.report_body_markdown.startswith("# A bounded observation\n"))
+            for plan in (None, ReportDocumentPlan.model_validate({"schema_version": "report_document_plan.v1"})):
+                legacy = assemble_report_document(replace(request, document_plan=plan), report_dir=root)
+                self.assertTrue(legacy.report_markdown.startswith("# Long task instructions, not an article title\n"))
 
     def test_report_capability_uses_document_plan_order_without_dropping_drafts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

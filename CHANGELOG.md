@@ -6,6 +6,40 @@ This file records implemented, user-visible changes in reverse chronological ord
 
 ## Unreleased (source-visible preview)
 
+### 2026-10-02 — Data packages and article presentation
+
+- Analysis-material ingestion preserves regenerated figure identities for planning and keeps producer-local image links out of writer excerpts. Bar captions retain the full declared value unit even when a long axis label is shortened.
+
+- Opt-in non-survey planning retains explicit placement of existing registered data figures in the same frozen document plan. Shared citations do not require duplicate figures; invalid sources or multiple owners use the existing bounded correction, and writers/reviewers see that assembly owns the images. Frozen plans are reused on recovery, not regenerated under changed rules.
+
+- Imported analysis packages retain all inputs, rechecked numerical records and editable figures. Reports default to linked full records; task-local `report.data_tables = "full"` optionally includes row tables in the prose. No data are sampled or silently removed, and historical completed reports are not rewritten.
+- Data/figure placement follows a unique source owner in the existing frozen plan; ambiguous ownership retains a neutral data section rather than matching headings heuristically. Coordinate captions name declared axis units, or state that they were not supplied.
+- ACM-generated bare figure floats prefer nearby placement without forcing it. This improves presentation mechanics, not scientific or publication quality.
+
+### 2026-10-02 — Explicit experiment evidence attachments
+
+- Task-local `execution.output_files` binds selected text results to the existing process output directory, without scanning a repository or following paths printed in logs. Missing/unreadable files are distinguished from valid execution and metrics.
+- Registered producer attachments support bounded literal lookup and exact JSON/CSV/TSV record selection. A failed section-review lookup gets one query-correction opportunity before a prose correction; denied/exhausted tools are not retried, and findings remain unresolved when evidence cannot be obtained.
+- ACM export binds existing figure-manifest captions to their images instead of promoting generic alt labels to captions; exact adjacent duplicates are removed, without editing the canonical report or nearby discussion.
+- Canonical results, report planning, section review and document review share producer attachment previews, coverage and observed execution records. Existing read-only report tools can fetch bounded character windows of registered inputs; arbitrary paths, symlinks, special files and oversized text are not read. This is evidence availability, not method verification.
+- Writing recovery reuses the same artifact/checkpoint contract. Completed historical sessions are unchanged; no new database, global environment settings or hash inventory is introduced.
+
+### 2026-10-02 — Evidence-organized non-survey writing
+
+- Successful adaptive non-survey drafts use the frozen section plan without reintroducing the built-in template's old topology or draft order. Section prompts share its responsibilities rather than repeating them. Intended-use boundaries remain; custom templates, surveys, template mode and fallback paths are unchanged.
+
+- Built-in non-survey templates can opt into `report.outline_strategy = "adaptive"` (or `--report-outline-strategy`) to organize sections from existing objectives, claims, sources, measured results and limitations. This reuses the frozen report plan and recovery path; defaults and custom templates are unchanged.
+- Planning sees declared versus executor-recorded conditions and explicit omission counts. Unknown source handles and invalid plans use the existing bounded correction/fallback policy; survey citation quotas and long-form filler are not imposed on reproduction or supplied-material reports. Planning does not validate scientific claims or authorize new experiments.
+- The same opt-in planning call can propose a concise evidence-scoped title, saved with the frozen document plan and reused on recovery. Historical plans without a title keep the previous behavior; no additional model call is needed.
+- Final report assembly uses that frozen title too. Legacy plans retain the caller's heading; already completed sessions are not silently rewritten.
+- Protocol-only seed lists describe the evaluator's conditions without automatically multiplying process invocations. Expansion requires an explicit command binding; top-level seed settings retain their validation. This supports evaluators that internally handle a seed batch without treating declared conditions as measured facts.
+
+### 2026-10-02 — Explicit shared-axis coordinate comparisons
+
+- Native line/scatter analysis supports opt-in `analysis.series_layout = "shared"` / `--series-layout shared`, with a common scale and per-series legends/gaps. Separate axes remain the default; values are not normalized, fitted or silently sampled, and unit semantics remain user-declared.
+- Coordinate labels wrap at the target size and scatter legends use point markers. ACM export preserves intrinsic figure width, shrinking oversized assets to the current text width instead of enlarging every image to a full line. This does not certify layout or scientific quality.
+- Shared panels apply the physical point limit to all selected series. The saved analysis package retains this setting for rebuilding and material-based writing; no new renderer dependency is required by the product.
+
 ### 2026-10-02 — Structural cleanup and bounded artifact inspection
 
 - Artifact inspection uses bounded file-type/summary reads instead of reading complete files for a preview. Hashing is opt-in for Python callers (`hash_files=True`); otherwise the existing `sha256` field is null. Scientific asset fingerprints are unaffected.

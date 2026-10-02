@@ -90,6 +90,45 @@ class ReviewActionTests(unittest.TestCase):
             value = self.finding(action)
             self.assertEqual(ReviewerFinding.model_validate_json(value.model_dump_json()), value)
 
+    def test_failed_lookup_is_corrected_before_spending_a_prose_revision(self):
+        from simple_ar.report.schema import ReportToolCall, ReportToolResult
+        from unittest.mock import patch
+        for lookup_recovers in (True, False):
+            with self.subTest(lookup_recovers=lookup_recovers):
+                objects = self.objects()
+                labels, saved = [], []
+                request = ReportToolCall(tool_name='get_code_task_result', arguments={'query': 'initial'})
+                finding = self.finding('revise', severity='major')
+                class Client:
+                    def ask_json(client, system, prompt, *, label='', **kwargs):
+                        labels.append(label)
+                        if label.endswith('-evidence'):
+                            self.assertIn('not_found', prompt)
+                            return {'verdict': 'revise_required', 'findings': [finding.model_dump(mode='json')],
+                                'context_requests': [request.model_copy(update={'arguments': {'query': 'corrected'}}).model_dump(mode='json')]}
+                        if 'reviewer' in label:
+                            if 'round-2' in label and lookup_recovers:
+                                return {'verdict': 'pass'}
+                            return {'verdict': 'revise_required', 'findings': [finding.model_dump(mode='json')],
+                                    'context_requests': [] if 'round-2' in label else [request.model_dump(mode='json')]}
+                        if 'reviser' in label:
+                            self.assertIn('recorded 0.42' if lookup_recovers else 'still missing', prompt)
+                        return {'draft_markdown': 'Bounded observed result.'}
+                responses = [ReportToolResult(tool_name=request.tool_name, status='not_found'),
+                    ReportToolResult(tool_name=request.tool_name, status='ok' if lookup_recovers else 'not_found',
+                                     content={'text': 'recorded 0.42' if lookup_recovers else 'still missing'})]
+                with patch.object(objects['gateway'], 'call', side_effect=responses) as calls:
+                    result = run_report_agent(client=Client(), **objects, checkpoint_sink=saved.append)
+                self.assertEqual(calls.call_count, 2)
+                self.assertEqual(sum('reviser' in label for label in labels), 1)
+                self.assertEqual(sum(label.endswith('-evidence') for label in labels), 1)
+                self.assertEqual(len(result.tool_results), 2)
+                self.assertEqual(bool(result.memory.reviewer_findings), not lookup_recovers)
+                self.assertTrue(any(len(row['tool_results']) == 2 for row in saved[-1]['iterations']))
+                before = len(labels)
+                run_report_agent(client=Client(), **objects, completed_checkpoint=saved[-1])
+                self.assertEqual(len(labels), before)
+
     def test_optional_advice_does_not_spend_a_correction(self):
         labels = []
         finding = self.finding('advisory')

@@ -42,6 +42,16 @@
 这些是产品希望提供的工作流收益，不是已证明优于通用编码 Agent。
 跨任务质量与陌生用户体验仍在验收中。
 
+已有材料写作可选证据驱动的章节规划（`report.outline_strategy = "adaptive"`），
+见[配置说明](docs/CONFIG_REFERENCE_zh.md)。它改善文章组织，不认证主张、不补造实验。
+导入的分析包始终完整保留，正文默认链接全部逐行记录，不用原始表格填满文章。
+需要逐行表格作为正文内容时，可设 `report.data_tables = "full"`。
+显式 adaptive 规划可指定既有数据图的展示章节；即使多节引用同一材料，图也只由装配按登记身份放置，不依赖模型编造文件链接。
+
+折线/散点图默认各列独立坐标。列具有共同声明单位时，可设置
+`analysis.series_layout = "shared"`，或在引导入口使用 `--series-layout shared`。
+共享图保留全部已有值，不做归一化、抽样或推断误差；分析包可搬迁、重建并直接供给写作。
+
 ## 快速开始
 
 需要 **Python 3.12+**、Git 和 [uv](https://docs.astral.sh/uv/)。
@@ -120,6 +130,7 @@ uv run simple-ar research-session --config examples/survey/research.toml
 | [描述分析](examples/data-analysis/README.md) | 表格、描述性柱状图与重建 | 无 API；明确数据与行语义 |
 | [方向调研](examples/survey/README.md) | 无训练的调研报告 | 模型 API 与网络 |
 | [Conformal 有限复现](examples/conformal_reproduction/README.md) | 限定范围、适配构造的数值复现 | 按案例准备环境与协议；不是整篇复现或 benchmark 验收 |
+| [ICML 2025 RCP 子集](examples/rcp_reproduction/README.md) | 作者代码辅助的固定真实数据比较 | 先准备固定代码、数据、论文与科学Python；两方法、十配对种子，不是整篇复现，正文质量另验 |
 | [多文件代码审查](examples/code_task_medium_review/README.md) | 受限修改与验证 | 生成改动需模型 API；项目使用 Python 标准库 |
 | [Digits MLP](examples/code_task_digits_mlp/README.md) | 小型模型代码任务 | NumPy/scikit-learn；`uv sync --extra examples`，运行保留 extra |
 | [持续学习](examples/continual_learning/README.md) | 实验性研究改进 | 已准备 Mammoth/CIFAR-100、固定切分、环境与 GPU 预算 |
@@ -167,6 +178,8 @@ uv run simple-ar report-export --report-dir "PATH_TO_REPORT_ATTEMPT" --output ru
 - **复现：** 具体论文结论、准备好的执行条件、固定评价与资源限制。
 
 写作可以接收已完成的描述分析包；任意 JSON 不能因此冒充已验证的实验结果。
+准备好的评估命令可在任务配置声明 `execution.output_files`，供报告审阅补读原始结果；
+登记附件不代表科学真实性已认证，详见[配置参考](docs/CONFIG_REFERENCE_zh.md)。
 项目配置放在案例旁，支持的案例内路径使用 `{config_dir}`，机器资产使用明确路径。
 不会自动准备依赖环境或下载数据。详见[使用指南](docs/USAGE_zh.md)
 与[引导配置](docs/CONFIG_REFERENCE_zh.md#引导设置)。

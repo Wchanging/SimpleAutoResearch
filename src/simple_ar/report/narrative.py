@@ -11,11 +11,77 @@ from typing import Any
 import re
 
 from simple_ar.research.contracts import CLAIM_SCOPE_RULES
+from simple_ar.report.execution_evidence import report_execution_evidence
+from simple_ar.report.document_plan import supplied_figure_sources
 
 from simple_ar.report.schema import (
-    ClaimEvidenceRecord, ReportIterationRecord, ReportMemory, ReportSectionDraft,
+    ClaimEvidenceRecord, ReportContext, ReportIterationRecord, ReportMemory, ReportRuntimeConfig, ReportSectionDraft,
     ReportSectionPlan, ReportSectionReview,
 )
+
+
+def evidence_outline_context(
+    context: ReportContext, memory: ReportMemory, config: ReportRuntimeConfig, *, retry: bool = False,
+) -> dict[str, Any]:
+    """Project existing inputs for organization without declaring new facts.
+
+    The persisted context/plan remains authoritative. Every shortened input
+    reports its coverage; omitted content is not treated as absent evidence.
+    """
+    def excerpt(value: str, limit: int) -> dict[str, Any]:
+        return {"text": value[:limit], "total_characters": len(value), "truncated": len(value) > limit}
+
+    metrics = _prompt_metrics(memory, detail="summary")
+    metric_rows = metrics["rows"]
+    handles = memory.source_handles
+    claims = memory.claims_evidence_matrix
+    payload = {
+        "task": "plan_evidence_organized_document", "topic": context.topic,
+        "report_mode": context.report_mode, "template": memory.template,
+        "objective": excerpt(memory.objective or context.goal_markdown, 3000),
+        "problem": excerpt(context.problem_markdown, 2000),
+        "synthesis": excerpt(context.synthesis_markdown, 3000),
+        "evidence_summary": excerpt(context.evidence_summary, 3000),
+        "template_responsibilities": [
+            {"heading": section.heading, "goal": section.goal, "evidence_handles": section.evidence_handles,
+             "target_words": section.target_words} for section in memory.section_plan
+        ],
+        "sources": [_prompt_handle_view(handle) for handle in handles[:40]],
+        "sources_omitted": max(0, len(handles) - 40),
+        "supplied_figures": supplied_figure_sources(context),
+        "input_claims": [{"claim_id": claim.claim_id, "claim": excerpt(claim.claim, 600),
+                          "status": claim.status, "evidence_handles": claim.evidence_handles,
+                          "metric_ids": claim.metric_ids, "notes": excerpt(claim.notes, 600)} for claim in claims[:24]],
+        "claims_omitted": max(0, len(claims) - 24),
+        "recorded_metrics": {"columns": metrics["columns"], "rows": metric_rows[:48],
+                             "rows_omitted": max(0, len(metric_rows) - 48)},
+        "results": _compact_execution_results(context.results),
+        "execution_evidence": report_execution_evidence(context),
+        "limits": [*memory.limitations, *memory.open_questions][:16],
+        "limits_omitted": max(0, len(memory.limitations) + len(memory.open_questions) - 16),
+        "delivery_constraints": {"max_cited_sources": config.max_cited_sources or None,
+                                 "max_section_sources": config.max_section_sources or None},
+        "planning_rules": [
+            "Use the requested genre and actual evidence to define concise sections with distinct responsibilities. Template headings are starting points, not compulsory new claims.",
+            "Distinguish a research paper draft, reproduction report, analysis report and supplied-material account; do not invent novelty, theorems, experiments, baselines or ablations to resemble a reference paper.",
+            "Name the question, what the inputs establish, how comparisons were made, findings and limitations. Put detailed numeric comparisons in one responsible section; others interpret rather than repeat them.",
+            "Source summaries and input claims are recorded assertions, not independent verification. A source handle or completed invocation is not proof of a method claim.",
+            "No new experiment or source retrieval is authorized. Unknowns and omitted material remain unknown; scope results to recorded conditions, and distinguish reported paper values from local observations.",
+            "Keep goals and headings reader-facing, not pipeline steps. Give each section only supplied evidence handles; no minimum citations or word quota beyond the user's existing configuration.",
+            "Propose a concise reader-facing title describing the actual scope, not a copy of task instructions or a stronger claim than the evidence. Give scope and validity details one primary section; other sections use brief qualifications without repeating the full disclaimer.",
+            "Do not propose fabricated data charts. For an existing supplied_figures package, optionally assign exactly one owner using visual_intents kind=figure, view=supplied-data and one exact registered handle. The owner must include that handle in its section evidence. One source cannot have multiple owners; other sections can still cite it. Assembly attaches the existing figures, not model-created paths.",
+            "Return 2-12 sections as needed. References are appended separately. Do not return a References section.",
+        ],
+        "output_schema": {"title": "Concise evidence-scoped title", "sections": [{"heading": "Short heading", "goal": "Purpose, claim boundaries and evidence to use",
+                                         "evidence_handles": ["exact supplied handle"], "target_words": 0,
+                                         "subsections": ["optional purposeful subsection"]}],
+                          "visual_intents": [{"kind": "figure", "view": "supplied-data", "section_heading": "exact heading from your sections",
+                              "title": "What the supplied data figure compares", "purpose": "Why this figure belongs here",
+                              "evidence_handles": ["one exact supplied_figures handle"]}]},
+    }
+    if retry:
+        payload["retry_instruction"] = "Correct the invalid structure or source pointers. Use only supplied handles and valid sections; do not add evidence to make the plan pass."
+    return payload
 
 
 def adopted_claims(
@@ -46,7 +112,7 @@ def narrative_context(
     # Normal plans have at most twelve sections. Bound custom templates too;
     # favor recent drafts rather than allowing early provenance guards to crowd out prose.
     visible = others[-12:]
-    return {
+    view = {
         "section_purpose": section.goal,
         "section_responsibilities": [
             {"section_id": row.section_id, "heading": row.heading, "purpose": row.goal}
@@ -77,6 +143,17 @@ def narrative_context(
             "Request source context for material uncertainties; missing excerpts do not establish absence from the original source.",
         ],
     }
+    if memory.document_plan is not None:
+        # All section prompts already include the frozen document_plan. Do not
+        # repeat every long goal here (and again for each adopted section).
+        # Unplanned/legacy callers retain the self-contained responsibility view.
+        view["responsibilities_source"] = "document_plan.sections"
+        view.pop("section_responsibilities")
+        view.pop("responsibilities_omitted")
+        for row in view["adopted_sections"]:
+            row.pop("purpose")
+            row["purpose_section_id"] = row["section_id"]
+    return view
 
 
 def _table_excerpt(text: str, limit: int = 1000) -> dict:
@@ -413,6 +490,7 @@ def _compact_document_plan(memory: ReportMemory) -> dict[str, Any]:
     return {
         "schema_version": plan.schema_version,
         "status": plan.status,
+        "title": plan.title,
         "target_words": plan.target_words,
         "sections": [
             {
@@ -479,6 +557,11 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
     normal body citation generation.
     """
     data = handle.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    if handle.kind == "experiment_output":
+        data["attribution_guidance"] = (
+            "Name this recorded producer attachment in prose. It is not a literature source and has no paper citation key. "
+            "The handle is for read tools and provenance, not a Markdown link target; do not fabricate bibliography citations."
+        )
     if "title" in data:
         data["title"] = str(data["title"])[:240]
     if "summary" in data:

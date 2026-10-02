@@ -64,6 +64,16 @@ def report_execution_evidence(context: ReportContext) -> dict[str, Any]:
         records.append({"role": role, "artifact": str(row.get("artifact") or ""), **record})
     total = len(records)
     records = records if total <= 24 else [*records[:8], *records[-16:]]
+    outputs, seen_outputs = [], set()
+    for role, row in candidates:
+        for output in row.get("output_evidence", []):
+            if not isinstance(output, Mapping):
+                continue
+            identity = (output.get("measurement_artifact"), output.get("name"))
+            if identity in seen_outputs:
+                continue
+            seen_outputs.add(identity)
+            outputs.append({"role": role, **dict(output)})
     implementation = results.get("implementation")
     verification = implementation.get("method_validation") if isinstance(implementation, Mapping) else None
     return {
@@ -76,6 +86,8 @@ def report_execution_evidence(context: ReportContext) -> dict[str, Any]:
         "execution_records": records,
         "execution_records_total": total,
         "execution_records_omitted": total - len(records),
+        "output_evidence": outputs[:24],
+        "output_evidence_omitted": max(0, len(outputs) - 24),
         "implementation_verification": dict(verification) if isinstance(verification, Mapping) else {
             "status": "not_checked", "reason": "No independent method verification was supplied.",
         },
@@ -84,5 +96,7 @@ def report_execution_evidence(context: ReportContext) -> dict[str, Any]:
             "Executor records prove invocation and recorded completion, not dataset contents, algorithm correctness or unrecorded hardware.",
             "A timeout is a configured limit; duration_sec is the observed elapsed time.",
             "A passed run and correct metric values do not independently validate the implementation mechanism.",
+            "Output previews are bounded producer text, not complete data or independent verification. Use a registered output handle to read more; an absent attachment does not prove no file was produced.",
+            "Producer attachments support recorded local observations, not literature attribution. Name their registered role in prose; do not require or fabricate paper citation keys or treat tool handles as Markdown link targets.",
         ],
     }

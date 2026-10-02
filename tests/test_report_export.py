@@ -23,6 +23,39 @@ def _ast(image: str | None = None, citation: str = "p1") -> dict:
 
 
 class ReportExportTests(unittest.TestCase):
+    def test_manifest_caption_binding_handles_both_pandoc_shapes_without_deleting_discussion(self):
+        from copy import deepcopy
+        from simple_ar.report.export import _bind_figure_captions
+        caption = [{"t": "Str", "c": "Recorded"}, {"t": "Space"}, {"t": "Str", "c": "observations."}]
+        image = {"t": "Image", "c": [["", [], []], [{"t": "Str", "c": "Generic"}], ["figures/raw.svg", ""]]}
+        for modern in (False, True):
+            for italic in (False, True):
+                with self.subTest(modern=modern, italic=italic):
+                    para = {"t": "Para", "c": [deepcopy(image)]}
+                    figure = {"t": "Figure", "c": [["", [], []], [None, []], [para]]} if modern else para
+                    duplicate = {"t": "Para", "c": [{"t": "Emph", "c": deepcopy(caption)}] if italic else deepcopy(caption)}
+                    discussion = {"t": "Para", "c": [{"t": "Str", "c": "Interpretation remains limited."}]}
+                    ast = {"blocks": [figure, duplicate, discussion]}
+                    bound = _bind_figure_captions(ast, {"figures/raw.svg": caption})
+                    self.assertEqual(bound, ["figures/raw.svg"])
+                    self.assertEqual(ast["blocks"], [figure, discussion])
+                    rendered_image = figure["c"][2][0]["c"][0] if modern else figure["c"][0]
+                    self.assertEqual(rendered_image["c"][1], caption)
+                    if modern:
+                        self.assertEqual(figure["c"][1], [None, [{"t": "Plain", "c": caption}]])
+                    else:
+                        self.assertEqual(rendered_image["c"][-1][1], "fig:")
+
+    def test_caption_binding_leaves_unregistered_and_inline_images_unchanged(self):
+        from copy import deepcopy
+        from simple_ar.report.export import _bind_figure_captions
+        ast = _ast("unknown.png")
+        ast["blocks"].append({"t": "Para", "c": [{"t": "Str", "c": "Inline"},
+            {"t": "Image", "c": [["", [], []], [], ["registered.png", ""]]}]})
+        before = deepcopy(ast)
+        self.assertEqual(_bind_figure_captions(ast, {"registered.png": [{"t": "Str", "c": "Caption"}]}), [])
+        self.assertEqual(ast, before)
+
     def test_scientific_unicode_support_is_fixed_and_only_for_present_symbols(self):
         from simple_ar.report.export import _scientific_unicode_preamble
 
@@ -73,6 +106,9 @@ class ReportExportTests(unittest.TestCase):
             main = (root / "acm/main.tex").read_text()
             self.assertLess(main.index("\\begin{abstract}"), main.index("\\maketitle"))
             self.assertIn("\\authorsaddresses{}", main)
+            self.assertIn("\\Gin@nat@width>\\linewidth", main)
+            self.assertIn("\\setkeys{Gin}{width=\\sarmaxwidth,keepaspectratio}", main)
+            self.assertNotIn("\\setkeys{Gin}{width=\\linewidth,keepaspectratio}", main)
             self.assertTrue((root / "acm/export.json").is_file())
 
     def test_exported_markdown_and_figures_move_together_without_external_data(self) -> None:
@@ -101,6 +137,21 @@ class ReportExportTests(unittest.TestCase):
             source.rename(root / "original-isolated")
             self.assertIn("figures/figure-1.png", (root / "moved/source.md").read_text())
             self.assertTrue((root / "moved/figures/figure-1.png").is_file())
+
+    def test_generated_figure_placement_prefers_source_location_without_forcing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self._source(root)
+            def convert(argv, **kwargs):
+                if "--to=json" in argv:
+                    return json.dumps(_ast())
+                return "\\begin{figure}\nGenerated\\end{figure}\n\\begin{figure}[p]\nExplicit\\end{figure}"
+            with patch("simple_ar.report.export.shutil.which", return_value="pandoc"), patch("simple_ar.report.export._run", side_effect=convert):
+                export_acm_report(source, root / "acm")
+            rendered = (root / "acm/body.tex").read_text()
+            self.assertIn("\\begin{figure}[htbp]\nGenerated", rendered)
+            self.assertIn("\\begin{figure}[p]\nExplicit", rendered)
+            self.assertNotIn("\\begin{figure}[H]", rendered)
 
     def test_out_of_scope_image_and_unknown_citation_fail_before_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

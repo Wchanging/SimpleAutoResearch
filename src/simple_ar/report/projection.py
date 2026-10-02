@@ -43,6 +43,30 @@ _RESEARCH_CONTEXT_FIELDS = (
     "risks",
     "report_claim_plan",
 )
+
+
+def _qualified_outputs(result: Mapping[str, Any], ref: ArtifactRef) -> list[dict[str, Any]]:
+    """Qualify attempt-local producer attachments against their result owner."""
+    rows = result.get("output_evidence", [])
+    qualified = []
+    for row in rows[:8] if isinstance(rows, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        item = dict(row)
+        if item.get("artifact"):
+            local = ArtifactRef(path=str(item["artifact"]))
+            item["artifact"] = str(PurePosixPath(ref.path).parent / local.path)
+            item["handle"] = f"output:{item['artifact']}"
+        item["measurement_artifact"] = ref.path
+        qualified.append(item)
+    return qualified
+
+
+def _output_handles(rows: list[dict[str, Any]]) -> list[SourceHandle]:
+    return [SourceHandle(handle=row["handle"], kind="experiment_output",
+                         artifact=row["artifact"], title=row.get("name", ""),
+                         summary="Recorded producer text, not independent implementation verification.")
+            for row in rows if row.get("status") == "available" and row.get("handle")]
 from simple_ar.report.execution_evidence import execution_record
 
 if TYPE_CHECKING:
@@ -202,6 +226,8 @@ def build_research_report_inputs(
         execution=execution,
         analysis=analysis,
     )
+    execution["output_evidence"] = _qualified_outputs(execution, execution_ref)
+    source_handles.extend(_output_handles(execution["output_evidence"]))
     metric_sources = metric_sources_from_execution(
         execution,
         artifact=execution_ref.path,
@@ -505,6 +531,7 @@ def attach_experiment_history(
             "metrics": dict(measured) if isinstance(measured, Mapping) else {},
             "implementation_ref": result.get("implementation_ref"),
             "execution_record": execution_record(result),
+            "output_evidence": _qualified_outputs(result, ref),
             "measurement": {
                 key: value for key in ("condition_id", "protocol_fingerprint", "seed", "source_kind")
                 if isinstance(result.get("measurement"), Mapping)
@@ -512,6 +539,7 @@ def attach_experiment_history(
             },
         }
         history.append(row)
+        handles.extend(_output_handles(row["output_evidence"]))
         handles.append(SourceHandle(
             handle=f"artifact:measurement:{action}", kind="experiment_result",
             artifact=ref.path, summary=f"{action}: {status}",

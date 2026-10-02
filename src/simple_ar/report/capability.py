@@ -54,6 +54,8 @@ class ReportAssemblyRequest:
     paired_comparisons: tuple[Mapping[str, Any], ...] = ()
     paired_summaries: tuple[Mapping[str, Any], ...] = ()
     table_analyses: tuple[ArtifactRef, ...] = ()
+    # Source identity projected from the Writer snapshot, not another plan.
+    analysis_handles: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.title.strip():
@@ -61,6 +63,7 @@ class ReportAssemblyRequest:
         object.__setattr__(self, "sections", tuple(self.sections))
         object.__setattr__(self, "papers", tuple(dict(paper) for paper in self.papers))
         object.__setattr__(self, "citation_key_map", dict(self.citation_key_map))
+        object.__setattr__(self, "analysis_handles", dict(self.analysis_handles))
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +111,9 @@ def assemble_report_document(
         )
     )
     report_body = assemble_report_sections(
-        title=request.title,
+        # The frozen plan is shared by drafting, review and final assembly.
+        # Legacy/custom plans without a title retain the caller's heading.
+        title=document_plan.title if document_plan and document_plan.title else request.title,
         sections=_order_sections(sections, document_plan),
     )
     report_body, cited, removed_citations = _prepare_report_citations(
@@ -318,27 +323,46 @@ def _attach_table_analyses(
     config = request.config if isinstance(request.config, ReportRuntimeConfig) else ReportRuntimeConfig.model_validate(request.config)
     attachments: list[ArtifactRef] = []
     figures: list[ReportFigureRecord] = []
-    sections: list[ReportSectionDraft] = []
+    sections = [row if isinstance(row, ReportSectionDraft) else ReportSectionDraft.model_validate(row)
+                for row in request.sections]
+    plan = request.document_plan
+    if plan is not None and not isinstance(plan, ReportDocumentPlan):
+        plan = ReportDocumentPlan.model_validate(plan)
+    added_sections: list[ReportSectionDraft] = []
     for index, ref in enumerate(request.table_analyses, start=1):
         prefix = f"analyses/analysis-{index:03d}"
         result = copy_analysis_package(context.require_input(ref), context.store.root / prefix)
         # Keep the recoverable package even when report figure inclusion is off.
         blocks = [f"[Rechecked descriptive data and editable figures]({prefix}/analysis.md).",
                   "Arithmetic was checked against copied user data; collection and scientific validity were not verified.",
-                  "", table_values_markdown(result)]
+                  f"All {result['row_count']} input rows and rechecked values are retained in the copied package; no rows were sampled."]
+        if config.data_tables == "full":
+            blocks.extend(["", table_values_markdown(result)])
+        else:
+            blocks.append(f"[Complete numerical records]({prefix}/analysis.json); full row tables are not repeated in this prose report.")
+        handle = request.analysis_handles.get(ref.path)
+        placements = [row.section_id for row in plan.visual_intents
+                      if row.kind == "figure" and row.view == "supplied-data" and row.evidence_handles == [handle]] if plan else []
+        owners = placements or ([row.section_id for row in plan.sections if handle and handle in row.evidence_handles] if plan else [])
+        owner = owners[0] if len(owners) == 1 and any(row.section_id == owners[0] for row in sections) else ""
         if config.figures.enabled and config.figures.mode != "off":
             for figure in result["figures"]:
                 path = f"{prefix}/{figure['path']}"
                 blocks.extend(["", f"![Descriptive data]({path})", "", figure["caption"]])
                 figures.append(ReportFigureRecord(figure_id=f"supplied-analysis-{index}-{len(figures)+1}",
-                    title="Supplied descriptive data", path=path, anchor=f"supplied_analysis_{index}",
-                    caption=figure["caption"], source_artifacts=[ref.path]))
-        sections.append(ReportSectionDraft(section_id=f"supplied_analysis_{index}",
-            heading=f"Supplied Descriptive Data {index}", draft_markdown="\n".join(blocks)))
+                    title="Supplied descriptive data", path=path,
+                    caption=figure["caption"], source_artifacts=[ref.path], anchor=owner or f"supplied_analysis_{index}"))
+        body = "\n".join(blocks)
+        if owner:
+            sections = [row.model_copy(update={"draft_markdown": row.draft_markdown + "\n\n" + body})
+                        if row.section_id == owner else row for row in sections]
+        else:
+            added_sections.append(ReportSectionDraft(section_id=f"supplied_analysis_{index}",
+                heading=f"Supplied Descriptive Data {index}", draft_markdown=body))
         attachments.extend(context.store.ref(item.relative_to(context.store.root), kind="analysis_attachment")
                            for item in (context.store.root / prefix).rglob("*") if item.is_file())
-    if sections:
-        request = replace(request, sections=(*request.sections, *sections), table_analyses=())
+    if request.table_analyses:
+        request = replace(request, sections=(*sections, *added_sections), table_analyses=())
     return request, attachments, figures
 
 

@@ -46,6 +46,7 @@ def review_document(
     prompt = json.dumps({
         "task": "review_document_coherence",
         "objective": memory.objective,
+        "document_title": memory.document_plan.title if memory.document_plan else "",
         "report_mode": memory.report_mode,
         "template": template.name,
         "criteria": template.criteria_markdown,

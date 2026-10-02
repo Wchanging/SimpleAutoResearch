@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from importlib import resources
 from pathlib import Path
+import re
 
-from simple_ar.report.schema import ReportRuntimeConfig, ReportTemplateBundle
+from simple_ar.report.schema import ReportMemory, ReportRuntimeConfig, ReportTemplateBundle
 
 
 class ReportTemplateError(RuntimeError):
@@ -12,6 +13,21 @@ class ReportTemplateError(RuntimeError):
 
 MATERIAL_REPORT_TEMPLATE = "material_report"
 BUILTIN_TEMPLATE_NAMES = {"source_review", "survey", "survey_long", "experiment", "reproduction", "analysis_report", MATERIAL_REPORT_TEMPLATE}
+
+
+def drafting_template_guidance(template: ReportTemplateBundle, memory: ReportMemory) -> str:
+    """Do not reintroduce a built-in topology after evidence planning replaces it.
+
+    The template's intended-use boundary remains relevant. Its old headings
+    and draft order are not a second writing plan; the frozen document owns
+    those responsibilities. Custom/template/survey paths remain unchanged.
+    """
+    if (memory.document_plan is None or template.name not in BUILTIN_TEMPLATE_NAMES
+            or memory.outline_planning.get("strategy") != "evidence_organized_outline"
+            or memory.outline_planning.get("status") != "adapted"):
+        return template.template_markdown
+    purpose = re.search(r"(?ims)^##\s+Intended Use\s*$\n(.*?)(?=^##\s|\Z)", template.template_markdown)
+    return "## Intended Use\n\n" + purpose.group(1).strip() if purpose else ""
 
 
 def resolve_research_only_delivery(config, *, source_count: int):

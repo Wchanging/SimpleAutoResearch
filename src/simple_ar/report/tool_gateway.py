@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from simple_ar.report.retrieval import ReportSourceResolver, rank_source_chunks
 from simple_ar.research.store.retrieval import order_source_chunks, source_chunk_views as _chunk_views
@@ -20,12 +20,14 @@ from simple_ar.report.tools import (
 class ReportToolGateway:
     """Local report tool executor with OpenAI-style schema export."""
 
-    def __init__(self, context: ReportContext, *, documents: DocumentBundle | None = None) -> None:
+    def __init__(self, context: ReportContext, *, documents: DocumentBundle | None = None,
+                 output_reader: Callable[[str, int, int, str, dict], dict] | None = None) -> None:
         self.context = context
         self.resolver = ReportSourceResolver(context)
         self.specs = {spec.name: spec for spec in report_tool_specs()}
         self.call_counts = {name: 0 for name in self.specs}
         self.documents = documents
+        self.output_reader = output_reader
 
     def list_specs(self) -> list[ReportToolSpec]:
         """Return tool specs."""
@@ -166,7 +168,20 @@ class ReportToolGateway:
                 source_handles=[handle.handle for handle in hits],
             )
         if name == "get_code_task_result":
-            GetCodeTaskResultArgs.model_validate(call.arguments)
+            args = GetCodeTaskResultArgs.model_validate(call.arguments)
+            if args.output_handle:
+                handle = self.resolver.get(args.output_handle)
+                if handle is None or handle.kind != "experiment_output":
+                    return ReportToolResult(tool_name=name, status="not_found", summary="Registered output handle not found.")
+                if self.output_reader is None:
+                    return ReportToolResult(tool_name=name, status="not_found", summary="Output reader unavailable; no file was read.")
+                content = self.output_reader(handle.artifact, args.offset, args.limit, args.query, args.record_match)
+                found = (content.get("matched_records", 0) > 0 if args.record_match else
+                         not args.query or content.get("query_matched"))
+                return ReportToolResult(tool_name=name, status="ok" if found else "not_found",
+                    summary="Read bounded producer text; not independent verification." if found else
+                            "No matching record or literal phrase in this registered file; no semantic absence claim is established.",
+                    content=content, source_handles=[handle.handle])
             return ReportToolResult(
                 tool_name=name,
                 summary="Returned experiment result artifact context.",

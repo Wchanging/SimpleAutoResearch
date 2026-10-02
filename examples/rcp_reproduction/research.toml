@@ -1,0 +1,50 @@
+[task]
+kind = "reproduction"
+goal = "Reproduce the fixed House comparison of Ball with kernel RCP-Ball from the ICML 2025 RCP implementation. Explain conditional coverage diagnostics together with prediction-region size under ten paired split/fit seeds. This is an author-code-assisted selected-method reproduction, not exact published-table or whole-paper reproduction. Do not claim innovation, broad superiority or statistical significance."
+outputs = ["experiments", "report"]
+output_root = "../../runs/rcp-reproduction/sessions"
+
+[model]
+name = "env"
+
+[research]
+materials_only = true
+interaction = "autonomous"
+
+[assets]
+papers = ["../../runs/assets/rcp/paper.pdf"]
+
+[execution]
+command = ["python", "run.py", "--author-path", "../../runs/assets/rcp/author", "--python", "../../runs/assets/rcp/venv/bin/python", "--output-root", "../../runs/rcp-reproduction/observations"]
+cwd = "."
+timeout_sec = 600
+baseline_policy = "skip"
+primary_metric = "cond_cov_x_error_paired_delta"
+metrics = ["coverage_Ball_mean", "coverage_RCP_Ball_mean", "cond_cov_x_error_Ball_mean", "cond_cov_x_error_RCP_Ball_mean", "wsc_Ball_mean", "wsc_RCP_Ball_mean", "exact_region_size_Ball_mean", "exact_region_size_RCP_Ball_mean", "cond_cov_x_error_paired_delta", "exact_region_size_paired_delta"]
+output_files = { measurements = "measurements.json", runtime_and_protocol = "summary.json" }
+
+[execution.protocol]
+contract_id = "rcp-house-fixed-author-subset"
+hypothesis = "The fixed rectification may improve conditional diagnostics relative to Ball on House, with potentially larger prediction regions."
+dataset = "Full author House dataset, 21613 rows, 2 outputs; author split sizes train/validation/calibration/test 10123/3639/2048/5803."
+metrics = ["coverage_Ball_mean", "coverage_RCP_Ball_mean", "cond_cov_x_error_Ball_mean", "cond_cov_x_error_RCP_Ball_mean", "wsc_Ball_mean", "wsc_RCP_Ball_mean", "exact_region_size_Ball_mean", "exact_region_size_RCP_Ball_mean", "cond_cov_x_error_paired_delta", "exact_region_size_paired_delta"]
+expected_outcome = "Evaluate directional conditional diagnostics and region-size trade-offs; do not require exact paper numbers. Negative or mixed findings are valid reproduction outcomes. Seed SE is split/fit variability on one dataset, not a population confidence interval."
+risks = ["Only one dataset and two preselected methods; no method or bandwidth selected using test results.", "Metrics computed by author code, not independently reimplemented.", "CPU prepared runtime may differ from the author's Python 3.13.2 environment; record actual versions."]
+
+[execution.protocol.comparison_conditions]
+scope = "selected-author-methods"
+seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+predictor = "Mean; shared by both methods for each seed"
+candidate = "RCP-Ball: kernel bandwidth 0.1, difference adjustment, calib quantile estimator"
+alpha = 0.1
+max_epochs = 5000
+early_stopping_patience = 15
+fast = false
+only_cheap_metrics = false
+precomputation_level = 0
+
+[report]
+template = "reproduction"
+outline_strategy = "adaptive"
+max_review_iterations = 1
+document_review = true

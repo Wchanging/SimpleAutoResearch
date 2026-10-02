@@ -39,12 +39,15 @@ FIELDS = {
                  "value_unit": ("value_unit", str), "mode": ("data_mode", str),
                  "missing": ("data_missing", str), "width": ("figure_width", str), "max_mb": ("data_max_mb", int),
                  "max_figures": ("data_max_figures", int), "plot": ("data_plot", str),
-                 "x_column": ("x_column", str), "x_unit": ("x_unit", str), "max_points": ("data_max_points", int)},
+                 "x_column": ("x_column", str), "x_unit": ("x_unit", str), "max_points": ("data_max_points", int),
+                 "series_layout": ("series_layout", str)},
     "execution": {"command": ("command_argv", list), "cwd": ("cwd", str),
                   "timeout_sec": ("timeout_sec", int), "code_task_config": ("code_task_config", str),
                   "primary_metric": ("primary_metric", str), "metrics": ("metric", list),
                   "metric_directions": ("metric_direction", list)},
     "report": {"template": ("report_template", str), "reviewer": ("report_reviewer", str),
+               "outline_strategy": ("report_outline_strategy", str),
+               "data_tables": ("report_data_tables", str),
                "max_review_iterations": ("max_review_iterations", int),
                "document_review": ("report_document_review", bool),
                "max_section_tokens": ("max_section_tokens", int),
@@ -72,7 +75,7 @@ def data_settings(args: argparse.Namespace) -> dict:
     from simple_ar.result_analysis.table import TableSpec, read_table_source, validate_table_columns
     spec = TableSpec(tuple(args.value_column), args.observation_unit, args.group_column,
                      args.value_unit, args.data_mode, args.data_missing, args.figure_width, args.data_max_mb, args.data_max_figures,
-                     args.data_plot, args.x_column, args.x_unit, args.data_max_points)
+                     args.data_plot, args.x_column, args.x_unit, args.data_max_points, args.series_layout)
     if args.data_file is None:
         raise ValueError("Data analysis requires --data-file.")
     path = args.data_file.expanduser().resolve()
@@ -129,7 +132,7 @@ def validate_session_arguments(args: argparse.Namespace) -> SessionArguments:
                 raise SystemExit(str(exc)) from exc
     elif any((args.data_file, args.value_column, args.group_column, args.observation_unit, args.value_unit,
               args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100,
-              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000)):
+              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000, args.series_layout != "separate")):
         raise SystemExit("Data options require --task-kind data_analysis.")
     if materials and task_kind != "writing":
         raise SystemExit("--material/assets.materials currently requires task.kind=writing.")
@@ -201,11 +204,14 @@ def research_defaults(
             raise ValueError(f"Unknown research configuration section: {section}")
         for name, value in values.items():
             if section == "execution" and name in {
-                "pairs", "protocol", "seeds", "seed_flag", "seed_count", "baseline_policy", "baseline_ref",
+                "pairs", "protocol", "seeds", "seed_flag", "seed_count", "baseline_policy", "baseline_ref", "output_files",
             }:
                 if name == "pairs":
                     from simple_ar.app.research_execution import execution_pairs
                     execution_pairs({"pairs": value})
+                elif name == "output_files":
+                    from simple_ar.experiment.execution.outputs import output_files
+                    output_files({"output_files": value})
                 elif name == "protocol":
                     if not isinstance(value, dict):
                         raise ValueError("execution.protocol must be a table")
@@ -237,6 +243,10 @@ def research_defaults(
                 raise ValueError(f"Invalid value for {section}.{name}: {value}")
             if dest == "interaction" and value not in {"assisted", "checkpoints", "autonomous"}:
                 raise ValueError("research.interaction must be assisted, checkpoints or autonomous")
+            if dest == "report_outline_strategy" and value not in {"auto", "template", "adaptive"}:
+                raise ValueError("report.outline_strategy must be auto, template or adaptive")
+            if dest == "report_data_tables" and value not in {"linked", "full"}:
+                raise ValueError("report.data_tables must be linked or full")
             if dest == "decision_response" and value not in {"accept", "reject", "revise"}:
                 raise ValueError("continuation.decision_response must be accept, reject or revise")
             if dest in PATHS:

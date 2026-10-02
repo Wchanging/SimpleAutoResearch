@@ -75,6 +75,25 @@ API 总额仍默认无限制。
 CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 旧八阶段外层配置解析器及别名转换已经退出，历史快照仍可读取，但不是可执行工作流。
 
+## 已有材料写作的章节规划
+
+完整分析包与正文展示分开：默认 `[report].data_tables = "linked"` 链接全部数值记录，
+`"full"` 另外将逐行表格放入正文。两种设置都保留完整输入和复算结果，不抽样。
+有唯一冻结章节来源归属时，图和数据链接放入该节；歧义时保留独立描述性数据节。
+显式adaptive规划还可在同一文章计划中给已有图指定一个展示章节，即使其他章节也引用该来源。
+只接受实际登记的数据图，不编数据/路径；无效来源和冲突归属使用原有有界规划纠正，不新增调用阶段。
+命令行对应 `research-session --report-data-tables linked|full` 和
+`research-report --data-tables linked|full`。已完成的历史报告不被静默重写。
+
+写作可选 `[report].outline_strategy = "adaptive"`：内置非综述模板会先按目的、已有主张、
+测量和限制组织章节。`auto` 保持原模板路径，`template` 关闭自适应；自定义 Markdown
+模板不改结构。新增一次规划调用，最多纠正一次，不检索、不新增实验；未知来源指针被拒绝，
+模板回退沿已有显式 fallback 设置。已开始稿件恢复时复用 checkpoint 计划。
+非综述规划成功后，写作保留内置模板的用途边界，不再把旧章节列表和起草顺序与冻结计划一起传入。
+章节请求复用这些冻结职责，不重复发送；减少的是重复上下文，不是保存的证据或审阅要求。
+命令行对应 `research-session --report-outline-strategy adaptive`；请求另写报告时可用
+`research-report --outline-strategy adaptive`。计划组织正确不等于事实认证或投稿质量。
+
 ## 已有数据的描述分析
 
 ```toml
@@ -99,6 +118,9 @@ value_unit = "秒"
 任务只接受 `data_analysis` 输出，不接受执行或文献选项，不需要或使用模型配置。
 `plot` 默认 `"bar"`；`"line"`/`"scatter"` 要求 `mode = "values"` 和数值 `x_column`，
 不设置 `group_column`，`x_unit` 默认空（单位未知）；多个数值列分别绘图。
+显式 `series_layout = "shared"` 可让折线/散点的所选系列共用坐标轴与图例，
+使用共同声明的 `value_unit`，不自动归一化，也不独立认证单位兼容。
+共享图将所有系列的位置计入 `max_points`，超出不丢系列；默认 `"separate"` 保持独立轴。
 折线要求 x 唯一并按 x 排序，缺失 y 断线；散点保留重复 x，不聚合、不拟合。
 即便 `missing = "omit"`，x 也必须完整。坐标图物理上限 `max_points = 10000` 为可调整正整数，
 超出报错而非抽样。见[完整案例](../examples/data-curves/README.md)。
@@ -159,6 +181,8 @@ value_unit = "秒"
 
 单条固定命令只写 `seed_flag` 会记录当前 seed，但不授权增加新 seed。若希望先只运行 seed 0、以后允许按证据决定是否补测，可同时写 `seeds = [0]` 和 `seed_flag = "--seed"`；这不会默认多跑种子。补测仍须分析提出理由、运行同种子的 baseline/candidate 配对、通过剩余进程预算检查并由既定交互模式接受。
 
+只在 `execution.protocol.comparison_conditions.seeds` 声明的列表是协议条件，不是命令展开授权；没有 `execution.seed_flag` 时保持单次原命令，可由评估器内部处理多个种子。声明不证明种子都被实际测量。顶层 `execution.seeds`/`seed_count` 请求命令展开，仍须显式 flag。
+
 `[[execution.protocol.protected_assets]]` 中每个文件须有唯一 `asset_id` 和 `path`。运行前后会检查这些文件是否发生改动。相对路径按实验 `cwd` 解析；只核对显式列出的文件，不递归校验整个数据集，也不因此证明科研结论正确。
 
 显式 `outputs` 不能与 `--with-report`/`--no-report` 同时使用。报告结构选择不能覆盖
@@ -187,6 +211,24 @@ value_unit = "秒"
 - 安装与命令说明：[使用手册](USAGE_zh.md)、[CLI参考](CLI_REFERENCE_zh.md)。
 
 ### 研究会话补齐条件与续接
+
+执行附件可在任务 TOML 中声明，不放进全局 `.env`：
+
+```toml
+[execution.output_files]
+paired_observations = "tables/observations.csv"
+runtime = "runtime.json"
+```
+
+子命令将文件写入本次进程自动提供的 `SIMPLE_AR_OUTPUT_DIR` 目录（先自行建目录）。
+最多声明八个相对 POSIX 路径；不扫描 cwd、不解析 stdout 中的路径、不自动复制外部目录。
+UTF-8 普通文件单个不超过 2 MiB；链接、越界、缺失、不可读或超大分别记录。
+`results.json` 的 `output_evidence` 保存来源、预览和截断范围，原写作/审阅工具可按登记句柄
+补读字符窗口。文件名和用途不证明内容真实；附件缺失不推翻已有效的指标，也不能支撑事实主张。
+补读支持文件内词面定位，或按最多四个实际字段/标量条件筛选 JSON 记录数组、CSV/TSV 行，
+避免盲猜字符位置。返回原始记录及匹配数量/截断状态，不汇总、不推断缺失值；词面命中不等于语义支撑。
+生产结果按登记名称归属，不强迫套论文引用键或编造参考文献。
+改变此契约属于执行输入修订，而非仅刷新报告；旧完成会话不静默补文件或重跑。
 
 ```bash
 simple-ar research-session --config research.toml --session-root runs/research-session/<session>

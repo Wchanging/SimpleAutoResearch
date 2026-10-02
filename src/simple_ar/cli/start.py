@@ -42,6 +42,8 @@ def add_data_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--x-column", default="", help="line/scatter: explicit numeric x column, distinct from value columns.")
     parser.add_argument("--x-unit", default="", help="Unit of the x coordinate; omission is recorded as unknown.")
     parser.add_argument("--data-max-points", type=int, default=10000, help="Physical points per coordinate figure; excess fails without sampling.")
+    parser.add_argument("--series-layout", choices=("separate", "shared"), default="separate",
+                        help="line/scatter: separate axes by default, or explicitly share axes for columns with a common declared unit.")
 
 
 def add_start_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -178,7 +180,7 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
         analysis = data_settings(args)
     elif any((args.data_file, args.value_column, args.group_column, args.observation_unit, args.value_unit,
               args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100,
-              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000)):
+              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000, args.series_layout != "separate")):
         raise ValueError("Data options require --kind data_analysis.")
     documents = [path.expanduser().resolve() for path in args.document]
     materials = [path.expanduser().resolve() for path in args.material]

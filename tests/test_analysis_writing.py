@@ -36,6 +36,8 @@ class AnalysisWritingTests(unittest.TestCase):
             path = self.package(root)
             result, _, _ = load_analysis_package(path)
             self.assertEqual(result['records'][0]['mean'], 2)
+            self.assertIn('value unit (user-declared): points',
+                          json.loads(path.read_text(encoding='utf-8'))['figures'][0]['caption'])
             original = path.read_text(encoding='utf-8')
             payload = json.loads(original)
             payload['records'][0]['mean'] = 999
@@ -124,7 +126,15 @@ class AnalysisWritingTests(unittest.TestCase):
 
                 def writer(**kwargs):
                     context, memory = kwargs['context'], kwargs['memory']
+                    from simple_ar.report.document_plan import supplied_figure_sources
+                    figures = supplied_figure_sources(context)
+                    self.assertEqual(len(figures), 1)
+                    self.assertEqual(figures[0]['figure_count'], 1)
+                    self.assertTrue(figures[0]['captions'])
                     handle = context.source_handles[0]
+                    self.assertEqual(figures[0]['handle'], handle.handle)
+                    self.assertFalse(any('![Descriptive values]' in passage['text']
+                        for passage in handle.metadata['evidence_passages']))
                     self.assertEqual(_prompt_handle_view(handle)['metadata']['evidence_role'], 'recomputed_from_user_supplied_data')
                     compact = _compact_execution_results(context.results)['supplied_analyses'][0]
                     self.assertEqual(compact['records'][0]['mean' if mode == 'observations' else 'value'], 2)
@@ -143,7 +153,8 @@ class AnalysisWritingTests(unittest.TestCase):
                 body = (output / 'report_body.md').read_text(encoding='utf-8')
                 self.assertIn('Supplied Descriptive Data', body)
                 self.assertNotIn('Verified Experiment Metrics', body)
-                self.assertIn('| A | score |', body)
+                self.assertNotIn('| A | score |', body)
+                self.assertIn('Complete numerical records', body)
                 self.assertTrue((output / 'analyses/analysis-001/figures/value-1-1.svg').is_file())
                 moved = root / 'moved report with spaces'
                 shutil.copytree(output, moved)
@@ -167,6 +178,71 @@ class AnalysisWritingTests(unittest.TestCase):
             view = app.advance(max_actions=10)
             self.assertEqual(view.status, 'paused')
             self.assertNotIn('writer', view.state_refs)
+
+    def test_assembly_places_data_only_with_unique_frozen_source_owner_and_preserves_full_records(self):
+        from simple_ar.report.schema import ReportDocumentPlan, ReportSectionPlan
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.package(root)
+            source = ArtifactStore(path.parent)
+            ref = source.ref(path.name, kind='table_analysis', schema='table_analysis.v1')
+            original = path.read_bytes()
+            drafts = (ReportSectionDraft(section_id='findings', heading='Findings', draft_markdown='Supported observations.'),
+                      ReportSectionDraft(section_id='limits', heading='Limits', draft_markdown='No population inference.'))
+            for owner_count in (0, 1, 2):
+                for detail in ('linked', 'full'):
+                    with self.subTest(owner_count=owner_count, detail=detail):
+                        store = ArtifactStore(root / f'report-{owner_count}-{detail}')
+                        plan = ReportDocumentPlan(sections=[ReportSectionPlan(
+                            section_id=row.section_id, heading=row.heading, goal='Explain supplied evidence',
+                            evidence_handles=['material:data'] if index < owner_count else [])
+                            for index, row in enumerate(drafts)])
+                        request = ReportAssemblyRequest(title='Describe', sections=drafts, table_analyses=(ref,),
+                            analysis_handles={ref.path: 'material:data'}, document_plan=plan,
+                            config={'data_tables': detail})
+                        context = CapabilityContext(store=store, input_store=source, inputs=(ref,),
+                            attempt=AttemptManifest(attempt_id='report-1', capability='report'))
+                        self.assertEqual(run_report_capability(context=context, request=request).status, 'completed')
+                        body = store.read_text('report_body.md')
+                        self.assertEqual('| A | score |' in body, detail == 'full')
+                        self.assertEqual('Supplied Descriptive Data' in body, owner_count != 1)
+                        if owner_count == 1:
+                            self.assertLess(body.index('analyses/analysis-001/analysis.md'), body.index('## Limits'))
+                        records = load_analysis_package(store.root / 'analyses/analysis-001/analysis.json')[0]['records']
+                        self.assertEqual(records, load_analysis_package(path)[0]['records'])
+                        self.assertEqual(path.read_bytes(), original)
+                        self.assertEqual(drafts[0].draft_markdown, 'Supported observations.')
+                        figure = store.read_json('figures/figures_manifest.json')['figures'][0]
+                        self.assertEqual(figure['anchor'], 'findings' if owner_count == 1 else 'supplied_analysis_1')
+
+    def test_explicit_data_visual_owner_overrides_shared_citations_without_duplicate_rendering(self):
+        from simple_ar.report.schema import ReportDocumentPlan, ReportSectionPlan, ReportVisualIntent
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.package(root)
+            inputs = ArtifactStore(path.parent)
+            ref = inputs.ref(path.name, kind='table_analysis', schema='table_analysis.v1')
+            drafts = tuple(ReportSectionDraft(section_id=key, heading=key, draft_markdown='Supported observations.')
+                           for key in ('scope', 'findings', 'limits'))
+            plan = ReportDocumentPlan(sections=[ReportSectionPlan(section_id=row.section_id, heading=row.heading,
+                goal='Explain', evidence_handles=['material:data']) for row in drafts],
+                visual_intents=[ReportVisualIntent(visual_id='figure-1', kind='figure', title='Supplied values',
+                    purpose='Compare measurements', section_id='findings', view='supplied-data',
+                    evidence_handles=['material:data'])])
+            store = ArtifactStore(root / 'assembled')
+            context = CapabilityContext(store=store, input_store=inputs, inputs=(ref,),
+                attempt=AttemptManifest(attempt_id='report-1', capability='report'))
+            result = run_report_capability(context=context, request=ReportAssemblyRequest(title='Bounded data',
+                sections=drafts, document_plan=plan, table_analyses=(ref,),
+                analysis_handles={ref.path: 'material:data'}))
+            self.assertEqual(result.status, 'completed')
+            body = store.read_text('report_body.md')
+            self.assertNotIn('Supplied Descriptive Data', body)
+            self.assertLess(body.index('## findings'), body.index('analyses/analysis-001/analysis.md'))
+            self.assertLess(body.index('analyses/analysis-001/analysis.md'), body.index('## limits'))
+            figures = store.read_json('figures/figures_manifest.json')['figures']
+            self.assertEqual(len(figures), 1)
+            self.assertEqual(figures[0]['anchor'], 'findings')
 
     def test_assembly_respects_disabled_and_off_without_losing_data(self):
         from simple_ar.report.capability import assemble_report_document
@@ -209,6 +285,16 @@ class AnalysisWritingTests(unittest.TestCase):
             bundle = DocumentBundle.from_handoff_dict(store.read_json(result.artifacts[0]))
             self.assertEqual(len(bundle.records), 2)
             self.assertEqual(len({row.document_id for row in bundle.records}), 2)
+            from simple_ar.report.projection import build_material_report_inputs
+            from simple_ar.report.document_plan import supplied_figure_sources
+            material_context, _ = build_material_report_inputs(topic='Two supplied datasets',
+                documents=bundle, documents_ref=result.artifacts[0], assets=())
+            sources = supplied_figure_sources(material_context)
+            self.assertEqual(len(sources), 2)
+            self.assertEqual(len({row['handle'] for row in sources}), 2)
+            self.assertTrue(all(row['figure_count'] == 1 for row in sources))
+            self.assertTrue(all(row['row_count'] == 3 for row in material_context.results['supplied_analyses']))
+            self.assertFalse(any('![Descriptive values]' in row.text for row in bundle.sections))
             refs = tuple(store.ref(row.metadata['table_analysis']['artifact']) for row in bundle.records)
             output = ArtifactStore(root / 'report')
             request = ReportAssemblyRequest(title='Two datasets', sections=(ReportSectionDraft(section_id='discussion',
@@ -218,6 +304,31 @@ class AnalysisWritingTests(unittest.TestCase):
                 run_report_capability(context=CapabilityContext(store=output, input_store=store, inputs=refs,
                     attempt=AttemptManifest(attempt_id='report-1', capability='report')), request=request)
             self.assertFalse(output.exists('report.md'))
+            # Exercise the real import/projection/plan/assembly chain, with
+            # identical producer-local filenames in two distinct packages.
+            from simple_ar.report.document_plan import resolve_document_plan
+            from simple_ar.report.schema import ReportRuntimeConfig, ReportSectionPlan
+            drafts = tuple(ReportSectionDraft(section_id=f'data-{index}', heading=f'Dataset {index}',
+                draft_markdown='Only the registered supplied observations are described.')
+                for index in (1, 2))
+            plan = resolve_document_plan(sections=[ReportSectionPlan(section_id=draft.section_id,
+                heading=draft.heading, goal='Explain this dataset', evidence_handles=[source['handle']])
+                for draft, source in zip(drafts, sources)], contract=None, config=ReportRuntimeConfig(),
+                supplied_figure_handles=[row['handle'] for row in sources],
+                visual_candidates=[{'kind': 'figure', 'view': 'supplied-data', 'section_id': draft.section_id,
+                    'title': draft.heading, 'purpose': 'Show the retained data', 'evidence_handles': [source['handle']]}
+                    for draft, source in zip(drafts, sources)])
+            delivered = ArtifactStore(root / 'two-dataset-report')
+            finished = run_report_capability(context=CapabilityContext(store=delivered, input_store=store, inputs=refs,
+                attempt=AttemptManifest(attempt_id='report-2', capability='report')),
+                request=ReportAssemblyRequest(title='Two registered datasets', sections=drafts, document_plan=plan,
+                    table_analyses=refs, analysis_handles={ref.path: source['handle'] for ref, source in zip(refs, sources)}))
+            self.assertEqual(finished.status, 'completed')
+            figure_rows = delivered.read_json('figures/figures_manifest.json')['figures']
+            self.assertEqual([row['anchor'] for row in figure_rows], ['data-1', 'data-2'])
+            self.assertEqual(len({row['path'] for row in figure_rows}), 2)
+            self.assertTrue(all((delivered.root / row['path']).is_file() for row in figure_rows))
+            self.assertNotIn('Supplied Descriptive Data', delivered.read_text('report_body.md'))
 
     def test_import_regenerates_figures_and_rebuild_retains_configured_input_limit(self):
         from simple_ar.result_analysis.table import copy_analysis_package

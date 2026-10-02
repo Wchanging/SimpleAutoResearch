@@ -74,7 +74,18 @@ repeat `--material` for additional drafts, notes or result descriptions.
 Paths resolve from the configuration directory. Supported inputs are Markdown, text and PDF;
 `assets.materials` also accepts completed `table_analysis.v1` `analysis.json` files with
 their adjacent copied data. They use the same config field, not a second task/runtime.
-Arithmetic is rechecked, native SVGs regenerated and the report receives a portable data appendix.
+Arithmetic is rechecked and native SVGs regenerated. The complete data package stays
+beside the report. By default, `[report].data_tables = "linked"` links its full numerical
+records rather than repeating every row table in the prose; `"full"` includes those
+tables too. Neither setting samples or drops data. Figures and data links enter the
+uniquely owning frozen-plan section when one is known; ambiguous ownership uses a
+separate descriptive-data section, not a guessed scientific interpretation.
+Opt-in adaptive planning can also assign one explicit owner to an already imported
+figure package, even when other sections cite the same source. This is saved in
+the existing document plan; it does not create new data or image paths. Invalid
+sources and conflicting owners use the existing bounded outline correction.
+CLI equivalents are `research-session --report-data-tables linked|full` and
+`research-report --data-tables linked|full`. Completed historical reports are unchanged.
 Writing imports cap each JSON/input at 20 MiB; incomplete/stale packages fail before writing.
 This verifies the calculation, not data collection or scientific claims.
 Raw tables are not automatically treated as verified experiment results. Execution configuration
@@ -87,6 +98,20 @@ templates are retained; a started writing task with an automatic default reuses 
 resolved template from the existing input snapshot on resume.
 Use `template = "experiment"` for an honest paper-style draft; missing evidence remains explicit.
 Local bibliographic metadata may be incomplete; authors, dates and venues must not be invented.
+
+Optional `[report].outline_strategy = "adaptive"` organizes built-in non-survey templates
+around the supplied purpose, claims, measurements and limitations before drafting. `auto`
+keeps their existing template path; `template` disables adaptive planning. Custom Markdown
+templates keep their topology. This adds one planning call (at most one correction), not new
+research or measurements. Invalid source pointers are rejected; template fallback requires
+the existing explicit fallback setting. Started drafts retain their checkpoint plan on resume.
+After successful non-survey planning, writers retain the built-in template's intended-use
+boundary, not its old section list or draft order alongside the frozen plan.
+Section prompts reuse those frozen responsibilities rather than duplicating them;
+this reduces repeated context, not saved evidence or review requirements.
+CLI equivalents are `research-session --report-outline-strategy adaptive` and
+`research-report --outline-strategy adaptive` for a requested new report.
+An organized plan is not a factual certificate or a promise of publication-quality prose.
 
 ## Existing data: descriptive analysis
 
@@ -113,7 +138,11 @@ Missing values are never zero-filled; nonfinite/nonnumeric values fail. No infer
 scientific verdict. The task accepts only its descriptive output, not execution or literature options.
 `plot` defaults to `"bar"`. `plot = "line"` or `"scatter"` requires `mode = "values"`
 and a numeric `x_column`, with no `group_column`; `x_unit` defaults empty (unknown).
-Each selected value column gets its own axis. Lines require unique x, sort by x and
+Each selected value column gets its own axis by default. Explicit `series_layout = "shared"`
+puts selected line/scatter series on common axes with a legend, using their declared common
+`value_unit`; unit compatibility is not independently checked. It does not normalize values.
+The shared panel counts all selected series' positions towards `max_points`; no series is dropped.
+Lines require unique x, sort by x and
 break at missing y; scatter retains duplicate x. x must be present even with `missing = "omit"`.
 `max_points = 10000` is a positive, adjustable coordinate-output limit; overflow
 fails without sampling. Coordinates are not aggregated or fitted. See the
@@ -185,6 +214,7 @@ on disk. Parser failures remain diagnostics, not invented paper content.
 | --- | --- | --- |
 | `[execution]` | `command`, `cwd`, `timeout_sec`, `code_task_config` | Choose one execution boundary: literal argv `command` plus an existing absolute `cwd`, or a CodeTask TOML reference. Omit both for literature-only work. `timeout_sec` is optional and defaults at the CLI/application boundary. |
 | `[execution]` | `primary_metric`, `metrics`, `metric_directions` | Optional measurement schema; directions use `higher`, `lower`, `resource`, or `ignore`. |
+| `[execution]` | `output_files` | Optional mapping of at most eight attachment names to relative POSIX files under the process-owned `SIMPLE_AR_OUTPUT_DIR`. Only declared UTF-8 regular files up to 2 MiB each receive bounded previews and registered read handles; missing/unreadable attachments are recorded separately from execution success. |
 | `[execution]` | `pairs`, `seeds`, `seed_flag`, `seed_count` | Optional explicit comparison inputs. `pairs` contains unique integer `seed` plus literal `baseline_command` and `candidate_command`; compact seed expansion requires a literal command and explicit seed flag/count. Natural-language seed requests are not parsed. |
 | `[execution]` | `baseline_policy`, `baseline_ref`, `protocol` | Policy is `run`, `skip`, or `reuse`; `reuse` requires a passed current-session artifact whose command, schema, protocol conditions, protected assets and preparation lineage match. `protocol` uses the existing experiment contract and does not certify data contents. |
 | `[report]` | `template`, `reviewer`, `max_review_iterations`, `document_review`, `max_section_tokens`, `max_cited_sources`, `figures` | `template` defaults to `auto`; `reviewer` defaults to `llm`; CLI review iterations default to `1`. Optional `document_review = true` adds bounded cross-section review of at most two target sections, with up to `max_review_iterations` corrections per target; saved rejected candidates consume this allowance on recovery. It is off by default. `max_section_tokens = 0` omits a per-call output cap. Optional positive `max_cited_sources` bounds distinct final citations without truncating the search/reading pool; the writer sees the bound, and final audit fails if the document exceeds it. Omit it for no source-count cap. Figures are deterministic by default; set `[report.figures].enabled = false` or `mode = "off"` for text-only output. |
@@ -201,6 +231,34 @@ baseline comparison. It requires `outputs = ["experiments"]`, an explicit
 `execution.command`, and finite process limits. Use `auto`/research for an
 evidence-driven candidate or a comparative experiment; a measurement is not
 proof of a scientific improvement.
+
+An evaluator can preserve raw observations and runtime details for writing without
+putting all rows in stdout:
+
+```toml
+[execution.output_files]
+paired_observations = "tables/observations.csv"
+runtime = "runtime.json"
+```
+
+The child command writes these files below the existing `SIMPLE_AR_OUTPUT_DIR`
+environment variable supplied **for that invocation**. Do not set it in `.env`.
+For example, Python code can create `Path(os.environ["SIMPLE_AR_OUTPUT_DIR"])`
+and write its declared files there. Existing commands need not use this option;
+no cwd scan, stdout path discovery or arbitrary external file copying occurs.
+An attachment name describes producer intent, not verified contents. The report
+receives bounded previews with omitted-range information; its existing read-only
+review tools can request another character window of a registered attachment.
+They can also locate a literal phrase within that file instead of guessing an
+offset, or select JSON record-array/CSV/TSV rows by up to four exact scalar
+field/value conditions. Selected rows retain counts, provenance and truncation;
+the tool does not aggregate or infer missing values. A lexical match is not
+semantic validation. Local producer attachments
+are named evidence, not paper references with invented bibliography keys.
+Missing files do not invalidate otherwise valid metrics, but cannot support a
+claim. Check the saved `output_evidence` in `results.json`. Changing this contract
+on resume is an execution-input revision, not a report-only refresh; completed
+historical runs are not silently enriched or rerun.
 
 `task.kind = "reproduction"` is a **prepared, fixed-protocol** path: read supplied local
 papers, synthesize the source evidence, execute the declared command, analyze its
@@ -226,7 +284,14 @@ boundary and explicit configuration wins. With `code_task_config`, pairs replace
 benchmark commands for the research matrix. CodeTask still owns edit scope and
 implementation settings.
 For a single fixed command, `seed_flag` alone records its literal integer seed
-(`--seed 0` or `--seed=0`) without creating pairs or permitting seed extensions.
+without authorizing additional executions. A seed list only in
+`execution.protocol.comparison_conditions` describes the supplied evaluator's
+conditions; without `execution.seed_flag`, its literal command runs once and
+may handle that batch internally. Such declarations are not proof that each
+seed was measured. Top-level `execution.seeds`/`seed_count` request command
+expansion and still require an explicit flag.
+
+Supported literal bindings are `--seed 0` and `--seed=0`; neither alone permits seed extensions.
 To start with one paired seed but leave an evidence-driven extension possible,
 declare both `seeds = [0]` and `seed_flag = "--seed"`. This runs only the initial
 seed by default; another seed still requires an analysis recommendation, a

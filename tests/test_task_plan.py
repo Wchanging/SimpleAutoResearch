@@ -237,6 +237,37 @@ class TaskPlanTests(unittest.TestCase):
         self.assertEqual(request.run.command, ["measure.py", "--rng=3"])
         self.assertEqual(request.experiment_contract.comparison_conditions["seed"], 3)
 
+    def test_protocol_seed_batch_does_not_authorize_command_expansion(self):
+        config = {"command": ["evaluate.py", "--folds", "5"],
+                  "cwd": str(Path.cwd()), "timeout_sec": 5,
+                  "protocol": {"comparison_conditions": {"seeds": [2, 7]}}}
+        normalized = normalize_execution_config(config)
+        self.assertNotIn("pairs", normalized)
+        self.assertEqual(normalize_execution_config(normalized), normalized)
+        request = execution_request(normalized)
+        self.assertEqual(request.run.command, config["command"])
+        self.assertEqual(request.experiment_contract.comparison_conditions["seeds"], [2, 7])
+        view = execution_protocol(normalized)
+        self.assertEqual((view["condition_count"], view["seeds"], view["paired"]), (1, [2, 7], False))
+
+    def test_protocol_seeds_expand_only_with_explicit_binding(self):
+        config = {"command": ["measure.py"], "seed_flag": "--rng",
+                  "cwd": str(Path.cwd()), "timeout_sec": 5,
+                  "protocol": {"comparison_conditions": {"seeds": [2, 7]}}}
+        result = normalize_execution_config(config)
+        self.assertEqual(result["pairs"][1]["candidate_command"], ["measure.py", "--rng", "7"])
+
+    def test_declared_seed_batch_still_rejects_invalid_conditions(self):
+        for seeds in ([1, 1], [False], [], ["1"]):
+            with self.subTest(seeds=seeds), self.assertRaises(ValueError):
+                normalize_execution_config({"protocol": {"comparison_conditions": {"seeds": seeds}}})
+
+    def test_explicit_seed_count_cannot_be_silently_ignored_by_protocol(self):
+        config = {"command": ["measure.py"], "seed_count": 2,
+                  "protocol": {"comparison_conditions": {"seeds": [7, 9]}}}
+        with self.assertRaisesRegex(ValueError, "seed_flag"):
+            normalize_execution_config(config)
+
     def test_summary_capability_spelling_is_normalized_without_relaxing_boundaries(self) -> None:
         request = TaskPlanRequest(task_kind="survey", goal="Read papers", request_text="Read papers")
         class Client:

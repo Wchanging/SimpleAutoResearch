@@ -70,6 +70,9 @@ class ReportRuntimeConfig(ReportModel):
     section_numbering: Literal["auto", "off", "academic"] = "off"
     cost_profile: Literal["auto", "fast", "balanced", "thorough"] = "auto"
     outline_strategy: Literal["auto", "template", "adaptive"] = "auto"
+    # Rechecked rows always remain in the copied analysis package. A prose
+    # report need not repeat every row; expert/audit reports can request them.
+    data_tables: Literal["linked", "full"] = "linked"
     draft_sections: bool = False
     debug_artifacts: bool = False
     allow_llm_fallback: bool = False
@@ -194,6 +197,7 @@ class ReportDocumentPlan(ReportModel):
 
     schema_version: str = "report_document_plan.v1"
     status: Literal["resolved", "fallback"] = "resolved"
+    title: str = ""
     sections: list[ReportSectionPlan] = Field(default_factory=list)
     target_words: int = 0
     visual_budget: dict[str, int] = Field(default_factory=dict)

@@ -34,6 +34,12 @@ class GetSynthesisBriefArgs(BaseModel):
 
 class GetCodeTaskResultArgs(BaseModel):
     run_ref: str = Field(default="", description="Optional experiment/code-task or run reference.")
+    output_handle: str = Field(default="", description="Optional registered output: handle from output_evidence, never a filesystem path.")
+    offset: int = Field(default=0, ge=0, le=2097152, description="Character offset into producer UTF-8 text.")
+    limit: int = Field(default=2400, ge=1, le=2400)
+    query: str = Field(default="", max_length=200, description="Optional literal phrase to locate in registered text (not regex/SQL). Returns a window near its first match instead of guessing an offset; lexical matches do not verify meaning.")
+    record_match: dict[str, str | int | float | bool | None] = Field(default_factory=dict, max_length=4,
+        description="Optional exact scalar field/value conditions for JSON record arrays or headered CSV/TSV. Use actual fields shown by the preview, not natural-language query guesses. No computation or inference; returned rows remain producer evidence. Cannot combine with query.")
 
 
 class ToolOutput(BaseModel):
@@ -72,7 +78,7 @@ def report_tool_specs() -> list[ReportToolSpec]:
         ),
         _spec(
             "get_code_task_result",
-            "Return canonical experiment/code-task result, guard, review, and metric provenance when available.",
+            "Return canonical result context, or read one registered producer output using output_handle: a character window, literal query, or exact record_match for JSON/CSV/TSV rows. Selection is not aggregation or independent verification; preview/truncation is not proof of missing data.",
             GetCodeTaskResultArgs,
         ),
     ]

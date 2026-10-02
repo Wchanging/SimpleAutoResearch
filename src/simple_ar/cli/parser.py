@@ -226,6 +226,14 @@ def build_parser(
         help="Opt into one bounded whole-document review and targeted section revision.",
     )
     session_parser.add_argument(
+        "--report-outline-strategy", choices=("auto", "template", "adaptive"), default=None,
+        help="Use the template or plan an evidence-organized outline; non-survey adaptive planning is opt-in.",
+    )
+    session_parser.add_argument(
+        "--report-data-tables", choices=("linked", "full"), default=None,
+        help="Link complete copied analysis records (default) or repeat their full tables in the report.",
+    )
+    session_parser.add_argument(
         "--code-task-config",
         default=None,
         help=(
@@ -364,6 +372,14 @@ def build_parser(
     report_parser.add_argument(
         "--document-review", action=argparse.BooleanOptionalAction, default=None,
         help="Opt into one bounded whole-document review and targeted section revision.",
+    )
+    report_parser.add_argument(
+        "--outline-strategy", choices=("auto", "template", "adaptive"), default=None,
+        help="Override outline planning for an explicitly requested new report.",
+    )
+    report_parser.add_argument(
+        "--data-tables", choices=("linked", "full"), default=None,
+        help="Link complete copied analysis records or include their full tables.",
     )
     report_parser.add_argument(
         "--max-section-tokens",

@@ -2,6 +2,22 @@
 
 [中文版本](CLI_REFERENCE_zh.md)
 
+Writing outline options: `research-session --report-outline-strategy auto|template|adaptive`
+and `research-report --outline-strategy auto|template|adaptive`. Non-survey adaptive
+planning is explicit; custom templates and saved checkpoint plans are retained.
+The TOML equivalent is `[report].outline_strategy`.
+
+Data presentation: `research-session --report-data-tables linked|full` or
+`research-report --data-tables linked|full` maps to `[report].data_tables`.
+Default `linked` preserves the complete copied analysis package and links its
+numerical records; `full` additionally repeats row tables in the body. Figures use
+the unique frozen source owner when available, otherwise a separate data section.
+
+Coordinate data plots can explicitly use `--series-layout shared` (TOML:
+`[analysis].series_layout = "shared"`) for common-axis line/scatter comparisons.
+Default `separate` remains; shared units are user-declared, values are not normalized,
+and `--data-max-points` applies to all series' positions in the shared panel.
+
 Use `start` for the five supported structured task choices; `research-session`
 executes and resumes the saved task. `report-export` exports existing reporting
 artifacts. Low-level commands below are expert interfaces, not mandatory steps
@@ -118,6 +134,11 @@ datasets and source artifacts are not automatically copied or redistributed.
 The output is a single-column `acmart` manuscript demonstration with editable
 `main.tex`, `body.tex`, bibliography, figures, and `export.json`. This does not
 select a conference's submission options or certify the report's claims.
+When the report has a figure manifest, its recorded captions are bound to the
+exported figures; only an exact adjacent duplicate caption paragraph is removed.
+Without a manifest, the supplied image captions are left unchanged.
+Generated figures prefer nearby placement (`htbp`) while allowing normal LaTeX
+floating; placement is not forced and compilation alone is not visual acceptance.
 Pandoc is required. `--compile` additionally needs `pdflatex`, `bibtex`, and
 the acmart TeX packages; it records `build.log` and returns a nonzero status
 when compilation is unavailable or fails, keeping the generated source.

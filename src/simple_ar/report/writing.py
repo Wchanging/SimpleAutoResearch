@@ -58,9 +58,19 @@ def run_report_writing_capability(*, context: CapabilityContext, request: Report
     if len(document_refs) > 1:
         raise ValueError("Report backtracking requires one unambiguous document bundle.")
     documents = DocumentBundle.from_handoff_dict(context.read_input_json(document_refs[0])) if document_refs else None
+    output_refs = {ref.path: ref for ref in context.inputs if ref.kind == "experiment_output"}
+
+    def read_output(path: str, offset: int, limit: int, query: str = "", record_match: dict | None = None) -> dict:
+        from simple_ar.experiment.execution.outputs import read_output_window
+        if path not in output_refs:
+            raise ValueError("Output is not a registered input of this writing attempt.")
+        file = context.require_input(output_refs[path])
+        return read_output_window((context.input_store or context.store).root, file, offset=offset, limit=limit,
+                                  query=query, record_match=record_match)
+
     result = run_report_agent(client=request.llm_client, context=request.report_context, memory=memory,
                               config=request.config, template=request.template,
-                              gateway=ReportToolGateway(request.report_context, documents=documents),
+                              gateway=ReportToolGateway(request.report_context, documents=documents, output_reader=read_output),
                               emit=request.emit, completed_checkpoint=completed,
                               checkpoint_sink=save_checkpoint)
     artifacts = (source, checkpoint_ref) if context.store.resolve(checkpoint_ref).is_file() else (source,)

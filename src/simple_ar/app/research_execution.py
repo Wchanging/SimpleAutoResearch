@@ -233,9 +233,14 @@ def _declared_seed_values(config: Mapping) -> tuple[tuple[int, ...], str]:
     protocol = config.get("protocol")
     comparison = protocol.get("comparison_conditions") if isinstance(protocol, Mapping) else None
     if isinstance(comparison, Mapping) and "seeds" in comparison:
-        return _seed_list(comparison["seeds"], "execution.protocol.comparison_conditions.seeds"), (
-            "Seeds were explicitly declared in the execution contract."
-        )
+        values = _seed_list(comparison["seeds"], "execution.protocol.comparison_conditions.seeds")
+        if config.get("seed_flag"):
+            return values, "Seeds and their command binding were explicitly declared in the execution contract."
+        if "seed_count" not in config:
+            # Protocol describes experimental conditions, not how often to
+            # invoke a process. A supplied evaluator may handle a whole seed
+            # batch internally. Without a command binding, preserve literal argv.
+            return (), "Protocol declares seed conditions; the fixed command is retained without per-seed expansion."
     count = config.get("seed_count")
     if count is not None:
         if type(count) is not int or count < 1:
@@ -290,6 +295,8 @@ def execution_protocol(config: Mapping, *, task_text: str = "") -> dict[str, Any
         comparison = protocol.get("comparison_conditions") if isinstance(protocol, Mapping) else None
         if isinstance(comparison, Mapping) and type(comparison.get("seed")) is int:
             seeds = [int(comparison["seed"])]
+        elif isinstance(comparison, Mapping) and "seeds" in comparison:
+            seeds = list(_seed_list(comparison["seeds"], "execution.protocol.comparison_conditions.seeds"))
     return {
         "condition_count": len(pairs) if pairs else 1,
         "seeds": seeds,

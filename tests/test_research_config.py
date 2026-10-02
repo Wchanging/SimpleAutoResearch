@@ -12,6 +12,51 @@ from simple_ar.cli.research_config import research_defaults
 
 
 class ResearchConfigTests(unittest.TestCase):
+    def test_data_tables_share_toml_cli_and_resume_override(self):
+        from simple_ar.cli.main import _report_config_overrides
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.toml"
+            path.write_text('[task]\ngoal="Explain supplied data"\n[report]\ndata_tables="full"\n')
+            argv = ["research-session", "--config", str(path)]
+            explicit = set()
+            defaults = research_defaults(argv, explicit_destinations=explicit)
+            parser = build_parser(research_defaults=defaults)
+            args = parser.parse_args(argv)
+            args._explicit_resume_destinations = explicit
+            app = SimpleNamespace(services=SimpleNamespace(config={"report_config": {}}))
+            self.assertEqual(args.report_data_tables, "full")
+            self.assertEqual(_report_config_overrides(args, app)["data_tables"], "full")
+            self.assertEqual(parser.parse_args([*argv, "--report-data-tables", "linked"]).report_data_tables, "linked")
+            self.assertEqual(parser.parse_args(["research-report", "--session-root", "run", "--model", "fixture", "--data-tables", "full"]).data_tables, "full")
+            path.write_text(path.read_text().replace('"full"', '"unknown"'))
+            with self.assertRaisesRegex(ValueError, "data_tables"):
+                research_defaults(argv)
+    def test_output_files_are_task_local_validated_attachments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.toml"
+            path.write_text('[task]\ngoal="Read measurements"\n[execution]\noutput_files={raw="tables/raw.csv"}\n', encoding="utf-8")
+            defaults = research_defaults(["research-session", "--config", str(path)])
+            self.assertEqual(defaults["execution_details"]["output_files"], {"raw": "tables/raw.csv"})
+            path.write_text(path.read_text().replace("tables/raw.csv", "../outside"), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                research_defaults(["research-session", "--config", str(path)])
+
+    def test_outline_strategy_uses_canonical_config_and_cli_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.toml"
+            path.write_text('[task]\ngoal="Organize supplied evidence"\n[report]\noutline_strategy="adaptive"\n', encoding="utf-8")
+            argv = ["research-session", "--config", str(path)]
+            explicit = set()
+            defaults = research_defaults(argv, explicit_destinations=explicit)
+            parser = build_parser(research_defaults=defaults)
+            self.assertEqual(parser.parse_args(argv).report_outline_strategy, "adaptive")
+            self.assertIn("report_outline_strategy", explicit)
+            self.assertEqual(parser.parse_args([*argv, "--report-outline-strategy", "template"]).report_outline_strategy, "template")
+            path.write_text(path.read_text(encoding="utf-8").replace('"adaptive"', '"unknown"'), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "outline_strategy"):
+                research_defaults(argv)
+
     def test_direct_measurement_kind_requires_experiments_output(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "measurement.toml"

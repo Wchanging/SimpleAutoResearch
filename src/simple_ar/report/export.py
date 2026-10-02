@@ -74,6 +74,43 @@ def _plain_inlines(inlines: list[dict]) -> str:
     return " ".join(str(node.get("c", "")) for node in _nodes(inlines) if node.get("t") == "Str")
 
 
+def _bind_figure_captions(ast: dict, captions: dict[str, list[dict]]) -> list[str]:
+    """Bind recorded figure captions, for both legacy and modern Pandoc ASTs.
+
+    Only a standalone image with a manifest path is changed. Remove its exact
+    adjacent caption paragraph, not nearby discussion or arbitrary prose.
+    """
+    bound, blocks = [], []
+    pending_caption = None
+    for block in ast["blocks"]:
+        if pending_caption is not None and block.get("t") == "Para":
+            inlines = block["c"]
+            if len(inlines) == 1 and inlines[0].get("t") == "Emph":
+                inlines = inlines[0]["c"]
+            if inlines == pending_caption:
+                pending_caption = None
+                continue
+        pending_caption = None
+        standalone = block.get("t") == "Figure" or (block.get("t") == "Para"
+            and len(block["c"]) == 1 and block["c"][0].get("t") == "Image")
+        images = [node for node in _nodes(block) if node.get("t") == "Image"] if standalone else []
+        if len(images) == 1:
+            image = images[0]
+            path = image["c"][-1][0]
+            if path in captions:
+                caption = deepcopy(captions[path])
+                image["c"][1] = caption
+                if block["t"] == "Figure":
+                    block["c"][1] = [None, [{"t": "Plain", "c": deepcopy(caption)}]]
+                else:
+                    image["c"][-1][1] = "fig:"  # legacy implicit-figure marker
+                pending_caption = caption
+                bound.append(path)
+        blocks.append(block)
+    ast["blocks"] = blocks
+    return bound
+
+
 def _breakable_code(text: str) -> str:
     """Escape literal code and allow breaks at identifier/path separators.
 
@@ -129,6 +166,18 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
     source = body_path.read_text(encoding="utf-8")
     ast = json.loads(_run([pandoc, "--from=markdown-raw_tex-raw_html+tex_math_single_backslash", "--to=json"], cwd=root, text=source))
     ast["meta"] = {}  # Input metadata must not supply a TeX preamble or includes.
+    captions = {}
+    figure_manifest = root / "figures/figures_manifest.json"
+    if figure_manifest.is_file():
+        for row in json.loads(figure_manifest.read_text(encoding="utf-8")).get("figures", []):
+            if not row.get("caption"):
+                continue
+            parsed = json.loads(_run([pandoc, "--from=markdown-raw_tex-raw_html+tex_math_single_backslash", "--to=json"],
+                                     cwd=root, text=row["caption"]))["blocks"]
+            if len(parsed) != 1 or parsed[0].get("t") not in {"Para", "Plain"}:
+                raise ReportExportError("Recorded figure caption must be one Markdown paragraph.")
+            captions[row["path"]] = parsed[0]["c"]
+    bound_captions = _bind_figure_captions(ast, captions)
     source_ast = deepcopy(ast)
     blocks = ast["blocks"]
     title_inlines = [{"t": "Str", "c": title}] if title else []
@@ -165,7 +214,8 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
     output.mkdir(parents=True)
     manifest: dict[str, Any] = {"schema_version": "report_export.v1", "format": "acmart-manuscript",
                                "source_report": str(body_path), "status": "exporting",
-                               "compiled": False, "quality_checked": False}
+                               "compiled": False, "quality_checked": False,
+                               "bound_figure_captions": bound_captions}
     try:
         image_targets = {url: _copy_image(path, output, index)
                          for index, (url, path) in enumerate(image_sources.items(), start=1)}
@@ -196,6 +246,10 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
 
         heading = latex([{"t": "Plain", "c": title_inlines}])
         body_tex = latex(blocks)
+        # Pandoc's bare figure environment defaults to tbp, often pushing
+        # figures away from their owning prose. Prefer near-source placement
+        # while retaining TeX's pagination/floating decisions; do not force H.
+        body_tex = body_tex.replace("\\begin{figure}\n", "\\begin{figure}[htbp]\n")
         (output / "body.tex").write_text(body_tex + "\n", encoding="utf-8")
         abstract_tex = latex(abstract) if abstract else ""
         (output / "references.bib").write_text(bibliography, encoding="utf-8")
@@ -211,7 +265,12 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
             "\\providecommand{\\tightlist}{\\setlength{\\itemsep}{0pt}\\setlength{\\parskip}{0pt}}\n"
             "\\providecommand{\\passthrough}[1]{#1}\n"
             "\\providecommand{\\pandocbounded}[1]{#1}\n"
-            "\\setkeys{Gin}{width=\\linewidth,keepaspectratio}\n"
+            # Preserve intrinsic figure sizing (e.g. column-width SVG/PDF),
+            # only shrinking oversized assets to the current text width.
+            "\\makeatletter\n"
+            "\\def\\sarmaxwidth{\\ifdim\\Gin@nat@width>\\linewidth\\linewidth\\else\\Gin@nat@width\\fi}\n"
+            "\\makeatother\n"
+            "\\setkeys{Gin}{width=\\sarmaxwidth,keepaspectratio}\n"
             "\\settopmatter{printacmref=false}\n"
             "\\citestyle{acmnumeric}\n"
             # No author metadata was supplied. Suppress acmart's empty default
