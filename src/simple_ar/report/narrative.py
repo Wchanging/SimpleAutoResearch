@@ -12,12 +12,154 @@ import re
 
 from simple_ar.research.contracts import CLAIM_SCOPE_RULES
 from simple_ar.report.execution_evidence import report_execution_evidence
-from simple_ar.report.document_plan import supplied_figure_sources
+from simple_ar.report.document_plan import LENGTH_REQUEST_RULE, LENGTH_REQUEST_SCHEMA, check_document_length, reserve_document_words, supplied_figure_sources, validate_length_request
+from simple_ar.report.data_delivery import DELIVERY_RULES, attach_delivery_block, supplied_data_delivery
 
 from simple_ar.report.schema import (
-    ClaimEvidenceRecord, ReportContext, ReportIterationRecord, ReportMemory, ReportRuntimeConfig, ReportSectionDraft,
+    ClaimEvidenceRecord, ReportContext, ReportDocumentPlan, ReportIterationRecord, ReportMemory, ReportRuntimeConfig, ReportSectionDraft,
     ReportSectionPlan, ReportSectionReview,
+    ReportToolResult, SourceHandle, finding_requires_resolution,
 )
+
+
+DERIVED_CONTEXT_STATUS = {
+    "evidence_role": "recorded_derived_context",
+    "independent_verification": "not_performed",
+}
+
+PLANNING_CONTEXT_STATUS = {
+    **DERIVED_CONTEXT_STATUS,
+    "scope": "organizational_intent_not_current_prose_or_scientific_support",
+}
+
+REVIEW_OPINIONS_STATUS = {
+    **DERIVED_CONTEXT_STATUS,
+    "scope": "fallible_allegations_and_proposed_remedies_not_source_facts",
+}
+
+REVISION_PREMISE_RULE = (
+    "Test an alleged defect against the actual baseline prose and source evidence before following its proposed remedy. "
+    "An opinion may describe absent or superseded prose; do not manufacture that assertion in the candidate to satisfy the opinion. "
+    "A candidate must solve a supported problem, not merely repeat a proposed replacement. "
+    "Preserve any uncertainty when the baseline or evidence is incomplete."
+)
+
+
+def _experiment_delivery_view(context: ReportContext, config: ReportRuntimeConfig) -> list[dict[str, Any]]:
+    """Expose the same assembly-owned experiment text, not another draft."""
+    from simple_ar.report.projection import _append_verified_experiment_evidence
+    return [{"section_id": row.section_id, "heading": row.heading,
+             "markdown": row.draft_markdown, "markdown_token_count": len(row.draft_markdown.split()),
+             "preview_status": "recorded_package_preview"}
+            for row in _append_verified_experiment_evidence((), context, config)]
+
+
+def report_edit_scope(section_ids: Sequence[str]) -> dict[str, Any]:
+    """Describe the actual existing Writer/assembly boundary, not new powers."""
+    return {
+        "eligible_section_ids": list(section_ids),
+        "writer_call_unit": "One selected section's model-authored body, display heading and supported metadata only",
+        "read_only_components": ["other adopted section bodies in this Writer call", "frozen document title and plan",
+            "registered source data, measurements and execution records", "assembly-owned captions, tables, links and appendix"],
+        "unavailable_remedy": "An assembly/input defect stays unresolved for its owner; a section Writer cannot fix it by claiming to change or omit protected text. Do not demand that remedy as this candidate's acceptance condition.",
+    }
+
+
+def effective_revision_instructions(review: ReportSectionReview | None) -> list[str]:
+    """Same actionable requirements in normal drafting, recovery and checking.
+
+    Retain explicit review instructions. A required finding's proposed change
+    supplements them; an advisory or verification-only opinion is not promoted
+    into a rewrite instruction. Its message remains visible as an opinion.
+    """
+    if review is None:
+        return []
+    return list(dict.fromkeys([*review.revision_instructions,
+        *(row.suggested_action for row in review.findings
+          if row.required_action not in {"advisory", "verify"}
+          and (finding_requires_resolution(row) or (row.required_action is None and review.verdict in {"revise_required", "fail"}))
+          and row.suggested_action.strip())]))
+
+
+def report_objective(context: ReportContext, memory: ReportMemory) -> str:
+    """Use the saved task request, not the short memory summary, as the contract.
+
+    Keep distinct problem/goal inputs intact. Exact duplicates need only one
+    copy. Old snapshots without either input retain their recorded objective;
+    completed plans and drafts are not changed by this read-only projection.
+    """
+    requests = list(dict.fromkeys(text.strip() for text in (
+        context.problem_markdown, context.goal_markdown,
+    ) if text.strip()))
+    return "\n\n".join(requests) or memory.objective or context.topic
+
+
+def report_tool_context(
+    result: ReportToolResult, *, source_evidence: list[dict[str, Any]] | None = None,
+    include_reading_notes: bool = True,
+) -> dict[str, Any]:
+    """Project saved brief handles too; do not rewrite historical tool records.
+
+    Only typed handle lists are projected. Source windows, lookup diagnostics,
+    text coverage and all other tool content keep their original semantics.
+    """
+    data = result.model_dump(mode="json")
+    if result.tool_name == "get_synthesis_brief":
+        # Saved summaries are not original source text. Carry that distinction
+        # on legacy results too, without rewriting their recorded assertions.
+        data["content"]["text_status"] = dict(DERIVED_CONTEXT_STATUS)
+    for key in ("handles", "matching_handles"):
+        rows = data["content"].get(key)
+        if not isinstance(rows, list):
+            continue
+        projected = []
+        for row in rows:
+            if not isinstance(row, dict):
+                projected.append(row)
+                continue
+            fields = {key: value for key, value in row.items() if key in SourceHandle.model_fields}
+            handle = SourceHandle.model_validate(fields)
+            # Extra protocol fields such as cite_as survive old snapshots.
+            view = {**{key: value for key, value in row.items() if key not in SourceHandle.model_fields},
+                    **_prompt_handle_view(handle)}
+            if not include_reading_notes:
+                view = review_source_evidence([view])[0]
+            if source_evidence is not None and view in source_evidence:
+                # Exact duplicate only: a newer/different passage or conflicting
+                # metadata must not be replaced merely because its id matches.
+                view = {"handle": view["handle"], "evidence_reference": "source_evidence"}
+            projected.append(view)
+        data["content"][key] = projected
+    return data
+
+
+def review_source_evidence(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep recorded passages, not earlier reading cards, in independent review.
+
+    The source handle/store and the Writer's view are unchanged. Explicit source
+    requests can still retrieve the card, labelled as derived in review rules.
+    This projection does not select passages or certify their interpretation.
+    """
+    projected = []
+    for row in rows:
+        metadata = row.get("metadata")
+        notes = metadata.get("reading_notes") if isinstance(metadata, Mapping) else None
+        if not isinstance(notes, Mapping):
+            projected.append(row)
+            continue
+        primary = {key: value for key, value in metadata.items() if key != "reading_notes"}
+        primary["derived_reading_notes_on_request"] = {
+            **DERIVED_CONTEXT_STATUS, "recorded_fields": list(notes),
+            "reading_artifact": metadata.get("reading_artifact", ""),
+            "omitted_from_this_view": True,
+        }
+        coverage = notes.get("reading_coverage")
+        if isinstance(coverage, Mapping):
+            # Preserve the recorded access limits, not the card's conclusions.
+            # This is still reader-reported coverage, not source verification.
+            primary["derived_reading_notes_on_request"]["reading_coverage"] = dict(coverage)
+        projected.append({**row, "metadata": primary})
+    return projected
 
 
 def evidence_outline_context(
@@ -32,15 +174,18 @@ def evidence_outline_context(
         return {"text": value[:limit], "total_characters": len(value), "truncated": len(value) > limit}
 
     metrics = _prompt_metrics(memory, detail="summary")
+    objective = report_objective(context, memory)
     metric_rows = metrics["rows"]
     handles = memory.source_handles
     claims = memory.claims_evidence_matrix
     payload = {
         "task": "plan_evidence_organized_document", "topic": context.topic,
         "report_mode": context.report_mode, "template": memory.template,
-        "objective": excerpt(memory.objective or context.goal_markdown, 3000),
-        "problem": excerpt(context.problem_markdown, 2000),
+        # Requirements are not disposable evidence excerpts. A later clause
+        # must reach the planner as well as the writer and verifier.
+        "objective": excerpt(objective, len(objective)),
         "synthesis": excerpt(context.synthesis_markdown, 3000),
+        "synthesis_status": dict(DERIVED_CONTEXT_STATUS),
         "evidence_summary": excerpt(context.evidence_summary, 3000),
         "template_responsibilities": [
             {"heading": section.heading, "goal": section.goal, "evidence_handles": section.evidence_handles,
@@ -49,6 +194,9 @@ def evidence_outline_context(
         "sources": [_prompt_handle_view(handle) for handle in handles[:40]],
         "sources_omitted": max(0, len(handles) - 40),
         "supplied_figures": supplied_figure_sources(context),
+        "assembly_owned_content": supplied_data_delivery(context, config=config,
+            plan=memory.document_plan, section_ids=[row.section_id for row in memory.section_plan])
+            + _experiment_delivery_view(context, config),
         "input_claims": [{"claim_id": claim.claim_id, "claim": excerpt(claim.claim, 600),
                           "status": claim.status, "evidence_handles": claim.evidence_handles,
                           "metric_ids": claim.metric_ids, "notes": excerpt(claim.notes, 600)} for claim in claims[:24]],
@@ -62,17 +210,22 @@ def evidence_outline_context(
         "delivery_constraints": {"max_cited_sources": config.max_cited_sources or None,
                                  "max_section_sources": config.max_section_sources or None},
         "planning_rules": [
+            *DELIVERY_RULES,
             "Use the requested genre and actual evidence to define concise sections with distinct responsibilities. Template headings are starting points, not compulsory new claims.",
             "Distinguish a research paper draft, reproduction report, analysis report and supplied-material account; do not invent novelty, theorems, experiments, baselines or ablations to resemble a reference paper.",
             "Name the question, what the inputs establish, how comparisons were made, findings and limitations. Put detailed numeric comparisons in one responsible section; others interpret rather than repeat them.",
             "Source summaries and input claims are recorded assertions, not independent verification. A source handle or completed invocation is not proof of a method claim.",
             "No new experiment or source retrieval is authorized. Unknowns and omitted material remain unknown; scope results to recorded conditions, and distinguish reported paper values from local observations.",
             "Keep goals and headings reader-facing, not pipeline steps. Give each section only supplied evidence handles; no minimum citations or word quota beyond the user's existing configuration.",
+            "If the request specifies an overall length, allocate target_words across sections within that total, not the same total to every section. Use fewer purposeful sections for short reports. Do not pad to template section lengths or repeat scope disclaimers to fill space.",
+            LENGTH_REQUEST_RULE,
             "Propose a concise reader-facing title describing the actual scope, not a copy of task instructions or a stronger claim than the evidence. Give scope and validity details one primary section; other sections use brief qualifications without repeating the full disclaimer.",
             "Do not propose fabricated data charts. For an existing supplied_figures package, optionally assign exactly one owner using visual_intents kind=figure, view=supplied-data and one exact registered handle. The owner must include that handle in its section evidence. One source cannot have multiple owners; other sections can still cite it. Assembly attaches the existing figures, not model-created paths.",
             "Return 2-12 sections as needed. References are appended separately. Do not return a References section.",
         ],
-        "output_schema": {"title": "Concise evidence-scoped title", "sections": [{"heading": "Short heading", "goal": "Purpose, claim boundaries and evidence to use",
+        "output_schema": {"title": "Concise evidence-scoped title",
+                          "length_request": dict(LENGTH_REQUEST_SCHEMA),
+                          "sections": [{"heading": "Short heading", "goal": "Purpose, claim boundaries and evidence to use",
                                          "evidence_handles": ["exact supplied handle"], "target_words": 0,
                                          "subsections": ["optional purposeful subsection"]}],
                           "visual_intents": [{"kind": "figure", "view": "supplied-data", "section_heading": "exact heading from your sections",
@@ -96,9 +249,125 @@ def adopted_claims(
     return [*initial, *(claim for section in sections for claim in section.claims)]
 
 
+def adopted_memory_notes(
+    initial: ReportMemory, recorded: ReportMemory, sections: Sequence[ReportSectionDraft],
+    iterations: Sequence[ReportIterationRecord], pending_draft: ReportSectionDraft | None = None,
+) -> dict[str, list[str]]:
+    """Rebuild current notes using the frozen input and existing draft owners.
+
+    Retain input constraints even when identical to a superseded model note.
+    Trace old append-only notes to recorded drafts before withdrawing them;
+    legacy notes without a known owner survive rather than being guessed away.
+    Pending/rejected drafts establish provenance, never current authority.
+    No stored input, draft or diagnostic history is mutated or certified here.
+    """
+    drafts = [*sections, *(row.draft for row in iterations if row.draft is not None)]
+    if pending_draft is not None:
+        drafts.append(pending_draft)
+    result = {}
+    for field in ("limitations", "open_questions"):
+        owned = {value for draft in drafts for value in getattr(draft, field)}
+        values = [*getattr(initial, field),
+            *(value for value in getattr(recorded, field) if value not in owned),
+            *(value for section in sections for value in getattr(section, field))]
+        result[field] = list(dict.fromkeys(value for value in values if value))
+    return result
+
+
+def delivery_text_observation(
+    context: ReportContext, memory: ReportMemory, sections: Sequence[ReportSectionDraft],
+    config: ReportRuntimeConfig, *, additions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Count canonical reader-facing text, not only model-written sections.
+
+    No second renderer or saved state. Missing package fields or invalid citation
+    inputs make the count unknown; omission is never interpreted as zero prose.
+    """
+    from simple_ar.literature.verify import CitationError
+    from simple_ar.report.capability import ReportAssemblyRequest, preview_report_document
+
+    blocks = supplied_data_delivery(context, config=config, plan=memory.document_plan,
+        section_ids=[row.section_id for row in sections]) if additions is None else additions
+    result = {
+        "counting_rule": "whitespace-separated tokens in canonical pre-render Markdown, including title, section headings, registered data captions/tables, experiment appendix and cited references; not a language-independent word-limit verifier",
+        "scope": "current supplied sections only; future drafts, renderer-generated figures and attachment rechecks are not certified",
+        "preview_status": "unavailable", "markdown_token_count": None,
+        "rendering_performed": False,
+        "pending_owner_sections": [],
+        "pending_draft_sections": [row.section_id for row in (memory.document_plan.sections
+            if memory.document_plan and memory.document_plan.sections else memory.section_plan)
+            if not any(draft.section_id == row.section_id and draft.draft_markdown.strip() for draft in sections)],
+        "length_check": check_document_length(memory.document_plan.length_budget if memory.document_plan else {},
+            objective=report_objective(context, memory), token_count=None),
+    }
+    if not any(row.draft_markdown.strip() for row in sections) or any(row.get("preview_status") == "unavailable" for row in blocks):
+        result["unavailable_reason"] = "No current draft or incomplete registered attachment preview."
+        return result
+    assembled = tuple(sections)
+    planned = {row.section_id: row for row in memory.document_plan.sections} if memory.document_plan else {}
+    for block in blocks:
+        if not block["heading"] and not any(row.section_id == block["section_id"] for row in assembled):
+            owner = planned.get(block["section_id"])
+            if owner is None:
+                result["unavailable_reason"] = "Registered attachment owner has no current draft or frozen heading."
+                return result
+            # The frozen owner already exists; count its registered attachment
+            # without inventing a future model draft or changing placement.
+            assembled = (*assembled, ReportSectionDraft(section_id=owner.section_id, heading=owner.heading, draft_markdown=""))
+            result["pending_owner_sections"].append(owner.section_id)
+        assembled = attach_delivery_block(assembled, block)
+    try:
+        preview = preview_report_document(ReportAssemblyRequest(title=context.topic, sections=assembled,
+            config=config, document_plan=memory.document_plan, template_name=memory.template,
+            papers=tuple(context.papers), citation_key_map=context.citation_key_map,
+            experiment_context=context if context.report_mode == "experiment" else None))
+    except CitationError as exc:
+        result["unavailable_reason"] = str(exc)
+    else:
+        result.update(preview_status="pre_render_text_preview",
+                      markdown_token_count=len(preview.report_markdown.split()),
+                      length_check=check_document_length(memory.document_plan.length_budget if memory.document_plan else {},
+                          objective=report_objective(context, memory), token_count=len(preview.report_markdown.split())),
+                      removed_citations=list(preview.removed_citations))
+    return result
+
+
+def budget_document_plan(
+    context: ReportContext, memory: ReportMemory, config: ReportRuntimeConfig,
+    plan: ReportDocumentPlan, request: Any,
+) -> ReportDocumentPlan:
+    """Reserve known assembly text without drafting, rendering or new state.
+
+    One internal marker per section makes the actual assembler include its
+    heading. Subtract those marker tokens after the canonical preview. No
+    marker is saved as prose and this forecast never certifies a real report.
+    Unselected references cannot be previewed yet, so remain explicit unknowns.
+    """
+    validated = validate_length_request(request, objective=report_objective(context, memory))
+    if not validated:
+        return plan
+    skeleton = [ReportSectionDraft(section_id=row.section_id, heading=row.heading,
+        draft_markdown="SARPlanningPlaceholder") for row in plan.sections]
+    observed = delivery_text_observation(context.model_copy(update={"papers": []}),
+        memory.model_copy(update={"document_plan": plan}), skeleton, config)
+    count = observed.get("markdown_token_count")
+    forecast = {
+        "status": "known_assembly_forecast" if observed["preview_status"] == "pre_render_text_preview" else "unavailable",
+        "known_fixed_markdown_tokens": count - len(skeleton) if type(count) is int else None,
+        "counting_rule": observed["counting_rule"],
+        "rendering_performed": False,
+        "unresolved_future_components": (["cited_reference_selection_and_display"] if context.papers else [])
+            + (["new_model_authored_visuals_and_renderer_text"] if any(intent.view != "supplied-data" for intent in plan.visual_intents) else []),
+        "scope_note": "Known title, frozen headings, registered data attachments and experiment appendix only; no future model prose or cited-reference selection. Whitespace tokens are a planning aid, not a language-independent word verifier.",
+    }
+    return reserve_document_words(plan, request=validated, forecast=forecast)
+
+
 def narrative_context(
     memory: ReportMemory, section: ReportSectionPlan,
     adopted: Sequence[ReportSectionDraft],
+    *, context: ReportContext | None = None, config: ReportRuntimeConfig | None = None,
+    current_draft: ReportSectionDraft | None = None,
 ) -> dict:
     """Expose section responsibilities and actual preceding prose with coverage.
 
@@ -113,7 +382,15 @@ def narrative_context(
     # favor recent drafts rather than allowing early provenance guards to crowd out prose.
     visible = others[-12:]
     view = {
+        "edit_scope": report_edit_scope([section.section_id]),
+        "planning_status": dict(PLANNING_CONTEXT_STATUS),
         "section_purpose": section.goal,
+        "length_observation": {
+            "counting_rule": "whitespace-separated tokens in full adopted Markdown, including tables; a planning aid, not a language-independent word-limit verifier",
+            "adopted_token_count": sum(len(row.draft_markdown.split()) for row in others),
+            "planned_total_words": sum(row.target_words for row in plans),
+            "this_section_target_words": section.target_words,
+        },
         "section_responsibilities": [
             {"section_id": row.section_id, "heading": row.heading, "purpose": row.goal}
             for row in plans[:24]
@@ -134,6 +411,8 @@ def narrative_context(
         "adopted_sections_omitted": max(0, len(others) - len(visible)),
         "writing_rules": [
             *CLAIM_SCOPE_RULES,
+            REVISION_PREMISE_RULE,
+            "Section purposes and the frozen document plan organize the work; they are not observed claims or source evidence. Follow the original task and supported sources when a planning interpretation overreaches. Do not add an unsupported assertion merely to fulfill a named item in the plan.",
             "Address this section's purpose; use other sections' responsibilities to give each detailed fact a home.",
             "Use adopted prose to avoid contradictory or duplicated explanations; excerpts are not primary-source evidence.",
             "Abstract and conclusion synthesize the actual body, including negative results and limitations; do not add findings.",
@@ -143,6 +422,18 @@ def narrative_context(
             "Request source context for material uncertainties; missing excerpts do not establish absence from the original source.",
         ],
     }
+    if context is not None and config is not None:
+        additions = supplied_data_delivery(context, config=config, plan=memory.document_plan,
+            section_ids=[row.section_id for row in plans])
+        view["assembly_owned_content"] = additions + _experiment_delivery_view(context, config)
+        observed = ([row for row in adopted if row.section_id != current_draft.section_id] + [current_draft]
+                    if current_draft is not None else adopted)
+        view["delivery_text_observation"] = delivery_text_observation(context, memory, observed, config, additions=additions)
+        view["length_observation"]["assembly_owned_markdown_tokens"] = sum(
+            row["markdown_token_count"] for row in view["assembly_owned_content"])
+        view["length_observation"]["assembly_preview_complete"] = all(
+            row.get("preview_status") != "unavailable" for row in additions)
+        view["writing_rules"].extend(DELIVERY_RULES)
     if memory.document_plan is not None:
         # All section prompts already include the frozen document_plan. Do not
         # repeat every long goal here (and again for each adopted section).
@@ -208,14 +499,25 @@ def pending_revision_review(
 
 def revision_context(
     review: ReportSectionReview | None, baseline: ReportSectionDraft | None,
+    *, candidate: ReportSectionDraft | None = None,
 ) -> dict:
     if review is None:
         return {}
     return {
+        "review_opinions_status": dict(REVIEW_OPINIONS_STATUS),
         "target_findings": [row.model_dump(mode="json") for row in review.findings],
         "revision_instructions": review.revision_instructions,
+        "effective_instructions": effective_revision_instructions(review),
         "original_section": {"section_id": baseline.section_id, **_excerpt(baseline.draft_markdown, 6000)} if baseline else {},
+        "length_observation": {
+            "counting_rule": "Whitespace tokens in each complete model-authored section only, not assembled delivery or a language-independent word verifier",
+            "baseline_section_tokens": len(baseline.draft_markdown.split()) if baseline else None,
+            "candidate_section_tokens": len(candidate.draft_markdown.split()) if candidate else None,
+            "candidate_minus_baseline_tokens": len(candidate.draft_markdown.split()) - len(baseline.draft_markdown.split()) if baseline and candidate and baseline.section_id == candidate.section_id else None,
+            "interpretation": "A changed status is not evidence the instruction was met. Check the actual change against effective instructions and the canonical delivery observation. Growth is not automatically a failure: necessary supported additions can increase length.",
+        },
         "verification_rules": [
+            REVISION_PREMISE_RULE,
             "Check each original finding and instruction against the candidate, not just its fluency or the generic template.",
             "Do not clear an unresolved defect solely because the wording or finding id changed.",
             "Removing unsupported or duplicated text is a valid correction; preserve supported content needed for this section, not the original word count.",
@@ -269,7 +571,7 @@ def _compact_source_metadata(metadata: dict[str, Any]) -> dict[str, str]:
 
 
 def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str, Any]:
-    """Expose bounded, authoritative experiment evidence to report agents.
+    """Expose bounded registered results, not independent method certification.
 
     The deterministic report assembly already appends execution evidence after
     the agent pass.  Giving the Writer and Reviewer the same compact result
@@ -492,6 +794,7 @@ def _compact_document_plan(memory: ReportMemory) -> dict[str, Any]:
         "status": plan.status,
         "title": plan.title,
         "target_words": plan.target_words,
+        "length_budget": plan.length_budget,
         "sections": [
             {
                 "section_id": section.section_id,
@@ -580,16 +883,21 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
     if isinstance(bibliography, dict):
         # Bibliography is recorded metadata, not reading notes or source support.
         authors = bibliography.get("authors", [])
+        recorded_count = bibliography.get("recorded_authors_count")
+        if type(recorded_count) is not int or recorded_count < len(authors):
+            recorded_count = len(authors)
+        prior_notes_omitted = bibliography.get("notes_omitted")
+        prior_notes_omitted = max(0, prior_notes_omitted) if type(prior_notes_omitted) is int else 0
         data["metadata"]["bibliography"] = {
             **{key: str(bibliography.get(key) or "")[:480]
                for key in ("title", "published", "year", "doi", "url", "source", "verification_status")},
             "authors": [str(name)[:160] for name in authors[:6]],
-            "recorded_authors_count": len(authors),
-            "author_names_omitted_from_prompt": max(0, len(authors) - 6),
+            "recorded_authors_count": recorded_count,
+            "author_names_omitted_from_prompt": max(0, recorded_count - min(len(authors), 6)),
             "author_visibility": "Shown names are a bounded prompt view of the recorded list; omission here is not a provider completeness finding.",
             "missing_fields": list(bibliography.get("missing_fields", [])),
             "notes": [str(note)[:240] for note in bibliography.get("notes", [])[:4]],
-            "notes_omitted": max(0, len(bibliography.get("notes", [])) - 4),
+            "notes_omitted": prior_notes_omitted + max(0, len(bibliography.get("notes", [])) - 4),
             "consistency_issues": [str(issue)[:240] for issue in bibliography.get("consistency_issues", [])[:4]],
         }
     for key in ("document_id", "extraction_status", "reading_artifact", "reading_state", "reading_notes_kind", "evidence_role"):
@@ -598,7 +906,7 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
     notes = source_metadata.get("reading_notes")
     if isinstance(notes, dict):
         projected_notes = {}
-        notes_truncated = False
+        notes_truncated = bool(source_metadata.get("reading_notes_truncated"))
         for key in ("problem", "method", "datasets", "metrics", "key_claims", "limitations", "open_questions", "confidence", "evidence_refs"):
             value = notes.get(key)
             if isinstance(value, list):
@@ -625,7 +933,9 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
                     notes_truncated |= len(values) > 6 or any(len(str(value)) > 240 for value in values[:6])
                 notes_truncated |= any(len(str(row.get(key) or "")) > 600 for key in claim if key not in {"conditions", "evidence_refs"})
                 projected_notes["claim_scopes"].append(claim)
-            projected_notes["claim_scopes_omitted"] = max(0, len(scopes) - 4)
+            prior_omitted = notes.get("claim_scopes_omitted")
+            prior_omitted = max(0, prior_omitted) if type(prior_omitted) is int else 0
+            projected_notes["claim_scopes_omitted"] = prior_omitted + max(0, len(scopes) - 4)
             notes_truncated |= len(scopes) > 4
         coverage = notes.get("reading_coverage")
         if isinstance(coverage, dict):

@@ -10,9 +10,8 @@ technical report or a pipeline log.
 
 - The survey must not describe SimpleAutoResearch internals, artifact paths,
   stage numbers, command provenance, or prompt/tool implementation details.
-- The section structure should cover foundations/taxonomy, system construction,
-  applications/domains, evaluation/benchmarks, related surveys or neighboring
-  fields, challenges, future directions, and conclusion.
+- Coverage should answer the requested scope, identify missing areas and avoid
+  filling unsupported default topics with invented evidence.
 - The report should be broad enough for a survey. Flag sections that are too
   short, omit major subareas, or rely on only one or two papers when more source
   evidence is available.
@@ -40,6 +39,15 @@ technical report or a pipeline log.
   background repeated from the topic prompt.
 - The report must not contain prompt residue such as "Hint:", "Use this paper
   as", "Additional synthesis detail", "Paper Brief", or "Source handle".
+
+## Default Structure
+
+Use these fallback headings only when an adapted plan does not already own the
+section responsibilities; semantic coverage and source checks remain required.
+
+- The section structure should cover foundations/taxonomy, system construction,
+  applications/domains, evaluation/benchmarks, related surveys or neighboring
+  fields, challenges, future directions, and conclusion.
 
 ## Output Expectations
 

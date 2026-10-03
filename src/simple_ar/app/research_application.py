@@ -2031,7 +2031,6 @@ class ResearchApplication:
         from simple_ar.report.schema import ReportContext, ReportMemory
         from simple_ar.report.capability import ReportAssemblyRequest
         from simple_ar.report.audit import ReportAuditCapabilityRequest
-        from simple_ar.report.projection import _append_verified_experiment_evidence
         writer = self._state_payload("writer")
         writer_ref = self.controller.manifest.state_refs["writer"]
         snapshot_ref = self.controller.store.ref(Path(writer_ref.path).parent / writer["input_snapshot"]["path"], kind="report_snapshot")
@@ -2043,28 +2042,45 @@ class ResearchApplication:
                                   for row in report_context.results.get("supplied_analyses", []))
             source_handles = {str(handle.metadata.get("document_id")): handle.handle
                               for handle in report_context.source_handles if handle.metadata.get("document_id")}
+            experiment_inputs = tuple(self.controller.store.ref(path, kind="experiment_source")
+                for path in dict.fromkeys([
+                    *(row.artifact for row in report_context.metric_sources if row.artifact),
+                    *(row.artifact for row in report_context.source_handles
+                      if row.kind in {"experiment_result", "experiment_output"} and row.artifact),
+                    *([report_context.results["collection_ref"]]
+                      if isinstance(report_context.results.get("collection_ref"), str)
+                      and report_context.results["collection_ref"] else []),
+                ])) if report_context.report_mode == "experiment" else ()
             return self._execute("report", "report",
                 ReportAssemblyRequest(title=report_context.topic,
-                    sections=_append_verified_experiment_evidence(tuple(writer["sections"]), report_context),
+                    sections=tuple(writer["sections"]),
                     config=snapshot["config"], document_plan=memory.document_plan,
                     template_name=snapshot["template"]["name"], papers=tuple(report_context.papers),
                     citation_key_map=report_context.citation_key_map,
                     paired_comparisons=tuple(report_context.results.get("comparisons", [])) if "matrix_results" in self.controller.manifest.state_refs else (),
                     paired_summaries=tuple(report_context.results.get("paired_summary", [])),
                     table_analyses=table_analyses,
+                    experiment_context=report_context if report_context.report_mode == "experiment" else None,
+                    experiment_inputs=experiment_inputs,
                     analysis_handles={row["artifact"]: source_handles.get(row["document_id"], "")
                                       for row in report_context.results.get("supplied_analyses", [])
-                                      if row.get("document_id")}), (writer_ref, snapshot_ref, *table_analyses))
+                                      if row.get("document_id")}), (writer_ref, snapshot_ref, *table_analyses, *experiment_inputs))
         report_ref = self.controller.manifest.state_refs["report"]
         body_ref = self.controller.store.ref(Path(report_ref.path).parent / "report_body.md", kind="report_body")
         cleanup_ref = self.controller.store.ref(Path(report_ref.path).parent / "citation_cleanup.json", kind="citation_cleanup")
         # Historical assembled reports predate the cleanup trace; do not invent one.
         if not self.controller.store.exists(cleanup_ref.path):
             cleanup_ref = None
+        evidence_ref = self.controller.store.ref(Path(report_ref.path).parent / "experiment_evidence.json", kind="report_experiment_evidence")
+        records_ref = self.controller.store.ref(Path(report_ref.path).parent / "experiment_evidence.md", kind="report_experiment_evidence")
+        experiment_attachments = (evidence_ref, records_ref) if (
+            self.controller.store.exists(evidence_ref.path) or self.controller.store.exists(records_ref.path)) else ()
         return self._execute("report_audit", "report_audit",
             ReportAuditCapabilityRequest(report_ref=report_ref, report_body_ref=body_ref, context=report_context, memory=memory,
-                                         citation_cleanup_ref=cleanup_ref),
-            (report_ref, body_ref, writer_ref, snapshot_ref) + ((cleanup_ref,) if cleanup_ref else ()),
+                                         citation_cleanup_ref=cleanup_ref,
+                                         experiment_evidence_ref=evidence_ref if experiment_attachments else None,
+                                         experiment_records_ref=records_ref if experiment_attachments else None),
+            (report_ref, body_ref, writer_ref, snapshot_ref) + ((cleanup_ref,) if cleanup_ref else ()) + experiment_attachments,
              allow_partial=True)
 
     def _run_action(self, action: str) -> bool:

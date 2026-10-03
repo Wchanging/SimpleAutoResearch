@@ -29,6 +29,10 @@ class LLMResponseError(LLMError):
     """A completed response cannot satisfy the requested output format."""
 
 
+class LLMStreamError(LLMError):
+    """An opened response stream failed before a complete response was assembled."""
+
+
 @dataclass(frozen=True)
 class LLMSettings:
     """Connection settings for an OpenAI-compatible chat provider.
@@ -555,10 +559,17 @@ class LLMClient:
                     actual_source="estimated",
                     reason=reason,
                 )
-            else:
-                # Authentication and other local/provider rejections are known
-                # not to have reached a billable successful request.
+            elif _is_known_provider_rejection(error):
+                # Only an explicit rejection justifies releasing the reservation.
                 self._budget_ledger.release(reservation_id, reason=reason)
+            else:
+                # An unclassified provider error is not evidence of zero usage.
+                # Do not retry it blindly, but retain its uncertain charge.
+                self._budget_ledger.mark_unknown(
+                    reservation_id, reason=reason,
+                    known_actual={"llm_requests": 1},
+                    retain_reservation=has_output_cap,
+                )
         except BudgetError as exc:
             raise LLMError(f"Could not reconcile failed LLM budget attempt: {exc}") from exc
 
@@ -818,6 +829,66 @@ class LLMClient:
         return round(cost, 8)
 
 
+def _decode_json_candidate(text: str) -> Any:
+    """Decode one candidate; preserve literal characters in illegal escapes.
+
+    Valid JSON is never rewritten. Only unknown string escape sequences have
+    an unambiguous literal representation; malformed Unicode, raw controls,
+    missing delimiters and quotes are not reconstructed.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        if exc.msg != "Invalid \\escape":
+            raise
+    output: list[str] = []
+    in_string = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            in_string = not in_string
+        if in_string and char == "\\" and index + 1 < len(text):
+            following = text[index + 1]
+            if following not in '\\"/bfnrtu':
+                output.append("\\")
+            output.extend((char, following))
+            index += 2
+            continue
+        output.append(char)
+        index += 1
+    return json.loads("".join(output))
+
+
+def _first_json_object(text: str) -> str | None:
+    """Locate the first outer object, never salvage a nested object on failure."""
+    opening = re.search(r"[\[{]", text)
+    if opening is None or opening.group() != "{":
+        return None
+    start = opening.start()
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+
+
 def parse_json_object(text: str) -> dict[str, Any] | None:
     """Extract a JSON object from plain, fenced, or lightly wrapped text.
 
@@ -831,7 +902,7 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
         return None
 
     try:
-        value = json.loads(text)
+        value = _decode_json_candidate(text)
         if isinstance(value, dict):
             return value
         # A few OpenAI-compatible gateways wrap an otherwise valid structured
@@ -840,47 +911,28 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
         # remains a single JSON object.
         if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
             return value[0]
+        return None
     except json.JSONDecodeError:
         pass
 
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL)
     if fence:
         try:
-            value = json.loads(fence.group(1).strip())
+            value = _decode_json_candidate(fence.group(1).strip())
             return value if isinstance(value, dict) else None
         except json.JSONDecodeError:
-            pass
+            return None
 
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", text):
+    # A damaged array is not a wrapper whose individual element can be chosen.
+    if text.lstrip().startswith("["):
+        return None
+    candidate = _first_json_object(text)
+    if candidate is not None:
         try:
-            value, _ = decoder.raw_decode(text[match.start() :])
+            value = _decode_json_candidate(candidate)
+            return value if isinstance(value, dict) else None
         except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-
-    candidates: list[str] = []
-    depth = 0
-    start = -1
-    for index, char in enumerate(text):
-        if char == "{":
-            if depth == 0:
-                start = index
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0 and start >= 0:
-                candidates.append(text[start : index + 1])
-                start = -1
-
-    for candidate in sorted(candidates, key=len, reverse=True):
-        try:
-            value = json.loads(candidate)
-            if isinstance(value, dict):
-                return value
-        except json.JSONDecodeError:
-            continue
+            return None
     return None
 
 
@@ -969,25 +1021,39 @@ def _collect_chat_stream(stream_response: object) -> dict[str, Any]:
     parts: list[str] = []
     usage: tuple[int, int, int] | None = None
     finish_reason: str | None = None
-    for chunk in chunks:
-        chunk_usage = _usage_from_response(chunk)
-        if chunk_usage is not None:
-            usage = chunk_usage
-        choices = _get_value(chunk, "choices")
-        if not isinstance(choices, list) or not choices:
-            continue
-        choice = choices[0]
-        delta = _get_value(choice, "delta")
-        content = _get_value(delta, "content") if delta is not None else None
-        if content is None:
-            content = _get_value(choice, "text")
-        if content is not None:
-            rendered = _text_from_content(content)
-            if rendered:
-                parts.append(rendered)
-        value = _get_value(choice, "finish_reason")
-        if value is not None:
-            finish_reason = str(value)
+    try:
+        for chunk in chunks:
+            chunk_usage = _usage_from_response(chunk)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            choices = _get_value(chunk, "choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            delta = _get_value(choice, "delta")
+            content = _get_value(delta, "content") if delta is not None else None
+            if content is None:
+                content = _get_value(choice, "text")
+            if content is not None:
+                rendered = _text_from_content(content)
+                if rendered:
+                    parts.append(rendered)
+            value = _get_value(choice, "finish_reason")
+            if value is not None:
+                finish_reason = str(value)
+    except Exception as exc:
+        # The response has already opened: a failure here may be billable even
+        # when a gateway uses a generic exception with unfamiliar wording.
+        # Never adopt the partial draft as a successfully completed response.
+        raise LLMStreamError(f"Response stream interrupted: {exc}") from exc
+    finally:
+        close = getattr(stream_response, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                # Cleanup must not replace the response or its original error.
+                pass
 
     message: dict[str, Any] = {"content": "".join(parts)}
     response: dict[str, Any] = {
@@ -1530,6 +1596,11 @@ def _retry_delay(settings: LLMSettings, attempt: int) -> float:
 
 
 def _is_transient_llm_error(exc: Exception) -> bool:
+    if isinstance(exc, LLMStreamError):
+        return True
+    status = _provider_error_status(exc)
+    if status is not None:
+        return status in {408, 429, 500, 502, 503, 504, 524}
     name = type(exc).__name__.lower()
     message = str(exc).lower()
     transient_markers = (
@@ -1595,10 +1666,14 @@ def _is_transient_llm_error(exc: Exception) -> bool:
         return True
     if any(marker in message or marker in name for marker in permanent_markers):
         return False
-    return any(marker in message or marker in name for marker in transient_markers)
+    return _is_response_transport_disconnect(exc) or any(
+        marker in message or marker in name for marker in transient_markers
+    )
 
 
 def _is_response_transport_disconnect(exc: Exception) -> bool:
+    if isinstance(exc, LLMStreamError):
+        return True
     name = type(exc).__name__.lower()
     message = str(exc).lower()
     markers = (
@@ -1609,8 +1684,33 @@ def _is_response_transport_disconnect(exc: Exception) -> bool:
         "incomplete chunked read",
         "connection reset",
         "connection aborted",
+        "http/2 stream failed",
+        "http2 stream failed",
+        "stream reset",
+        "stream closed",
+        "stream terminated",
     )
     return any(marker in message or marker in name for marker in markers)
+
+
+def _provider_error_status(exc: Exception) -> int | None:
+    """Prefer SDK status metadata to matching arbitrary response-body digits."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
+
+
+def _is_known_provider_rejection(exc: Exception) -> bool:
+    status = _provider_error_status(exc)
+    if status is not None:
+        return 400 <= status < 500 and status not in {408, 429}
+    description = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in description for marker in (
+        "authentication", "invalid api key", "permission denied",
+        "context_length", "context length", "invalid request", "badrequest",
+        "model not found", "404 not found",
+    ))
 
 
 def _is_budget_consumption_unknown(exc: Exception) -> bool:

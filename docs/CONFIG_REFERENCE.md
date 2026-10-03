@@ -86,6 +86,13 @@ the existing document plan; it does not create new data or image paths. Invalid
 sources and conflicting owners use the existing bounded outline correction.
 CLI equivalents are `research-session --report-data-tables linked|full` and
 `research-report --data-tables linked|full`. Completed historical reports are unchanged.
+Native experiment reports use the same option: `linked` adds a compact record link;
+`full` also embeds recorded summary tables. Both preserve `experiment_evidence.json`,
+its readable `.md` companion and explicitly registered source copies beside the report.
+No measurements are sampled. Assembly preview and delivery share this text; the body
+still needs its required results. Attachment audit checks projected values, companion
+text and declared copy presence, not scientific validity or later byte-level tampering.
+ACM export carries this native package; arbitrary linked files are not discovered or copied.
 Writing imports cap each JSON/input at 20 MiB; incomplete/stale packages fail before writing.
 This verifies the calculation, not data collection or scientific claims.
 Raw tables are not automatically treated as verified experiment results. Execution configuration
@@ -102,7 +109,9 @@ Local bibliographic metadata may be incomplete; authors, dates and venues must n
 Optional `[report].outline_strategy = "adaptive"` organizes built-in non-survey templates
 around the supplied purpose, claims, measurements and limitations before drafting. `auto`
 keeps their existing template path; `template` disables adaptive planning. Custom Markdown
-templates keep their topology. This adds one planning call (at most one correction), not new
+templates keep their topology. New `start --kind writing` tasks using built-in templates
+explicitly save `adaptive`; this does not change `auto` in existing configuration files.
+This adds one planning call (at most one correction), not new
 research or measurements. Invalid source pointers are rejected; template fallback requires
 the existing explicit fallback setting. Started drafts retain their checkpoint plan on resume.
 After successful non-survey planning, writers retain the built-in template's intended-use

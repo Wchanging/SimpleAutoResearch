@@ -150,6 +150,7 @@ class ReportToolGateway:
                 content=metric.model_dump(mode="json"),
             )
         if name == "get_synthesis_brief":
+            from simple_ar.report.narrative import DERIVED_CONTEXT_STATUS
             args = GetSynthesisBriefArgs.model_validate(call.arguments)
             text = self.context.synthesis_markdown or self.context.hypothesis_markdown or self.context.evidence_summary
             if args.query:
@@ -160,6 +161,7 @@ class ReportToolGateway:
                 tool_name=name,
                 summary="Returned compact synthesis context.",
                 content={
+                    "text_status": dict(DERIVED_CONTEXT_STATUS),
                     "text": text[:2400],
                     "truncated": len(text) > 2400,
                     "total_characters": len(text),
@@ -228,12 +230,10 @@ class ReportToolGateway:
 
 
 def _tool_handle_view(handle: Any) -> dict[str, Any]:
-    """Return a model-facing source handle view with short citation guidance."""
-    data = handle.model_dump(mode="json")
-    citation_key = data.get("citation_key") or ""
-    if citation_key:
-        data["cite_as"] = f"[@{citation_key}]"
-        data["paper_id_for_display"] = citation_key
-        data.pop("paper_id", None)
-        data["tool_args"] = {"citation_key": citation_key}
-    return data
+    """Use the same bounded evidence projection as drafting and review.
+
+    A brief must not reinsert entire reading records into every supplementary
+    context. Original passages remain available through the anchored read tools.
+    """
+    from simple_ar.report.narrative import _prompt_handle_view
+    return _prompt_handle_view(handle)

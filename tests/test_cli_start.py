@@ -24,7 +24,9 @@ class StartTests(unittest.TestCase):
             material.write_text("# Notes\nSupplied observations, not a locally executed experiment.\n", encoding="utf-8")
             config = self.prepare("--kind", "writing", "--goal", "Explain notes", "--material", str(material),
                                   "--output-root", str(root / "runs"), "--prepare-only")
-            self.assertEqual(research_defaults(["research-session", "--config", str(config)])["report_template"], "material_report")
+            defaults = research_defaults(["research-session", "--config", str(config)])
+            self.assertEqual(defaults["report_template"], "material_report")
+            self.assertEqual(defaults["report_outline_strategy"], "adaptive")
             for name in ("", "auto", "material_report"):
                 bundle = load_report_template_bundle(report_mode="supplied_materials", config=ReportRuntimeConfig(template=name))
                 self.assertEqual(bundle.name, "material_report")
@@ -50,6 +52,19 @@ class StartTests(unittest.TestCase):
             resume_hint = next(call.args[0] for call in output.call_args_list if "resume its printed path" in call.args[0])
             self.assertNotIn("--model", resume_hint)
             self.assertIn("research-session --session-root PATH", resume_hint)
+
+    def test_guided_custom_writing_template_keeps_its_topology(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            material = root / "notes.md"
+            material.write_text("Supplied notes", encoding="utf-8")
+            custom = root / "material_report.md"
+            custom.write_text("# Custom\n## Findings\nUse supplied notes.\n## Conclusion\nExplain scope.", encoding="utf-8")
+            config = self.prepare("--kind", "writing", "--goal", "Explain", "--material", str(material),
+                                  "--template", str(custom), "--output-root", str(root / "runs"), "--prepare-only")
+            settings = tomllib.loads(config.read_text(encoding="utf-8"))["report"]
+            self.assertEqual(settings["template"], str(custom.resolve()))
+            self.assertNotIn("outline_strategy", settings)
 
     def test_resume_hint_preserves_the_selected_model(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -123,6 +138,7 @@ class StartTests(unittest.TestCase):
             self.assertEqual(defaults["task_kind"], "writing")
             self.assertEqual(defaults["material"], [str(material.resolve())])
             self.assertEqual(defaults["report_template"], "experiment")
+            self.assertEqual(defaults["report_outline_strategy"], "adaptive")
             self.assertTrue(defaults["report_document_review"])
             self.assertEqual(defaults["outputs"], ["report"])
             self.assertNotIn("command_argv", defaults)

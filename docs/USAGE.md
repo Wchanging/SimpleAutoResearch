@@ -114,6 +114,10 @@ Transport and recovery notes (optional expert reference):
   forced-thinking models cannot be disabled. Do not combine `disabled` with
   `SIMPLE_AR_LLM_REASONING_EFFORT`.
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` defaults to 180 seconds per provider attempt.
+  This is passed to the transport client; it is not a guaranteed end-to-end
+  wall-clock deadline for a stream that continues receiving events. Retries can
+  also make a logical call take longer. Stream interruptions retain uncertain
+  usage, not a confirmed zero charge.
   Set a larger positive value for a slow provider, or explicitly set
   `0`/`off`/`none` to disable the client-side timeout.
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` is optional. Leave it empty, or set it to

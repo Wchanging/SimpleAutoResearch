@@ -76,8 +76,37 @@ a separate bibliographic paper. Writing extracts and persists the supplied text,
 uses the shared Writer, Reviewer, assembly and audit capabilities. It does not search,
 create innovation candidates, execute experiments or manufacture an empty synthesis.
 Inputs are Markdown/text/PDF or a completed `table_analysis.v1` analysis package.
-Template section bodies supply the corresponding section's writing requirements,
-not just its heading. Material-based writing keeps supplied material visible alongside
+New guided writing tasks using built-in templates enable adaptive article planning:
+the saved request and evidence determine a concise title, section responsibilities,
+length allocation and placement of registered data figures. Custom templates retain
+their topology, and existing TOML tasks/checkpoints are unchanged. Complete section
+lengths and recorded assembly-owned data captions, tables and provenance additions
+reach writing and review. They share assembly's text builder, without changing saved
+drafts; incomplete old package previews remain explicitly unknown. These are planning
+aids, not final export word-count certificates or paper-quality guarantees. Canonical
+pre-render text counts also include the title, normalized headings, cited references
+and experiment appendix, without duplicating the whole report in every prompt.
+Future renderer output and attachment rechecks still require final artifact inspection.
+Draft References are cleaned before protected data/caption additions, not afterwards.
+During section verification the preview replaces the adopted version with the current
+candidate. Attachments belonging to a not-yet-drafted section remain visible under its
+frozen heading, with pending ownership recorded and no invented future prose. Unknown
+ownership makes the preview unavailable. Whole-document review uses the same canonical
+total; raw section and attachment counts remain components, not competing whole totals.
+Whole-document inspection can cover every supplied section. Its correction allowance
+still targets at most two sections, prioritizing required and severe findings; excess
+findings remain unresolved. Saved source briefs use bounded evidence views without
+rewriting the original records or removing authorized source backtracking.
+Section verification and final delivery are different gates. The candidate guard
+rejects a correction that takes a complete, fitting delivery outside its frozen
+length range; it does not require each local edit to fix a document that was
+already outside the range. Final audit still records such an unmet requirement,
+even if the model passes the edited section. Do not infer semantic certification
+from `status: passed`; inspect `semantic_review_status`, unresolved findings and
+the delivered prose separately. An exhausted editing allowance does not silently
+increase on recovery.
+Template section bodies supply writing requirements, not just headings; adaptive
+planning treats their topology as guidance. Material-based writing keeps supplied material visible alongside
 papers within the source budget; more references do not replace the task's own results.
 For data-backed writing, pass the analysis task's printed `analysis.json` path
 to `--material` (optionally alongside notes). The system checks the saved records
@@ -113,26 +142,96 @@ not another planner or lifecycle. Preparation alone makes no model/process calls
 Reading-to-synthesis preserves limitations, open questions, confidence and refs,
 labels omitted card rows, and does not silently truncate user execution constraints.
 This does not certify semantic understanding.
+Report planning, writing, format correction and both review levels use the saved
+problem/goal request, not the short memory objective as a substitute for requirements.
+Distinct inputs are retained; exact duplicates are supplied once. Historical snapshots
+without the original request use their recorded objective. Completed recovery does not
+rewrite old prose. Large full-document requests can exceed the existing review window:
+that is an explicit incomplete review, not permission to silently drop requirements.
 For supplied-source reviews and prepared reproduction, synthesis summarizes
 evidence without inventing innovation candidates. An explicitly requested
 candidate assessment/design still uses research synthesis. Reading notes remain
 model interpretations; report Writer, section Reviewer and document Reviewer receive
 the same bounded, identified source passages and source-access status. Truncation
 is explicit, and absence from an excerpt is not absence from the paper.
+Delivery shares its six source windows between exact saved followup hits and
+a section-aware overview of note/claim references. Up to two followup slots are
+reserved; either pool can borrow unused slots. Selected late windows retain
+their original offsets. A saturated followup no longer erases every earlier
+method passage, but omitted windows still need a targeted read; this is not
+semantic verification or a change to the saved reading note.
+Initial overview and task-focused selection use retained line positions within a
+document, not body-first ingestion priority. Missing or mixed source locations
+preserve within-source order; equal-line ties are not guessed from chunk IDs.
+Task-match neighbors stay in the same file and can still contain retention gaps.
+Task-selected passages count toward document and section coverage. Remaining
+windows first cover unrepresented sections, then spread within each section
+instead of spacing across the whole paper. With enough slots this includes
+section boundaries; limited slots still omit text and do not certify that every
+definition or qualification was read. Bibliography is not reintroduced merely
+because substantive passages were already selected.
+Selection remains a bounded sample, not a complete reading or claim verification.
 Reviewers can locate omitted passages with `search_source_chunks` over the registered
 source's saved extracted text, then request neighboring chunks. This is bounded lexical
 retrieval, not semantic verification or a fresh download; an unmatched query is not proof
 that the original source lacks the information. A passing review that also requests
 evidence is provisional: the fetched evidence is saved and the same draft is rechecked
 once before acceptance. Still-pending requests become an explicit source-verification
-gap, including when backtracking is disabled or exhausted. Section and document reviews
+gap, including when backtracking is disabled or exhausted. Mixed evidence/prose corrections
+also save completed reads before invoking the Writer. Saved context continues into a resumed
+revision and candidate review without rebilling tool use, even when no new read is requested.
+Section and document reviews
 use the existing tool/revision budgets; recent tool results take priority in bounded prompts,
 with omissions recorded. Resume reconstructs consumed tool calls from saved results instead
 of resetting the allowance. No-request reviews do not gain an extra model call.
+Independent section and document inspection default to original source windows,
+not prior reading-card conclusions. Source metadata, truncation and recorded
+reading coverage remain visible. Cards are available on explicit request as derived
+context; Writer inputs and saved records are unchanged. Omitted text is not absent
+source text, and a coverage record does not certify comprehension or paper quality.
+Whole-document inspection does not automatically replay earlier roles' synthesis-tool
+text as primary evidence. The text remains available through an explicit request,
+labelled as a recorded, unverified interpretation; matching source handles retain
+their own identity. If interrupted after saving that inspection's requested context,
+resume rechecks with the saved results rather than repeating the lookup. Historical
+findings still require resolution; context separation does not certify model judgement.
 Writer and section Reviewer share a bounded view of adopted section prose and the
 frozen section responsibilities. Format recovery retains this view; resume reconstructs
 it from saved sections rather than another summary store. Excerpts include head/tail
 positions and omitted character counts. They help coherence, not source verification.
+Responsibilities are labelled planning intent, not assertions in the current body.
+Whole-document inspection omits the earlier drafting-purpose list and instead
+checks the original request, current prose, factual/style criteria and evidence.
+Saved plans and Writer access remain unchanged; derived length forecasts remain
+visible separately from actual canonical counts.
+Drafting, format recovery and candidate verification treat reviewer allegations and
+proposed remedies as fallible derived context: first check the baseline and sources,
+not insert an absent assertion merely to satisfy an opinion. These labels do not
+certify semantic correctness, change saved plans or close historical issues.
+New adaptive planning can record `document_plan.length_budget` for an
+explicit whole-document word request, anchored to a literal task quotation. The
+same canonical preview reserves known title/headings, data attachments and experiment
+appendix before allocating approximate section-body targets. These are shares, not
+minimums; the original request and current correction take precedence. Unselected
+references and future visual text remain unresolved costs, not zero. The final
+delivery is mechanically checked against a valid frozen length budget using its
+actual report text, not the body or forecast. An out-of-range document stays
+unresolved; a malformed contract or missing final text requires verification.
+No contract means no inferred word gate. Whitespace-token counts do not verify all languages
+or word-count conventions. Pages, characters and excluded-body scopes are not
+silently converted. No extra planning call is added, and saved frozen plans remain
+unchanged on recovery. A located quotation validates the anchor, not its interpretation.
+Candidate verification uses the same check: if a complete, previously fitting
+delivery goes out of range after a section correction, a model `pass` cannot
+adopt that candidate. Correction and recovery retain the existing allowance.
+Incomplete previews and already-out-of-range originals are not assigned a guessed
+section-local fix; final audit still checks the actual assembled report. This
+prevents that regression, not all length failures or semantic errors.
+Survey planning receives the same complete original task. With a valid explicit
+whole-document word request, its proposed 2–12 purposeful sections do not gain
+unrelated broad-survey coverage sections or filler subsection hints. Without
+that request, the existing broad-survey path remains; custom and frozen plans
+are unchanged. This is input consistency, not a guarantee of compliance.
 The claim view follows current adopted drafts, preserving separate declarations even
 when two sections reuse a claim id; rejected revisions do not replace current prose.
 Revision verification receives the original findings, requested changes and a bounded
@@ -140,7 +239,83 @@ view of the previous draft, alongside source evidence. Removing unsupported or r
 prose is allowed; preserving supported facts and qualifications matters more than preserving
 word count. Checkpoints retain correction requests and editor candidates: resume reuses
 them and consumed correction/source-call allowances rather than generating a fresh allowance.
+Normal drafting and format recovery use the same effective correction instructions:
+explicit requests plus required proposed changes. Legacy overall revision requests
+remain actionable; optional or verification-only suggestions are not silently turned
+into rewrites, and their original opinions remain visible. The section edit scope
+names the body, display heading and supported metadata eligible for this call, and the read-only plan, data, other drafts and
+assembly text. An unavailable owner correction stays unresolved, not a pretend Writer
+edit. Verification observes baseline/candidate section token counts and their delta;
+these derived observations can support a style check but not measured-fact counter-evidence.
+Growth may be necessary for a supported correction; status alone proves nothing.
 These checks are model-assisted, not certification of every important claim or paper quality.
+Live single-section responses reject a different explicit section ID through the existing
+one-format-correction path. Absent, null and legacy empty IDs bind to the requested section;
+saved history is not migrated and no new edit target is opened.
+Historical-opinion checking is not another discovery or writing role: it omits
+drafting criteria/section-purpose directives, retaining the full task, current prose
+and evidence. New findings or rewrite instructions from that role are rejected;
+the existing one-format correction and saved unresolved opinions remain intact.
+Independent inspection still receives its criteria and owns discovery.
+An invalid batch stays rejected. If its complete target/identity/role envelope is
+unambiguous, each finding/check is separately subjected to the same strict evidence
+validation. After the existing one format correction, the saved valid subset may
+continue within the original editing allowance. Invalid records and loose rewrite
+instructions from a mixed invalid section never enter the Writer or close opinions.
+The raw answer and incomplete-review finding remain; resuming its saved subset does
+not resend a consumed correction. A usable subset is not a completed full inspection.
+Current limitations and open questions follow the frozen input and adopted drafts,
+not an append-only union of every revision. The existing checkpoint owner refreshes
+this view before resumed prompts and immediately after adoption. Historical draft
+metadata identifies superseded/pending/rejected notes to withdraw; original input
+constraints and legacy notes without a traceable owner remain. Draft history stays
+unchanged. These notes are not independently verified source facts.
+After a built-in adaptive outline succeeds, its frozen document plan owns section
+structure for both surveys and experiment reports. Default drafting order is no
+longer a second plan; independent review retains factual checks but omits the
+explicit `Default Structure` fallback block. Custom criteria and frozen legacy
+criteria remain authoritative and are not rewritten during recovery. A project-local
+`templates/report` directory still overrides installed template defaults; use a
+directory without that override when checking a wheel's packaged defaults.
+Before drafting, unsent corrections targeting the same section combine the independent
+inspection's requirements and checked unresolved opinions. One candidate is verified against
+that combined contract; saved candidates retain their original contract on recovery.
+New findings about a saved candidate's target stay in the current unresolved list
+and inspection history instead of overwriting the contract or silently disappearing.
+This does not increase section/target allowances or close omitted historical opinions.
+
+New required factual findings carry literal quotations from the current draft.
+Definite metric mismatches also identify non-derived counter-evidence; an unavailable
+observation should remain a verification/gap request rather than a fabricated mismatch.
+`evidence_quotes` can select a listed field with `anchor: "executor_record:0"`
+(an exact key shown beside its path in this request's `evidence_locator.pointers_by_role`,
+not an index the model must count). Retained requests with the old zero-based arrays
+remain readable; missing keys are never guessed or shifted.
+Omitting `quote` selects the entire field without model transcription. The shared
+default response example uses that anchor-only shape; direct Pointer selection and
+strict literal quotations remain optional compatible paths. The controller saves
+the actual Pointer, raw value and role with `mode: "field_reference"`. No short
+alias is persisted or rebound on recovery. This is not a model quotation or semantic
+certificate. Optional supplied Pointer/role must agree; an optional quote remains
+strictly checked. A direct JSON Pointer without `quote` can select any eligible
+scalar actually supplied in the current request, including fields omitted from the
+bounded locator; it uses the same raw-value/ownership persistence, not another index.
+If a literal quote is supplied, its role and text remain strictly checked: an invalid
+quotation is never converted into a field reference. Old records keep their shape.
+The reviewer cannot relabel a declared setting as an executor
+observation or cite a prior opinion as source evidence. Section backtracking results
+are part of the same addressable request. Legacy opinions remain readable without
+invented anchors; supplied new evidence anchors are checked. These checks establish
+location and ownership, not semantic support or scientific correctness. A bad location
+receives bounded parent-structure feedback, not an automatically repaired reference.
+Drafting and recovery also distinguish prepared conditions from execution observations.
+
+Within a single recorded source passage (`evidence_passages`, `chunks` or
+`source_front_matter` text), ASCII layout whitespace can differ, for example a PDF
+line break rendered as a space. Words, numbers, punctuation, case and hyphenation
+remain unchanged; separate fields/windows are never stitched. Other scalar fields,
+including file paths and identities, retain literal matching. The original passage
+and response are preserved. This handles presentation, not semantic verification.
 
 Review findings can record `required_action`: `advisory` leaves an optional
 suggestion, `revise` requires a bounded correction, and `verify` requires source
@@ -156,6 +331,72 @@ Agent-result/checkpoint `reviewer_findings` retains historical observations,
 including provisional and resolved issues; current unresolved findings belong
 to `memory.reviewer_findings`. Inspect the associated review/tool events before
 treating a historical finding as a remaining defect.
+Independent document inspection does not receive old reviewer opinions as source facts.
+Historical checking describes its response shape once; exact opinion identities and
+targets are listed in the check request, not repeated with full quotation schemas.
+JSON transport handling preserves literal unknown string escapes without a new
+provider request. Valid JSON escapes keep their existing meaning; damaged Unicode,
+structure or control characters are not reconstructed. A nested object cannot stand
+in for a damaged outer response. Domain identity, quotation and value checks still
+apply after decoding, and decoding success is not content verification.
+It does not also ask for new discovery or revision instructions. All current
+sections remain visible as quotation evidence. Invalid extra checks are still rejected.
+Distinct opinions sharing a model ID get request-local check handles; their original
+IDs remain metadata. Closure maps to the exact requested record, not every opinion
+with that original ID. Recovery reconstructs handles from the saved request order.
+Only fully identical repeated records are deduplicated; changed action, severity,
+evidence or identity remains separate. These controls do not certify semantic judgement.
+The prior proposed remedy, severity and required action are omitted from this checker
+projection; the editor retains them in unchanged original history and correction
+contracts. Those priorities do not establish the allegation. Cold checking retains original
+passages, bibliography and reading coverage, while earlier model reading cards are
+available only on explicit request. Writer inputs and saved source/tool records stay
+unchanged; a missing passage still requires backtracking or an explicit gap.
+A separate check can resolve an eligible historical opinion only with a reason and
+exact quotations with their current section identity. Cross-section evidence can
+identify another supplied section, but the opinion remains under its original
+target; legacy string quotes match only that target. Omitted or invalid checks retain
+the issue; controller-owned failures remain outside model closure. Parsed answers
+rejected by schema/quotation validation are saved with their error in the existing
+iteration trace, not accepted as findings. A correction closes only its original
+contract's findings; other issues in the same section remain active. These records
+support diagnosis and recovery, not independent scientific verification.
+Whole-document inspection and opinion-check source lookups share a checkpointed
+read helper with rejected-answer lookups. Before execution, the existing event
+stores an allocated blocked result with no source content; success replaces it.
+Restoration counts either result and does not replay the read. An allocated but
+unconfirmed result is not evidence and can leave verification pending. This does
+not grant another provider request or guarantee complete scientific validation.
+Section and document review requests include bounded `evidence_locator` navigation to
+current scalar fields, grouped by record ownership. Copy an applicable full path and
+quote its actual field; the locator itself is not evidence. Original passage paths
+precede metadata, and the listing reports omitted paths. Unlisted visible fields remain
+valid targets; omission is not proof of missing source information. Navigation copies
+no source text and does not change role/quotation validation. Near the whole-document
+window limit, it is reduced or omitted instead of dropping existing evidence.
+An unresolved verification-only opinion can remain pending without a prose rewrite.
+Its evidence requests are handled by the opinion checker; outstanding requests
+prevent closure even if the model proposes closure. This does not certify that the
+opinion is valid or invalid. Explicit bounded corrections still run, and a separate
+correction cannot close that pending verification. Current-assertion source guards
+remain unchanged; unresolved required work still affects audit.
+One format correction is allowed after a parsed document-review answer fails
+validation. It keeps exact opinion targets, quotation checks and the bounded evidence contract;
+the rejected answer is not source evidence, and its unsupported judgement need not
+be preserved. A started correction consumes this
+allowance even if its result is unknown; a completed correction reuses its saved
+validated response. Saved context resumes under its original inspection, opinion
+check or final-review owner. Transport, decoding and budget failures do not permit
+this format correction, and the existing evidence-window limit still applies.
+An invalid opinion does not prevent a separately valid read request: all response targets
+must be unique and allowed for this role, and only registered read-only tools are eligible.
+The gateway still validates arguments, registered sources and cumulative call limits.
+Rejected findings/instructions are not adopted; newly fetched material is passed to the
+original single correction, not a new repair cycle. Reads are allocated before execution
+and checkpointed after completion. Interrupted reads remain explicitly unconfirmed and
+are not repeated on resume. Retrieval alone does not verify a scientific judgement.
+Controller failures keep separate operation identities even with identical wording;
+only actual success of their owning operation clears a stale service failure.
 Whole-document editing can select at most two section targets. Each target uses
 the existing `max_review_iterations` allowance, including rejected candidates.
 Saved iterations preserve consumed allowance and original findings/instructions;
@@ -397,6 +638,13 @@ This is not general multilingual font support. Unsupported characters or missing
 TeX packages retain the editable project and compilation diagnostics rather than
 silently changing the content or claiming PDF delivery.
 
+Slash-separated prose receives export-owned break opportunities without changing
+its font or values; math and URL targets are not rewritten. Compilation alone
+does not check page layout or fonts. Incomplete bibliographic metadata can produce
+nested ACM/natbib labels: the built-in compiler protects generated labels without
+inventing authors/dates; manual-build instructions in the exported README explain
+the corresponding limitation. Retain missing-metadata and font warnings.
+
 Historical sessions remain inspectable, but no second Writer/report/audit executor
 resumes them. `build_research_session_report_inputs()` and
 `build_code_task_report_inputs()` only project existing evidence without executing
@@ -619,9 +867,12 @@ plan -> search -> document ingest -> read -> synthesize -> design
   process is not a valid measurement; a valid negative result is not an
   instruction to repair forever.
 - Report generation uses the recorded literature, implementation and measurement
-  evidence. The audit checks that a metric name and value appear in the same
-  prose line or table row, and compares framework-rendered experiment tables
-  with persisted results; altered baseline/candidate cells fail the audit.
+  evidence. Literal visibility checks look for the registered metric name and
+  value in the same prose line or table row. Human-readable aliases, row/column
+  relationships and rounding are not inferred: an unmatched value requires
+  verification, not an automatic omission claim or rewrite. The unresolved list
+  remains. Framework-rendered measurement tables are checked against persisted
+  results; altered baseline/candidate cells fail the audit.
   This is a consistency check, not independent validation of the measurements.
   Mechanical audit success is not proof of publication quality or semantic
   correctness (`semantic_review_status` remains `semantic_unchecked`).
@@ -689,6 +940,17 @@ of originality. Offline fixture output is not model-backed scientific analysis.
 See the capability entrypoints above for typed inputs and outputs.
 
 ## Artifact Ownership Summary
+
+Experiment report assembly keeps reader prose separate from recorded evidence.
+`data_tables=linked` adds a short link; `full` includes the summary tables as well.
+Both modes preserve a local JSON/Markdown record package and explicit registered
+source copies. Planning and preview use the same protected block as assembly.
+Native whole-document inspection and historical checks receive that block too,
+including their correction/context paths, rather than only counting its length.
+Audit still checks required body metrics, package values/text and declared copy
+presence; it does not independently verify the experiment or later copy tampering.
+Reassembly and ACM export retain the original task and results; exports copy this
+native package, not arbitrary local links or source directories.
 
 Report assembly owns heading presentation and the final reference list, not the
 meaning of section prose. A distinct leading subsection is retained; only an exact

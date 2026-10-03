@@ -23,12 +23,14 @@ from simple_ar.report.schema import (
     MetricSource,
     ReportContext,
     ReportMemory,
+    ReportRuntimeConfig,
     ReportSectionDraft,
     SourceHandle,
 )
 from simple_ar.research.design import ResearchDesignResult
 from simple_ar.research.contracts import ResearchExperimentContract
 from simple_ar.research.documents.ingest import DocumentBundle
+from simple_ar.research.evidence.reader import select_representative_chunks
 from simple_ar.research.sources import SearchResult
 from simple_ar.research.synthesis import SynthesisResult
 from simple_ar.result_analysis.schema import AnalysisResult
@@ -654,13 +656,19 @@ def attach_report_read_evidence(
                     key: followup[key] for key in ("lookups", "pending_queries", "revision_performed", "scope")
                     if key in followup
                 }
-            refs = note.get("evidence_refs", [])
+            refs = list(note.get("evidence_refs", []))
+            # Claim-local references are also original-source locations. They
+            # need not be repeated in the note's global reference list.
+            for claim in note.get("claim_scopes", []):
+                if isinstance(claim, Mapping):
+                    refs.extend(claim.get("evidence_refs", []))
+            refs = list(dict.fromkeys(refs))
             supported = [chunks[ref] for ref in refs if ref in chunks
                          and chunks[ref].document_id == record.document_id]
             # Interpretations alone are not a passage-level check. Carry a
             # bounded set of the exact persisted passages alongside the notes.
-            # Query-centered windows precede chunk prefixes: otherwise a
-            # corrected late passage would disappear again during delivery.
+            # Keep exact query-centered windows, but do not let a full gap-read
+            # pool erase every earlier method/condition reference at delivery.
             queried = []
             for row in followup.get("passages", []) if isinstance(followup, Mapping) else []:
                 if not isinstance(row, Mapping):
@@ -670,15 +678,25 @@ def attach_report_read_evidence(
                 if (chunk is not None and chunk.document_id == record.document_id
                         and type(start) is int and type(end) is int and 0 <= start < end <= len(chunk.text)
                         and row.get("text") == chunk.text[start:end]):
-                    queried.append(dict(row))
+                    if not any((prior["chunk_id"], prior["character_start"], prior["character_end"])
+                               == (row["chunk_id"], start, end) for prior in queried):
+                        queried.append(dict(row))
             queried_ids = {row["chunk_id"] for row in queried}
-            passages = [*queried, *[
+            overview = [chunk for chunk in supported if chunk.chunk_id not in queried_ids]
+            # The existing six-window cap is shared, not enlarged. Reserve up
+            # to two slots for saved query hits (the reader interleaves its two
+            # queries); use the existing section-aware policy for the overview.
+            # Either pool can borrow unused slots. This is access sampling, not
+            # semantic support, and omitted passages still require a tool read.
+            selected = select_representative_chunks(overview, max_chunks=6 - min(2, len(queried)))
+            kept_queries = queried[:6 - len(selected)]
+            passages = [*kept_queries, *[
                 {"chunk_id": chunk.chunk_id, "text": chunk.text[:1200],
                  "truncated": len(chunk.text) > 1200}
-                for chunk in supported if chunk.chunk_id not in queried_ids
+                for chunk in selected
             ]]
-            metadata["evidence_passages"] = passages[:6]
-            metadata["evidence_passages_truncated"] = len(passages) > 6
+            metadata["evidence_passages"] = passages
+            metadata["evidence_passages_truncated"] = len(queried) + len(overview) > len(passages)
         handles.append(
             handle.model_copy(
                 update={"summary": record.abstract or handle.summary, "metadata": metadata,
@@ -783,29 +801,55 @@ def _metric_groups(execution: Mapping[str, Any]) -> list[tuple[str, Mapping[str,
     return groups
 
 
+def experiment_record_snapshot(context: ReportContext) -> dict[str, Any]:
+    """Exact recorded values and roles, not a new interpretation or ledger."""
+    return {"metric_sources": [row.model_dump(mode="json") for row in context.metric_sources],
+        "experiment_plan": context.experiment_plan, "execution_context": context.execution_context,
+        "results": context.results}
+
+
+def experiment_record_markdown(context: ReportContext, sources: list[dict[str, Any]]) -> str:
+    """One deterministic attachment text owner for assembly and audit."""
+    markdown = "# Recorded Experiment Evidence\n\n" + _verified_experiment_evidence(context,
+        detailed_reference="[Complete recorded context and metric provenance](experiment_evidence.json)")
+    if sources:
+        markdown += "\n\n## Registered Source Copies\n\n" + "\n".join(
+            f"- [Registered source {index}]({row['copied_path']}) — original artifact: `{row['source']['path']}`"
+            for index, row in enumerate(sources, 1))
+    else:
+        markdown += "\n\nOnly the projected records were supplied; original source files were not copied."
+    return markdown + "\n"
+
+
 def _append_verified_experiment_evidence(
     sections: tuple[ReportSectionDraft | Mapping[str, Any], ...],
     context: ReportContext,
+    config: ReportRuntimeConfig | None = None,
 ) -> tuple[ReportSectionDraft | Mapping[str, Any], ...]:
-    """Append a deterministic metric appendix to experiment reports."""
+    """Project reader-facing records; legacy direct callers keep full tables."""
 
     if context.report_mode != "experiment":
         return sections
-    evidence = _verified_experiment_evidence(context)
+    evidence = (_verified_experiment_evidence(context,
+        detailed_reference="[Complete recorded context and metric provenance](experiment_evidence.json)")
+        if config is not None else _verified_experiment_evidence(context))
     if not evidence:
         return sections
+    linked = config is not None and config.data_tables == "linked"
     return (
         *sections,
         ReportSectionDraft(
             section_id="verified_experiment_metrics",
-            heading="Verified Experiment Metrics",
-            draft_markdown=evidence,
+            heading="Experiment Records" if linked else "Verified Experiment Metrics",
+            draft_markdown=("[Recorded measurements and provenance](experiment_evidence.md). "
+                "These records do not independently verify the implementation or scientific conclusions."
+                if linked else evidence),
             metric_ids=[metric.metric_id for metric in context.metric_sources],
         ),
     )
 
 
-def _verified_experiment_evidence(context: ReportContext) -> str:
+def _verified_experiment_evidence(context: ReportContext, *, detailed_reference: str | None = None) -> str:
     """Render a compact measured summary without asking the Writer.
 
     Per-task measurements remain in the immutable experiment artifacts.  They
@@ -836,7 +880,7 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
         seed_table = _paired_primary_metric_markdown(comparisons, primary_metric)
         if seed_table:
             lines.extend(["", "### Seed-Level Primary Metric", "", seed_table])
-        detail_reference = _detailed_measurement_reference(context)
+        detail_reference = detailed_reference if detailed_reference is not None else _detailed_measurement_reference(context)
         if detail_reference:
             lines.extend([
                 "",
@@ -853,7 +897,7 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
             "Deltas are candidate minus baseline; this table does not certify the underlying assets "
             "or establish statistical significance."
         )
-        detail_reference = _detailed_measurement_reference(context)
+        detail_reference = detailed_reference if detailed_reference is not None else _detailed_measurement_reference(context)
         if detail_reference:
             lines.extend(["", f"Full measurement records are preserved in {detail_reference}."])
         return "\n".join(lines)
@@ -873,7 +917,7 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
                 break
         if not rendered:
             lines.append(
-                "No persisted comparison rows are available."
+                "No structured paired-comparison rows are registered; individual recorded values follow."
                 if not comparisons
                 else (
                     "No valid paired comparison row matched the declared metrics; "
@@ -892,7 +936,7 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
         lines.extend(["", "### Metric Provenance", "", ledger])
         if any(metric.source_kind.startswith("derived_") for metric in visible_metrics):
             lines.append("Rows with a derived origin are calculated summaries or differences, not direct measurements.")
-    detail_reference = _detailed_measurement_reference(context)
+    detail_reference = detailed_reference if detailed_reference is not None else _detailed_measurement_reference(context)
     if detail_reference and (
         isinstance(comparisons, list) or len(visible_metrics) < len(context.metric_sources)
     ):

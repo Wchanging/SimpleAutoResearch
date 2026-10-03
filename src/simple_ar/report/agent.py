@@ -10,11 +10,20 @@ from pydantic import ValidationError
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMResponseError
 from simple_ar.research.contracts import CLAIM_SCOPE_RULES
 from simple_ar.report.assembler import assemble_report_sections
-from simple_ar.report.document_plan import resolve_document_plan, supplied_figure_sources, visual_requirements
-from simple_ar.report.templates import drafting_template_guidance
-from simple_ar.report.editor import MAX_DOCUMENT_REVIEW_SECTIONS, review_document
+from simple_ar.report.data_delivery import supplied_data_delivery
+from simple_ar.report.document_plan import LENGTH_REQUEST_RULE, LENGTH_REQUEST_SCHEMA, resolve_document_plan, supplied_figure_sources, visual_requirements
+from simple_ar.report.templates import drafting_template_guidance, reviewing_template_guidance
+from simple_ar.report.editor import (
+    DOCUMENT_CONTROL_FINDING_TYPES, MAX_DOCUMENT_REVISION_SECTIONS,
+    coalesce_document_reviews, historical_opinion_handles, review_document, rejected_review_context_requests,
+)
 from simple_ar.report.execution_evidence import report_execution_evidence
+from simple_ar.report.review_evidence import (
+    EVIDENCE_QUOTE_RULES, EVIDENCE_QUOTE_SCHEMA, validate_finding_anchors, review_draft_quote_sources,
+    review_evidence_locator, resolve_review_evidence,
+)
 from simple_ar.report.narrative import (
+    DERIVED_CONTEXT_STATUS, REVIEW_OPINIONS_STATUS,
     _compact_document_plan,
     _compact_execution_context,
     _compact_execution_results,
@@ -22,8 +31,8 @@ from simple_ar.report.narrative import (
     _compact_source_metadata,
     _prompt_handle_view,
     _prompt_metrics,
-    adopted_claims, evidence_outline_context, narrative_context, pending_document_revisions,
-    pending_revision_review, revision_context,
+    adopted_claims, adopted_memory_notes, budget_document_plan, delivery_text_observation, effective_revision_instructions, evidence_outline_context, narrative_context, pending_document_revisions, _experiment_delivery_view,
+    pending_revision_review, revision_context, report_objective, report_tool_context, review_source_evidence,
 )
 from simple_ar.report.schema import (
     finding_requires_resolution,
@@ -31,12 +40,14 @@ from simple_ar.report.schema import (
     AgentReportResult,
     ReportContext,
     ReportIterationRecord,
+    ReportFindingCheck,
     ReportMemory,
     ReportRuntimeConfig,
     ReportSectionDraft,
     ReportSectionPlan,
     ReportSectionReview,
     ReportTemplateBundle,
+    ReportToolCall,
     ReportToolResult,
     ReviewerFinding,
 )
@@ -71,7 +82,7 @@ bounded wording such as "under this protocol" and "descriptive across the
 observed seeds".
 Hardware, accelerator, operating-system, and runtime details stated only in the
 task or prepared context are declared conditions, not observed execution
-evidence. Unless verified_execution_results contains those details, describe
+evidence. Unless an executor record or identified producer observation records those details, describe
 them as requested or configured conditions and say that hardware was not
 recorded; do not write that the runs executed on that hardware.
 Technical implementation status such as `validated`, a passing static check,
@@ -86,8 +97,10 @@ sources; surveys are not a substitute for attribution of the adopted method.
 WRITER_SYSTEM = """You are the SimpleAutoResearch report Writer.
 Write only evidence-bounded Markdown sections for the current run.
 Do not invent citations, metrics, datasets, methods, or external references.
-Treat the supplied verified execution results as authoritative for local
-baseline, candidate, comparison, and resource claims.
+Use the registered execution results for local baseline, candidate and comparison
+values. Ground execution/resource claims in their recorded owner: requested
+conditions are declarations, executor records are observations, and producer
+outputs are attributed measurements. A result's presence does not validate its method.
 Use short citation keys exactly as provided, in Pandoc-style form like [@P1].
 For surveys, write synthesized prose, not a pipeline run log: omit stage names
 and search/debug internals. For experiment/reproduction setup, include the
@@ -117,8 +130,9 @@ conflicts or coverage limits instead of inventing replacements.
 Optional draft source-use/citation arrays may be empty. Judge inline citations
 and their support in the prose, not the presence of those optional arrays.
 Do not rewrite prose unless asked. Return structured findings and optional bounded context requests.
-Treat the supplied verified execution results as authoritative for local
-baseline, candidate, comparison, and resource claims. Do not flag a claim as
+Use registered execution results for local baseline, candidate and comparison
+values, retaining declaration/executor/producer ownership for resource claims.
+A result's presence does not validate its method. Do not flag a claim as
 unsupported merely because the deterministic execution appendix is assembled
 after the Writer/Reviewer pass.
 Flag operational/provenance sections in research-only reports when they make
@@ -217,14 +231,19 @@ def run_report_agent(
         if completed_count >= len(planned) or pending_draft.section_id != planned[completed_count].section_id:
             raise ValueError("Pending report draft does not match the next planned section.")
 
-    # A checkpoint from the older append-only view may retain superseded claims.
-    # Reproject before the first resumed prompt, not only at the next checkpoint.
-    current.claims_evidence_matrix = adopted_claims(memory.claims_evidence_matrix, sections)
+    def refresh_adopted_memory() -> None:
+        # Frozen input remains the seed. Checkpoint history identifies obsolete
+        # draft notes, but cannot promote a pending/rejected candidate to fact.
+        current.claims_evidence_matrix = adopted_claims(memory.claims_evidence_matrix, sections)
+        for field, values in adopted_memory_notes(memory, current, sections, iterations, pending_draft).items():
+            setattr(current, field, values)
+
+    # Reproject an older append-only checkpoint before the first resumed prompt.
+    refresh_adopted_memory()
 
     def checkpoint() -> None:
-        # Derive the claim view from the same adopted sections that are saved.
-        # An old revision's metadata is not evidence for its replacement prose.
-        current.claims_evidence_matrix = adopted_claims(memory.claims_evidence_matrix, sections)
+        # Claims and notes follow the exact adopted sections saved by this owner.
+        refresh_adopted_memory()
         if checkpoint_sink is not None:
             checkpoint_sink({"memory": current.model_dump(mode="json"),
                              "sections": [row.model_dump(mode="json") for row in sections],
@@ -299,7 +318,7 @@ def run_report_agent(
                         )
             if config.reviewer == "disabled":
                 sections.append(draft)
-                _merge_draft_into_memory(current, draft, [])
+                _record_draft_diagnostics(current, draft, [])
                 pending_draft = None
                 checkpoint()
                 continue
@@ -337,15 +356,19 @@ def run_report_agent(
                 tool_results = _run_context_requests(gateway, review, config)
                 all_tool_results.extend(tool_results)
                 lookup_failed = any(row.status in {"not_found", "error"} for row in tool_results)
-                if _needs_evidence_recheck(review) or lookup_failed:
+                needs_evidence_recheck = _needs_evidence_recheck(review) or lookup_failed
+                if tool_results or needs_evidence_recheck:
+                    # Save completed reads before either consumer can fail.
+                    # Mixed corrections skip the extra review, not persistence.
+                    iterations.append(_iteration(section_index, section, "review_context", review.verdict,
+                        draft.used_sources, findings=review.findings, tool_results=[*review_context, *tool_results]))
+                    all_findings.extend(review.findings)
+                    checkpoint()
+                if needs_evidence_recheck:
                     # A pass that asks for missing evidence is provisional.
                     # A rejected draft with a failed lookup also needs one
                     # bounded query correction before spending a prose edit.
                     # Successful mixed corrections keep the direct path.
-                    iterations.append(_iteration(section_index, section, "review_context", review.verdict,
-                        draft.used_sources, findings=review.findings, tool_results=tool_results))
-                    all_findings.extend(review.findings)
-                    checkpoint()
                     if tool_results:
                         review = _review_section_with_recovery(client=client, context=context, template=template,
                             memory=current, section=section, draft=draft, config=config,
@@ -360,10 +383,13 @@ def run_report_agent(
                         all_tool_results.extend(corrected_results)
                         if corrected_results:
                             iterations.append(_iteration(section_index, section, "review_context", review.verdict,
-                                draft.used_sources, findings=review.findings, tool_results=tool_results))
+                                draft.used_sources, findings=review.findings, tool_results=[*review_context, *tool_results]))
                             checkpoint()
                     review = _mark_pending_evidence(review)
-                review_context = tool_results
+                # A resumed reviewer may need no new read. Its saved evidence
+                # still belongs to the Writer and the next candidate checkpoint;
+                # only new reads enter all_tool_results and consume allowance.
+                review_context = [*review_context, *tool_results]
                 section_findings.extend(review.findings)
                 all_findings.extend(review.findings)
                 iterations.append(
@@ -394,7 +420,7 @@ def run_report_agent(
                     config=config,
                     previous_draft=draft,
                     review=review,
-                    extra_context=tool_results,
+                    extra_context=review_context,
                     label=f"report-reviser-{section.section_id}-round-{review_round + 1}",
                     adopted_sections=sections,
                     emit=emit,
@@ -409,23 +435,22 @@ def run_report_agent(
                         draft.status,
                         draft.used_sources,
                         draft=draft,
-                        tool_results=tool_results,
+                        tool_results=review_context,
                     )
                 )
                 pending_draft = draft
                 checkpoint()
 
             sections.append(draft)
-            _merge_draft_into_memory(current, draft, section_findings)
+            _record_draft_diagnostics(current, draft, section_findings)
             pending_draft = None
             checkpoint()
 
         # Audit the latest reviewed draft, not the union of issues from every
         # superseded draft. Iterations/all_findings retain the complete history.
-        if not document_review_done:
-            # A completed document review already resolved or retained the
-            # section findings in its checkpoint. Replaying older per-section
-            # reviews on resume would erase its unresolved cross-section issues.
+        if not document_review_done and not any(row.action.startswith("document_") for row in iterations):
+            # Once document work owns the saved findings, even an unfinished
+            # check cannot be replaced by earlier per-section opinions on resume.
             latest: dict[str, list[ReviewerFinding]] = {}
             for record in iterations:
                 if record.action not in {"review", "review_revision"}:
@@ -449,7 +474,6 @@ def run_report_agent(
                 checkpoint=checkpoint, gateway=gateway, all_tool_results=all_tool_results,
             )
             document_review_done = True
-        current.claims_evidence_matrix = adopted_claims(memory.claims_evidence_matrix, sections)
         # Final section-review reconciliation also matters when whole-document
         # review is disabled or inapplicable. Persist the memory we return,
         # not the earlier append-only history from the last section checkpoint.
@@ -487,38 +511,211 @@ def _edit_whole_document(
     by_id = {draft.section_id: index for index, draft in enumerate(sections)}
     pending = pending_document_revisions(iterations)
     continuations = pending_document_revisions(iterations, include_rejected=True)
+    # An interrupted document lookup ends in context events without a review.
+    # Reuse that suffix for its unfinished inspection, not older roles' context.
+    # A saved section candidate retains its own verification path below.
+    pending_contexts: dict[str, list[ReportToolResult]] = {}
+    pending_rejections: dict[str, ReportIterationRecord] = {}
+    pending_inspection: list[ReportSectionReview] = []
+    pending_opinions: list[ReviewerFinding] | None = None
+    partial_review_owners: set[str] = set()
+    if not continuations:
+        owners = {"document_context": "report-document-reviewer",
+                  "document_finding_context": "report-document-finding-checker",
+                  "document_verifier_context": "report-document-verifier"}
+        for event in reversed(iterations):
+            if event.action in {"document_review_rejected", "document_finding_check_rejected",
+                                "document_format_correction", "document_finding_format_correction"}:
+                owner = event.rejected_review.get("label", "")
+                if owner:
+                    pending_rejections.setdefault(owner, event)
+                    if owner.startswith("report-document-finding-checker") and pending_opinions is None:
+                        pending_opinions = event.requested_findings or [ReviewerFinding.model_validate(row)
+                            for row in event.rejected_review.get("historical_findings", [])] or None
+            elif event.action in owners:
+                pending_contexts.setdefault(owners[event.action], [])[0:0] = event.tool_results
+                if event.action == "document_finding_context" and pending_opinions is None:
+                    pending_opinions = event.requested_findings or None
+            elif event.action == "document_inspection" and (
+                    "report-document-finding-checker" in pending_contexts or any(
+                        owner.startswith("report-document-finding-checker") for owner in pending_rejections)):
+                pending_inspection.insert(0, ReportSectionReview(section_id=event.section_id,
+                    verdict=event.status, findings=event.findings, revision_instructions=event.revision_instructions))
+            else:
+                break
 
-    def checked_document_reviews(label: str) -> list[ReportSectionReview]:
+    def checkpointed_context(requests: list[ReportToolCall], event: ReportIterationRecord) -> None:
+        for index, request in enumerate(requests):
+            if index < len(event.tool_results):
+                continue  # Allocated or confirmed reads are not granted again.
+            pending_result = ReportToolResult(tool_name=request.tool_name, status="blocked",
+                summary="Read allocated before checkpoint; no confirmed result was saved. This is not source evidence.",
+                metadata={"request": request.model_dump(mode="json"), "lookup_state": "allocated"})
+            result_index = len(all_tool_results)
+            event.tool_results.append(pending_result)
+            all_tool_results.append(pending_result)
+            checkpoint()
+            result = gateway.call(request)
+            event.tool_results[index] = result
+            all_tool_results[result_index] = result
+            checkpoint()
+
+    def retain_partial_review_failure(label: str, reason: str) -> None:
+        partial_review_owners.add(label)
+        identifier = {"report-document-reviewer": "document-review-unavailable",
+                      "report-document-finding-checker": "document-finding-check-unavailable",
+                      "report-document-verifier": "document-recheck-unavailable"}[label]
+        finding = ReviewerFinding(finding_id=identifier, type="document_review_unavailable", severity="major",
+            message=f"Review remains incomplete; only individually validated observations were retained: {reason}",
+            suggested_action="Inspect the retained rejected response and unresolved review before publication.")
+        all_findings.append(finding)
+        memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, finding])
+        checkpoint()
+
+    def checked_document_reviews(label: str, *, historical_findings: list[ReviewerFinding] | None = None) -> list[ReportSectionReview]:
+        requested_context = list(pending_contexts.get(label, []))
+        def prepare_rejected_context(event: ReportIterationRecord) -> None:
+            if not config.allow_source_backtracking:
+                return
+            requests = rejected_review_context_requests(event.rejected_review.get("response"),
+                section_ids={row.section_id for row in historical_findings} if historical_findings else set(by_id),
+                max_requests=config.max_backtracking_calls,
+                read_only_tools={name for name, spec in gateway.specs.items() if set(spec.permissions) == {"read"}})
+            recorded = [row.model_dump(mode="json") for row in requests]
+            if event.rejected_review.get("context_requests", recorded) != recorded:
+                raise ValueError("Saved rejected-review lookup scope differs from the current registered scope.")
+            event.rejected_review["context_requests"] = recorded
+            checkpointed_context(requests, event)
+            requested_context.extend(row for row in event.tool_results if row not in requested_context)
+
         def call(review_label: str) -> list[ReportSectionReview]:
-            return review_document(client=client, template=template, memory=memory,
-                sections=_final_sequence(memory.section_plan, sections), config=config,
-                execution_summary=_compact_execution_results(context.results),
-                execution_evidence=report_execution_evidence(context), supplementary_evidence=all_tool_results,
-                metric_summary=_prompt_metrics(memory, detail="summary"),
-                source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind in {"paper", "material"}],
-                label=review_label)
+            rejected = pending_rejections.pop(review_label, None)
+            if rejected and rejected.status == "completed" and "validated_reviews" in rejected.rejected_review:
+                return [ReportSectionReview.model_validate(row) for row in rejected.rejected_review["validated_reviews"]]
+            if rejected and rejected.rejected_review.get("partial_ready"):
+                retain_partial_review_failure(label, rejected.summary)
+                return [ReportSectionReview.model_validate(row) for row in rejected.rejected_review["partial_reviews"]]
+            if rejected and rejected.rejected_review.get("format_correction"):
+                raise LLMResponseError(f"Document review format correction was already consumed: {rejected.summary}")
+            if rejected is not None:
+                prepare_rejected_context(rejected)
+            correction = {"validation_error": rejected.summary,
+                          "rejected_response": rejected.rejected_review["response"]} if rejected else None
+            validated_subset: list[ReportSectionReview] = []
+            def capture_validated_subset(rows: list[ReportSectionReview]) -> None:
+                nonlocal validated_subset
+                validated_subset = rows
+            def retain_rejection(response: Any, reason: str) -> None:
+                iterations.append(ReportIterationRecord(
+                    iteration=len(iterations) + 1, section_id="",
+                    action="document_finding_check_rejected" if historical_findings else "document_review_rejected",
+                    status="rejected", summary=reason,
+                    rejected_review={"label": review_label, "response": response,
+                                     "format_correction": correction is not None,
+                                     **({"partial_reviews": [row.model_dump(mode="json") for row in validated_subset],
+                                         "partial_ready": correction is not None} if validated_subset else {})},
+                    requested_findings=historical_findings or [],
+                ))
+                checkpoint()
+            for _ in range(2 if correction is None else 1):
+                validated_subset = []
+                before = len(iterations)
+                correction_record = None
+                if correction is not None:
+                    correction_record = ReportIterationRecord(
+                        iteration=len(iterations) + 1, section_id="",
+                        action="document_finding_format_correction" if historical_findings else "document_format_correction",
+                        status="started", summary=correction["validation_error"],
+                        rejected_review={"label": review_label, "format_correction": True,
+                            "rejection_iteration": iterations[-1].iteration},
+                        requested_findings=historical_findings or [],
+                    )
+                    iterations.append(correction_record)
+                    checkpoint()
+                try:
+                    validated = review_document(client=client, template=template, memory=memory,
+                        sections=_final_sequence(memory.section_plan, sections), config=config,
+                        execution_summary=_compact_execution_results(context.results),
+                        execution_evidence=report_execution_evidence(context), supplementary_evidence=all_tool_results,
+                        requested_context=requested_context, historical_findings=historical_findings,
+                        on_invalid_response=retain_rejection, format_correction=correction,
+                        on_validated_subset=capture_validated_subset,
+                        metric_summary=_prompt_metrics(memory, detail="summary"),
+                        source_evidence=[_prompt_handle_view(row) for row in memory.source_handles if row.kind in {"paper", "material"}],
+                        writing_objective=report_objective(context, memory),
+                        assembly_owned_content=supplied_data_delivery(context, config=config,
+                            plan=memory.document_plan, section_ids=[row.section_id for row in sections])
+                            + _experiment_delivery_view(context, config),
+                        delivery_text_observation=delivery_text_observation(context, memory,
+                            _final_sequence(memory.section_plan, sections), config),
+                        label=review_label + "-format-correction" if correction is not None else review_label)
+                    if correction_record is not None:
+                        correction_record.status = "completed"
+                        correction_record.rejected_review["validated_reviews"] = [row.model_dump(mode="json") for row in validated]
+                        checkpoint()
+                    partial_review_owners.discard(label)
+                    return validated
+                except (LLMResponseError, ValidationError):
+                    # Only a parsed answer saved by this owner permits correction.
+                    # Transport, budget, and decoding failures remain separate.
+                    if (correction is not None and len(iterations) > before
+                            and iterations[-1].rejected_review.get("partial_ready")):
+                        retain_partial_review_failure(label, iterations[-1].summary)
+                        return validated_subset
+                    if correction is not None or len(iterations) == before or not iterations[-1].rejected_review:
+                        raise
+                    prepare_rejected_context(iterations[-1])
+                    correction = {"validation_error": iterations[-1].summary,
+                                  "rejected_response": iterations[-1].rejected_review["response"]}
+                    _emit(emit, "Reviewer correcting rejected document-review JSON once.")
+            raise AssertionError("Document review correction did not terminate")
 
+        if requested_context or label + "-evidence" in pending_rejections:
+            rows = call(label + "-evidence")
+            return rows if historical_findings else [_mark_pending_evidence(row) for row in rows]
         reviews = call(label)
-        provisional = [row for row in reviews if _needs_evidence_recheck(row)]
+        # This role checks opinions, not current assertions needing a prose
+        # qualification. Its evidence requests belong here even if the model
+        # calls the old opinion a required correction.
+        provisional = [row for row in reviews if (bool(row.context_requests) if historical_findings
+                                                  else _needs_evidence_recheck(row))]
         if not provisional:
             return reviews
         fetched = []
         for review in provisional:
-            results = _run_context_requests(gateway, review, config)
-            fetched.extend(results)
-            iterations.append(_iteration(len(iterations) + 1, plans[review.section_id], "document_context",
+            event = _iteration(len(iterations) + 1, plans[review.section_id],
+                "document_finding_context" if historical_findings else
+                    "document_verifier_context" if label == "report-document-verifier" else "document_context",
                 review.verdict, sections[by_id[review.section_id]].used_sources,
-                findings=review.findings, tool_results=results))
+                findings=review.findings, requested_findings=historical_findings)
+            iterations.append(event)
             all_findings.extend(review.findings)
-        all_tool_results.extend(fetched)
+            requests = [call for call in review.context_requests[:max(0, config.max_backtracking_calls)]
+                        if call.tool_name] if config.allow_source_backtracking else []
+            checkpointed_context(requests, event)
+            fetched.extend(event.tool_results)
+        requested_context.extend(fetched)
         checkpoint()
         if fetched:
-            return [_mark_pending_evidence(row) for row in call(label + "-evidence")]
+            rows = call(label + "-evidence")
+            return rows if historical_findings else [_mark_pending_evidence(row) for row in rows]
+        if historical_findings:
+            return reviews  # Pending requests gate closure/dispatch below.
         return [_mark_pending_evidence(row) if row in provisional else row for row in reviews]
 
     try:
-        _emit(emit, "Reviewer checking whole-document coherence.")
-        reviews = checked_document_reviews("report-document-reviewer")
+        recovering_opinions = ("report-document-finding-checker" in pending_contexts or
+                              any(owner.startswith("report-document-finding-checker") for owner in pending_rejections))
+        recovering_verifier = ("report-document-verifier" in pending_contexts or
+                              any(owner.startswith("report-document-verifier") for owner in pending_rejections))
+        if recovering_opinions or recovering_verifier:
+            reviews = pending_inspection
+        else:
+            _emit(emit, "Reviewer checking whole-document coherence.")
+            reviews = checked_document_reviews("report-document-reviewer")
+            if "report-document-reviewer" not in partial_review_owners:
+                memory.reviewer_findings = [row for row in memory.reviewer_findings
+                                           if row.finding_id != "document-review-unavailable"]
     except (LLMError, ValidationError, ValueError) as exc:
         finding = ReviewerFinding(
             finding_id="document-review-unavailable", type="document_review_unavailable",
@@ -528,11 +725,108 @@ def _edit_whole_document(
         all_findings.append(finding)
         memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, finding])
         return
-    adopted_revision = False
+    adopted_revision = recovering_verifier
+    # New observations about an interrupted candidate's target do not replace
+    # its saved verification contract. Keep them as separate, unresolved work;
+    # filtering that target out of the unsent queue must not erase the issues.
+    for review in reviews:
+        if review.section_id in continuations:
+            iterations.append(_iteration(len(iterations) + 1, plans[review.section_id],
+                "document_inspection", review.verdict, sections[by_id[review.section_id]].used_sources,
+                findings=review.findings, revision_instructions=review.revision_instructions))
+            all_findings.extend(review.findings)
+            memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, *review.findings])
+    if any(review.section_id in continuations for review in reviews):
+        checkpoint()
+    # A fresh inspection cannot erase earlier required opinions by omission.
+    # Check only eligible prior issues, separately from discovering new ones.
+    # Pending candidates retain their original verification contract below.
+    prior_findings = [row for row in memory.reviewer_findings
+                      if finding_requires_resolution(row) and row.section_id in plans
+                      and row.type not in DOCUMENT_CONTROL_FINDING_TYPES
+                      and row.section_id not in continuations]
+    if recovering_verifier:
+        prior_findings = []
+    elif recovering_opinions and pending_opinions is not None:
+        prior_findings = pending_opinions
+    if prior_findings:
+        # The independent inspection has completed. Save its findings before
+        # checking prior opinions; a rejected answer/interruption cannot lose it.
+        if not recovering_opinions:
+            for review in reviews:
+                if review.section_id in continuations:
+                    continue  # Already retained above, outside the saved candidate contract.
+                iterations.append(_iteration(len(iterations) + 1, plans[review.section_id],
+                    "document_inspection", review.verdict, sections[by_id[review.section_id]].used_sources,
+                    findings=review.findings, revision_instructions=review.revision_instructions))
+                memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, *review.findings])
+            if reviews:
+                checkpoint()
+        try:
+            _emit(emit, "Reviewer checking prior opinions against the current draft.")
+            opinion_reviews = checked_document_reviews("report-document-finding-checker",
+                                                       historical_findings=prior_findings)
+            originals = historical_opinion_handles(prior_findings)
+            closed = []
+            checked = set()
+            for review in opinion_reviews:
+                retained = [originals[(review.section_id, check.finding_id)] for check in review.finding_checks
+                            if check.status == "unresolved" or review.context_requests]
+                if retained:
+                    review.findings = _dedupe_findings([*review.findings, *retained])
+                    # An unresolved verification can mean its premise is still
+                    # unknown, not that the current prose must be rewritten.
+                    # Keep that work active; preserve an explicit correction
+                    # verdict or a recorded revise/legacy requirement instead.
+                    if any(finding.required_action != "verify" for finding in retained):
+                        review.verdict = "revise_required"
+                iterations.append(_iteration(len(iterations) + 1, plans[review.section_id],
+                    "document_finding_check", review.verdict, sections[by_id[review.section_id]].used_sources,
+                    findings=review.findings, finding_checks=review.finding_checks,
+                    requested_findings=prior_findings))
+                all_findings.extend(review.findings)
+                closed.extend(originals[(review.section_id, check.finding_id)] for check in review.finding_checks
+                              if check.status != "unresolved" and not review.context_requests)
+                checked.update((review.section_id, check.finding_id) for check in review.finding_checks
+                               if not review.context_requests)
+            memory.reviewer_findings = [row for row in memory.reviewer_findings
+                                       if row not in closed]
+            if checked == set(originals) and "report-document-finding-checker" not in partial_review_owners:
+                # This owner actually completed the failed operation; its old
+                # service error is no longer current. Semantic issues stay active.
+                memory.reviewer_findings = [row for row in memory.reviewer_findings
+                                           if row.finding_id != "document-finding-check-unavailable"]
+            # A check of an older opinion cannot erase a newly discovered issue.
+            for review in reviews:
+                memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, *review.findings])
+            # Newly discovered problems are not removed by a check of old ones.
+            for review in opinion_reviews:
+                memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, *review.findings])
+            checkpoint()
+            reviews.extend(review for review in opinion_reviews if not review.context_requests and (
+                review.verdict in {"revise_required", "fail"}
+                or any(finding_requires_resolution(finding) and finding.required_action != "verify"
+                       for finding in review.findings)
+            ))
+        except (LLMError, ValidationError, ValueError) as exc:
+            finding = ReviewerFinding(finding_id="document-finding-check-unavailable",
+                type="document_review_unavailable", severity="major",
+                message=f"Historical opinions were not checked: {exc}",
+                suggested_action="Inspect retained opinions against current draft and original evidence.")
+            all_findings.append(finding)
+            memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, finding])
     # Finish persisted candidates first; a fresh review cannot change the
     # correction contract midway or cause the Writer to regenerate that draft.
+    # Inspection coverage is not the correction allowance. Keep every finding,
+    # and spend the existing two-target allowance on required, severe defects.
+    # Persisted contracts still take precedence on recovery.
+    severity = {"info": 0, "minor": 1, "major": 2, "critical": 3}
+    def priority(review: ReportSectionReview) -> tuple[bool, int]:
+        required = [finding for finding in review.findings if finding_requires_resolution(finding)]
+        return (bool(required), max((severity[finding.severity] for finding in required), default=0))
+    unsent = coalesce_document_reviews([review for review in reviews if review.section_id not in continuations])
     reviews = [*(request for _, request in continuations.values()),
-               *(review for review in reviews if review.section_id not in continuations)]
+               *sorted(unsent, key=priority, reverse=True)]
     # This bounded queue also handles a new defect introduced by a correction.
     # A candidate is not adopted until it passes; subsequent corrections retain
     # the original contract and consume the same section allowance.
@@ -556,7 +850,7 @@ def _edit_whole_document(
             targets = {row.section_id for row in prior_candidates}
             attempts_used = sum(row.section_id == plan.section_id for row in prior_candidates)
             if persisted is None and (attempts_used >= config.max_review_iterations
-                    or (plan.section_id not in targets and len(targets) >= MAX_DOCUMENT_REVIEW_SECTIONS)):
+                    or (plan.section_id not in targets and len(targets) >= MAX_DOCUMENT_REVISION_SECTIONS)):
                 finding = ReviewerFinding(finding_id=f"{plan.section_id}-document-revision-budget",
                     type="document_revision_unresolved", severity="major", section_id=plan.section_id,
                     message="The editor correction allowance was already consumed; recovery does not grant another draft.",
@@ -643,9 +937,12 @@ def _edit_whole_document(
             candidate_record.adopted = True
             adopted_revision = True
             memory.reviewer_findings = [
-                finding for finding in memory.reviewer_findings if finding.section_id != plan.section_id
+                finding for finding in memory.reviewer_findings if finding not in review.findings
             ]
-            _merge_draft_into_memory(memory, revised, verification.findings)
+            _record_draft_diagnostics(memory, revised, verification.findings)
+            # Refresh before another section Writer or the immediate whole-document
+            # recheck, not only when the entire editing pass finishes.
+            checkpoint()
         except (LLMError, ValidationError, ValueError) as exc:
             unresolved = ReviewerFinding(
                 finding_id=f"{plan.section_id}-document-revision-unavailable",
@@ -662,6 +959,9 @@ def _edit_whole_document(
         try:
             _emit(emit, "Reviewer rechecking whole-document coherence after revision.")
             verification_reviews = checked_document_reviews("report-document-verifier")
+            if "report-document-verifier" not in partial_review_owners:
+                memory.reviewer_findings = [row for row in memory.reviewer_findings
+                                           if row.finding_id != "document-recheck-unavailable"]
             for review in verification_reviews:
                 plan = plans[review.section_id]
                 unresolved = review.findings or ([ReviewerFinding(
@@ -699,6 +999,8 @@ def _maybe_adapt_outline(
     contract = memory.survey_contract if isinstance(memory.survey_contract, dict) else {}
     if memory.document_plan is not None:
         return memory
+    if config.template not in {"", "auto", *BUILTIN_TEMPLATE_NAMES}:
+        return memory
     survey = bool(contract.get("enabled")) and is_survey_report(
         template_name=template.name, style=config.style, report_mode=context.report_mode,
     )
@@ -707,8 +1009,7 @@ def _maybe_adapt_outline(
         return memory
     # Non-survey planning is explicit until real-content validation supports
     # changing its default. Custom templates keep their author's topology.
-    if not survey and (config.outline_strategy != "adaptive" or template.name not in BUILTIN_TEMPLATE_NAMES
-                       or config.template not in {"", "auto", *BUILTIN_TEMPLATE_NAMES}):
+    if not survey and (config.outline_strategy != "adaptive" or template.name not in BUILTIN_TEMPLATE_NAMES):
         return memory
     if not memory.section_plan or (survey and len(memory.section_plan) < 3):
         return memory
@@ -716,9 +1017,10 @@ def _maybe_adapt_outline(
     planned: list[ReportSectionPlan] = []
     visual_candidates: list[dict[str, Any]] = []
     title = ""
+    length_request = None
     for attempt in (1, 2):
         try:
-            planned, visual_candidates, title = _plan_topic_specific_outline(
+            planned, visual_candidates, title, length_request = _plan_topic_specific_outline(
                 client=client,
                 context=context,
                 template=template,
@@ -771,6 +1073,7 @@ def _maybe_adapt_outline(
                 "section_source_budget": _outline_source_budget(memory.survey_contract, config),
                 "visual_candidates": visual_candidates,
                 "title": title,
+                **({"length_request": length_request} if length_request else {}),
             },
             "key_decisions": memory.key_decisions
             + ["Section plan adapted to the requested document and current evidence before drafting."],
@@ -795,6 +1098,11 @@ def _resolve_document_plan(memory: ReportMemory, *, config: ReportRuntimeConfig,
         supplied_figure_handles=[row["handle"] for row in supplied_figure_sources(context)],
     )
     planning = dict(memory.outline_planning)
+    request = planning.pop("length_request", None)
+    if request is not None:
+        if context is None:
+            raise ValueError("Whole-document budget requires the original report context")
+        plan = budget_document_plan(context, memory, config, plan, request)
     planning["document_plan"] = {
         "schema_version": plan.schema_version,
         "status": plan.status,
@@ -819,7 +1127,7 @@ def _plan_topic_specific_outline(
     memory: ReportMemory,
     config: ReportRuntimeConfig,
     retry: bool = False,
-) -> tuple[list[ReportSectionPlan], list[dict[str, Any]], str]:
+) -> tuple[list[ReportSectionPlan], list[dict[str, Any]], str, dict[str, Any] | None]:
     if not (memory.survey_contract.get("enabled") and is_survey_report(
         template_name=template.name, style=config.style, report_mode=context.report_mode,
     )):
@@ -829,18 +1137,7 @@ def _plan_topic_specific_outline(
             label="report-outline-planner-retry" if retry else "report-outline-planner",
         )
         sections = _evidence_outline_sections(response, memory=memory, config=config)
-        title = response.get("title", "")
-        if not isinstance(title, str) or len(title) > 240 or any(ord(char) < 32 for char in title) or title.startswith("#"):
-            raise ValueError("document title must be plain single-line text of at most 240 characters")
-        visuals = response.get("visual_intents", [])
-        if not isinstance(visuals, list) or any(not isinstance(row, dict) for row in visuals):
-            raise ValueError("visual_intents must be a list of visual intent objects")
-        # Validate placement inside the existing one-correction outline call,
-        # not after its allowance has ended. Freeze the same plan later.
-        resolve_document_plan(sections=sections, contract=memory.survey_contract, config=config,
-            visual_candidates=visuals,
-            supplied_figure_handles=[row["handle"] for row in supplied_figure_sources(context)])
-        return sections, visuals, title.strip()
+        return _validated_outline_delivery(response, sections=sections, context=context, memory=memory, config=config)
     response = client.ask_json(
         OUTLINE_PLANNER_SYSTEM,
         _outline_planner_prompt(
@@ -852,8 +1149,15 @@ def _plan_topic_specific_outline(
         ),
         label="report-outline-planner-retry" if retry else "report-outline-planner",
     )
-    sections = _ensure_survey_outline_coverage(_normalize_outline_sections(response))
-    if len(sections) < 5:
+    explicit_length = response.get("length_request") is not None
+    sections = _normalize_outline_sections(response)
+    # An explicit task-scoped length is not permission to force a broad survey
+    # scaffold into a short review. Validate it below inside the same allowance.
+    if not explicit_length:
+        sections = _ensure_survey_outline_coverage(sections)
+    if explicit_length and not 2 <= len(sections) <= 12:
+        raise ValueError("task-scoped survey outline requires 2-12 usable sections")
+    if not explicit_length and len(sections) < 5:
         raise ValueError("outline planner returned fewer than 5 usable sections")
     if _outline_is_overly_template_like(sections):
         raise ValueError(
@@ -887,10 +1191,9 @@ def _plan_topic_specific_outline(
             lower=0,
             upper=20,
         )
-        subsections = _string_items(row.get("subsections"))[:6] or _default_subsections_for_heading(
-            heading,
-            row.get("keywords", []),
-        )
+        subsections = _string_items(row.get("subsections"))[:6]
+        if not subsections and not explicit_length:
+            subsections = _default_subsections_for_heading(heading, row.get("keywords", []))
         if not _section_allows_subsections(heading):
             subsections = []
         evidence_handles = route_section_sources(
@@ -914,8 +1217,31 @@ def _plan_topic_specific_outline(
                 draft_order=_survey_draft_order(heading, index, len(planned_sections)),
             )
         )
+    if explicit_length:
+        return _validated_outline_delivery(response, sections=_dedupe_section_ids(planned),
+            context=context, memory=memory, config=config)
     candidates = response.get("visual_intents") if isinstance(response.get("visual_intents"), list) else []
-    return _dedupe_section_ids(planned), [row for row in candidates if isinstance(row, dict)], ""
+    return _dedupe_section_ids(planned), [row for row in candidates if isinstance(row, dict)], "", None
+
+
+def _validated_outline_delivery(
+    response: dict[str, Any], *, sections: list[ReportSectionPlan], context: ReportContext,
+    memory: ReportMemory, config: ReportRuntimeConfig,
+) -> tuple[list[ReportSectionPlan], list[dict[str, Any]], str, dict[str, Any] | None]:
+    """Shared task/assembly contract, inside the original planning allowance."""
+    title = response.get("title", "")
+    if not isinstance(title, str) or len(title) > 240 or any(ord(char) < 32 for char in title) or title.startswith("#"):
+        raise ValueError("document title must be plain single-line text of at most 240 characters")
+    visuals = response.get("visual_intents", [])
+    if not isinstance(visuals, list) or any(not isinstance(row, dict) for row in visuals):
+        raise ValueError("visual_intents must be a list of visual intent objects")
+    preview_plan = resolve_document_plan(sections=sections, contract=memory.survey_contract, config=config,
+        title=title.strip(), visual_candidates=visuals,
+        supplied_figure_handles=[row["handle"] for row in supplied_figure_sources(context)])
+    budgeted = budget_document_plan(context, memory, config, preview_plan, response.get("length_request"))
+    request = {key: budgeted.length_budget[key] for key in
+        ("unit", "scope", "request_quote", "min_words", "max_words", "target_words")} if budgeted.length_budget else None
+    return sections, visuals, title.strip(), request
 
 
 def _evidence_outline_sections(
@@ -978,6 +1304,7 @@ def _outline_planner_prompt(
     payload = {
         "task": "plan_topic_specific_survey_outline",
         "topic": context.topic,
+        "objective": report_objective(context, memory),
         "report_mode": context.report_mode,
         "template": template.name,
         "style": config.style,
@@ -987,24 +1314,26 @@ def _outline_planner_prompt(
         },
         "survey_contract": compact_contract,
         "required_structure": {
-            "front_matter": ["Abstract", "Introduction"],
-            "back_matter": ["Conclusion"],
-            "body_requirement": "Derive 4-7 topic-specific body sections from current-run evidence.",
+            "longform_default_front_matter": ["Abstract", "Introduction"],
+            "longform_default_back_matter": ["Conclusion"],
+            "body_requirement": "For broad long-form surveys derive 4-7 topic-specific body sections. An explicit task-scoped length takes priority; use only the sections needed for the requested review.",
         },
         "available_source_brief": _outline_source_brief(context),
         "synthesis_excerpt": context.synthesis_markdown[:2500],
+        "synthesis_status": dict(DERIVED_CONTEXT_STATUS),
         "evidence_summary_excerpt": context.evidence_summary[:2500],
             "planning_rules": [
-            "Create 7-10 display sections, including Abstract, Introduction, body sections, and Conclusion.",
+            "The complete original objective governs. For broad long-form surveys prefer 7-10 display sections. For explicit whole-document word requests choose 2-12 purposeful sections within the requested space; do not force front/back matter or unrelated coverage into a short review.",
+            LENGTH_REQUEST_RULE,
             "For long-form surveys, each major body section should include 2-4 planned third-level subsection hints so the final report has a navigable internal structure.",
             "Do not add subsection hints for Abstract, Introduction, or Conclusion; those sections should remain single-section prose.",
             "Body sections must be topic-specific; do not blindly reuse generic headings if the topic suggests better axes.",
             "Do not use the default body headings `Conceptual Foundations and Taxonomy`, `Methods and System Construction`, `Applications and Use Cases`, or `Evaluation, Benchmarks, and Evidence Quality`. Replace them with concrete conceptual axes, method families, task settings, or evaluation regimes evident in the selected literature.",
-            "At least three body headings must identify topic-specific concepts from the source brief. A reader should be able to distinguish this outline from an outline for a different research topic without reading the prose.",
+            "For broad long-form surveys, at least three body headings should identify topic-specific concepts from the source brief. Short task-scoped reviews need no minimum number of body headings; choose axes that distinguish this topic without padding.",
             "Treat required facets as coverage checks, not as section titles or taxonomy axes. Derive reader-facing taxonomy and headings from the source brief and selected papers.",
             "Keep SurveyBench-compatible Markdown in mind: final report will use # Title and ## numbered sections.",
             "Use headings that a human survey reader would expect for this topic.",
-            "Cover foundations/scope, a taxonomy or method families, system or method construction, evaluation practice, applications or domains when relevant, challenges, and future directions.",
+            "For broad long-form surveys, cover foundations/scope, method families, construction, evaluation, applications, challenges and future directions where relevant. For a bounded review, cover the requested question and limitations; do not add unrelated facets to meet a generic checklist.",
             "For long surveys, keep coverage broad even when headings are topic-specific: include related surveys or adjacent fields when evidence permits, and include future directions separately when it improves reader utility.",
             "If a facet has weak evidence, include it only as a limitation or open problem instead of inventing coverage.",
             "Do not mention SimpleAutoResearch, pipeline stages, artifacts, prompts, or evaluation benchmark internals.",
@@ -1012,6 +1341,7 @@ def _outline_planner_prompt(
             "Return the requested JSON object with a non-empty `sections` list; do not return prose outside JSON.",
         ],
         "output_schema": {
+            "length_request": dict(LENGTH_REQUEST_SCHEMA),
             "sections": [
                 {
                     "heading": "Short academic section heading without numbering",
@@ -1039,10 +1369,9 @@ def _outline_planner_prompt(
     }
     if retry:
         payload["retry_instruction"] = (
-            "The previous outline copied the generic structural template instead of organizing the "
-            "available evidence. Keep the required report functions, but name the body sections after "
-            "concrete concepts, method families, task settings, or evaluation regimes from the source brief. "
-            "Return 7-10 valid, reader-facing sections with the required JSON fields."
+            "Correct the invalid outline structure, title, visual intent or exact task-length interpretation. "
+            "Use reader-facing axes from the evidence, not generic fallback headings. "
+            "Return valid reader-facing sections with the required JSON fields and respect the original task length; do not pad to the broad-survey defaults."
         )
     return _json_prompt(payload)
 
@@ -1371,8 +1700,10 @@ def _review_section(
     adopted_sections: list[ReportSectionDraft] | None = None,
     revision_review: ReportSectionReview | None = None,
     previous_draft: ReportSectionDraft | None = None,
+    extra_context: list[ReportToolResult] | None = None,
+    config: ReportRuntimeConfig | None = None,
 ) -> ReportSectionReview:
-    prompt = _reviewer_prompt(
+    view = _reviewer_context(
         context=context,
         template=template,
         memory=memory,
@@ -1380,7 +1711,10 @@ def _review_section(
         draft=draft,
         adopted_sections=adopted_sections,
         revision_review=revision_review, previous_draft=previous_draft,
+        extra_context=extra_context,
+        config=config,
     )
+    prompt = _json_prompt(view)
     if prompt_suffix:
         prompt = prompt + "\n\n" + prompt_suffix
     response = client.ask_json(
@@ -1389,7 +1723,28 @@ def _review_section(
         label=label,
         max_output_tokens=max_output_tokens,
     )
-    return ReportSectionReview.model_validate(_normalize_review_response(response, section))
+    review = ReportSectionReview.model_validate(resolve_review_evidence(_normalize_review_response(response, section), view))
+    current = review_draft_quote_sources(view)
+    validate_finding_anchors(review, current, view)
+    if revision_review is not None and previous_draft is not None and config is not None:
+        # A model pass cannot adopt a correction that makes a complete,
+        # previously fitting delivery violate its frozen length contract.
+        # Reuse the assembler/check; no new draft, quota or persisted state.
+        candidate = view.get("narrative_context", {}).get("delivery_text_observation", {})
+        old_sections = [row for row in (adopted_sections or []) if row.section_id != draft.section_id]
+        previous = delivery_text_observation(context, memory, [*old_sections, previous_draft], config)
+        before = previous.get("length_check", {})
+        after = candidate.get("length_check", {})
+        if (memory.section_plan and not previous.get("pending_draft_sections") and not candidate.get("pending_draft_sections")
+                and previous.get("preview_status") == candidate.get("preview_status") == "pre_render_text_preview"
+                and before.get("status") == "within_range"
+                and after.get("status") in {"above_range", "below_range"}):
+            finding = ReviewerFinding(finding_id=f"{draft.section_id}-delivery-length-regression",
+                type="delivery_length", severity="major", required_action="revise", section_id=draft.section_id,
+                message=f"This candidate changes the canonical delivery from {before['markdown_token_count']} to {after['markdown_token_count']} whitespace-separated Markdown tokens, outside the frozen range {after['min_words']}–{after['max_words']}. Task quotation: {after['request_quote']}",
+                suggested_action="Revise this candidate within the existing allowance, preserving required evidence and assembly-owned text. Do not pad, truncate, expand the contract or edit other adopted sections to pass.")
+            review = review.model_copy(update={"verdict": "revise_required", "findings": [*review.findings, finding]})
+    return review
 
 
 def _draft_section_with_recovery(
@@ -1454,10 +1809,6 @@ def _review_section_with_recovery(
     revision_review: ReportSectionReview | None = None,
     previous_draft: ReportSectionDraft | None = None,
 ) -> ReportSectionReview:
-    evidence_suffix = json.dumps({"extra_tool_context": [row.model_dump(mode="json")
-                                for row in (extra_context or [])[-6:]],
-                                "extra_tool_context_omitted": max(0, len(extra_context or []) - 6)},
-                                ensure_ascii=False) if extra_context else ""
     for attempt in range(2):
         try:
             return _review_section(
@@ -1465,9 +1816,11 @@ def _review_section_with_recovery(
                 section=section, draft=draft,
                 adopted_sections=adopted_sections,
                 revision_review=revision_review, previous_draft=previous_draft,
+                extra_context=extra_context,
+                config=config,
                 max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
                 label=f"{label}-retry" if attempt else label,
-                prompt_suffix=evidence_suffix + ((
+                prompt_suffix=((
                     "Return exactly one JSON object matching the reviewer schema, "
                     "with `revision_instructions` as a list of strings."
                 ) if attempt else ""),
@@ -1561,10 +1914,10 @@ def _writer_prompt(
                 batch_count=source_batch_count,
             ),
         },
-        "template_markdown": drafting_template_guidance(template, memory),
-        "objective": memory.objective,
+        "template_markdown": drafting_template_guidance(template, memory, config),
+        "objective": report_objective(context, memory),
         "document_plan": _compact_document_plan(memory),
-        "narrative_context": narrative_context(memory, section, adopted_sections or []),
+        "narrative_context": narrative_context(memory, section, adopted_sections or [], context=context, config=config),
         "visual_requirements": section_visuals,
         "global_research_context": {
             "evidence_summary": context.evidence_summary[:3000],
@@ -1574,6 +1927,7 @@ def _writer_prompt(
             "execution_evidence": report_execution_evidence(context),
             "synthesis": context.synthesis_markdown[:3000],
             "hypothesis": context.hypothesis_markdown[:1500],
+            "derived_context_status": dict(DERIVED_CONTEXT_STATUS),
         },
         "limitations": memory.limitations[:8],
         "source_handles": _handles_for_section(memory, section),
@@ -1587,13 +1941,14 @@ def _writer_prompt(
             else {}
         ),
         "review_findings": [finding.model_dump(mode="json") for finding in (review.findings if review else [])],
-        "review_instructions": review.revision_instructions if review else [],
+        "review_findings_status": dict(REVIEW_OPINIONS_STATUS),
+        "review_instructions": effective_revision_instructions(review),
         "revision_preservation_requirement": _revision_preservation_requirement(
             section=section,
             previous_draft=previous_draft if include_previous_draft else None,
             review=review,
         ),
-        "extra_tool_context": [result.model_dump(mode="json") for result in extra_context[-6:]],
+        "extra_tool_context": [report_tool_context(result) for result in extra_context[-6:]],
         "extra_tool_context_omitted": max(0, len(extra_context) - 6),
         "style_rules": [
             "Write reader-facing prose appropriate to the requested template and section purpose, not pipeline documentation. Material-based analysis need not be a long academic survey.",
@@ -1605,6 +1960,7 @@ def _writer_prompt(
             "For long survey templates, optimize for topic coverage and reader needs: explain foundations, construction patterns, applications, evaluation practice, related surveys, challenges, and future directions.",
             "Use the resolved document plan as the only local writing plan. Treat its section target and evidence set as planning guidance, not a license to pad prose.",
             "When section_constraints specify target_words, min_citations, or subsections, treat them as local writing constraints for this section.",
+            "The original user's whole-document requirements and current revision instructions take precedence over approximate section targets. A document_plan.length_budget reserves assembly text; section shares are not minimum lengths and must not be padded. Recheck complete delivery length, including its stated unresolved costs.",
             "When length_requirement is present, cover the planned analytical scope and then stop; do not add generic background merely to hit a number.",
             "For reviewer-directed revision, preserve supported content needed for the section; removing redundancy, unsupported claims or irrelevant details may shorten it substantially. For source-batch integration, preserve valid prior coverage.",
             "If subsections are listed, use them as meaningful `###` subheadings unless the section is Abstract, Introduction, or Conclusion.",
@@ -1612,7 +1968,7 @@ def _writer_prompt(
             "Do not add Markdown image links unless a real generated image artifact exists; deterministic rendering handles planned figures separately.",
             "Draft front-matter as if it is written after the body: Abstract and Introduction should summarize the actual synthesis, not generic background.",
             "For each strong conclusion, add a boundary condition or uncertainty statement.",
-            "When a prepared execution context is supplied, treat its project, dataset, benchmark, and runtime limits as authoritative; do not repeat a conflicting literature setting as if it were the executed experiment.",
+            "Prepared execution context declares the requested project, dataset, benchmark and limits; it is not an observation. Describe actual execution from executor records or attributed producer outputs, retaining unverified conditions. Neither a declaration nor a literature setting overrides a recorded observation.",
             "Use verified_execution_results for local baseline/candidate metrics, comparison verdicts, deltas, and resource changes. Do not use literature citations to support local benchmark outcomes.",
             "If verified_execution_results shows that more than one implementation factor changed, describe that as a limitation or scope boundary rather than presenting a single-factor causal claim.",
             "Keep paragraphs under roughly 120 words; split dense synthesis into short paragraphs or concise bullets.",
@@ -1662,9 +2018,9 @@ def _writer_recovery_prompt(
             "Do not return a claim record, a nested object, an explanation, or Markdown fences."
         ),
         "topic": context.topic,
-        "objective": memory.objective,
+        "objective": report_objective(context, memory),
         "document_plan": _compact_document_plan(memory),
-        "narrative_context": narrative_context(memory, section, adopted_sections or []),
+        "narrative_context": narrative_context(memory, section, adopted_sections or [], context=context, config=config),
         "execution_context": _compact_execution_context(context.execution_context),
         "experiment_plan": _compact_experiment_plan(context.experiment_plan),
         "verified_execution_results": _compact_execution_results(context.results),
@@ -1681,7 +2037,7 @@ def _writer_recovery_prompt(
         "visual_requirements": section_visuals,
         "length_requirement": _section_length_requirement(section),
         "source_handles": _handles_for_section(memory, section),
-        "extra_tool_context": [row.model_dump(mode="json") for row in (extra_context or [])[-6:]],
+        "extra_tool_context": [report_tool_context(row) for row in (extra_context or [])[-6:]],
         "extra_tool_context_omitted": max(0, len(extra_context or []) - 6),
         "previous_draft": (
             {
@@ -1691,19 +2047,15 @@ def _writer_recovery_prompt(
             if previous_draft is not None
             else {}
         ),
-        "review_instructions": [
-            *(review.revision_instructions if review else []),
-            *(
-                finding.suggested_action or finding.message
-                for finding in (review.findings if review else [])
-            ),
-        ],
+        "review_instructions": effective_revision_instructions(review),
         "review_findings": [finding.model_dump(mode="json") for finding in (review.findings if review else [])],
+        "review_findings_status": dict(REVIEW_OPINIONS_STATUS),
         "revision_preservation_requirement": _revision_preservation_requirement(
             section=section, previous_draft=previous_draft, review=review),
         "style_rules": [
             "Write evidence-bounded prose appropriate to the requested section purpose using only supplied sources.",
-            "When a prepared execution context is supplied, keep the executed project, dataset, benchmark, and runtime limits authoritative.",
+            "The original user's whole-document requirements and current revision instructions take precedence over approximate section targets. Read document_plan.length_budget when present: assembly text is reserved, section shares are not minima, and unresolved future costs still need final checking.",
+            "Prepared execution context declares requested conditions, not observed execution. Keep executor observations and attributed producer measurements distinct; do not change a recorded value to agree with a declaration.",
             "Use only supplied short citation keys such as [@P1].",
             "Do not include a References section.",
             "`draft_markdown` is mandatory; optional metadata may be empty arrays.",
@@ -1755,28 +2107,46 @@ def _reviewer_prompt(
     adopted_sections: list[ReportSectionDraft] | None = None,
     revision_review: ReportSectionReview | None = None,
     previous_draft: ReportSectionDraft | None = None,
+    extra_context: list[ReportToolResult] | None = None,
+    config: ReportRuntimeConfig | None = None,
 ) -> str:
+    return _json_prompt(_reviewer_context(context=context, template=template, memory=memory,
+        section=section, draft=draft, adopted_sections=adopted_sections,
+        revision_review=revision_review, previous_draft=previous_draft, extra_context=extra_context, config=config))
+
+
+def _reviewer_context(
+    *, context: ReportContext, template: ReportTemplateBundle, memory: ReportMemory,
+    section: ReportSectionPlan, draft: ReportSectionDraft,
+    adopted_sections: list[ReportSectionDraft] | None = None,
+    revision_review: ReportSectionReview | None = None,
+    previous_draft: ReportSectionDraft | None = None,
+    extra_context: list[ReportToolResult] | None = None,
+    config: ReportRuntimeConfig | None = None,
+) -> dict[str, Any]:
     section_visuals = visual_requirements(memory.document_plan, section)
     payload = {
         "task": "review_one_report_section",
         "report_mode": context.report_mode,
         "section": section.model_dump(mode="json"),
         "section_constraints": _section_constraints(section),
-        "criteria_markdown": template.criteria_markdown,
-        "objective": memory.objective,
+        "criteria_markdown": reviewing_template_guidance(template, memory, config),
+        "objective": report_objective(context, memory),
         "document_plan": _compact_document_plan(memory),
-        "narrative_context": narrative_context(memory, section, adopted_sections or []),
-        "revision_context": revision_context(revision_review, previous_draft),
+        "narrative_context": narrative_context(memory, section, adopted_sections or [], context=context, config=config, current_draft=draft),
+        "revision_context": revision_context(revision_review, previous_draft, candidate=draft),
         "visual_requirements": section_visuals,
         "known_limitations": memory.limitations[:8],
         "experiment_plan": _compact_experiment_plan(context.experiment_plan),
-        "allowed_sources": _handles_for_section(memory, section),
+        "allowed_sources": review_source_evidence(_handles_for_section(memory, section)),
         "metric_sources": _prompt_metrics(
             memory, detail=_report_metric_detail(section.heading)
         ),
         "verified_execution_results": _compact_execution_results(context.results),
         "execution_evidence": report_execution_evidence(context),
         "draft": draft.model_dump(mode="json"),
+        "extra_tool_context": [report_tool_context(row) for row in (extra_context or [])[-6:]],
+        "extra_tool_context_omitted": max(0, len(extra_context or []) - 6),
         "tool_policy": {
             "allowed_tools": [
                 "get_paper_brief",
@@ -1795,6 +2165,7 @@ def _reviewer_prompt(
         "review_focus": [
             *CLAIM_SCOPE_RULES,
             *REVIEW_ACTION_RULES,
+            *EVIDENCE_QUOTE_RULES,
             "Does this section fulfill the requested template and its own purpose, rather than reading like a pipeline log? Analysis notes need not be a long academic survey.",
             "Are citations adjacent to paper-specific claims?",
             "If section_constraints include target_words, min_citations, or subsections, did the draft reasonably satisfy them without padding or unsupported citations?",
@@ -1810,7 +2181,7 @@ def _reviewer_prompt(
             "When visual_requirements.tables is non-empty, does this section realize every required table with its planned caption, meaningful columns, and evidence-supported cells? Request revision for a missing or placeholder table.",
             "Does Evaluation include an evidence-quality map or equivalent compact comparison when useful?",
             "Are benchmark limitations and transfer boundaries stated near empirical claims?",
-            "Use verified_execution_results as the authoritative local benchmark record. Do not request a missing comparison table or metric merely because the deterministic execution evidence is appended after this review.",
+            "Use registered result/metric values without promoting their surrounding declarations or interpretations to observed execution. Do not request a missing comparison table or metric merely because the deterministic evidence is appended after this review.",
             "If verified_execution_results shows multiple implementation changes or resource changes, ensure the draft states that limitation; do not treat the presence of those changes alone as an unsupported causal claim.",
             "Do not require literature citations for local baseline/candidate metrics; those values are supported by verified execution results and metric sources.",
             "Is it free of prompt residue such as Hint, Use this paper as, Paper Brief, or Additional synthesis detail?",
@@ -1829,6 +2200,8 @@ def _reviewer_prompt(
                     "claim_id": "",
                     "evidence_handles": [],
                     "suggested_action": "",
+                    "draft_quotes": [{"section_id": section.section_id, "quote": "exact current draft text"}],
+                    "evidence_quotes": [EVIDENCE_QUOTE_SCHEMA],
                 }
             ],
             "context_requests": [
@@ -1843,7 +2216,8 @@ def _reviewer_prompt(
             "notes": "",
         },
     }
-    return _json_prompt(payload)
+    payload["evidence_locator"] = review_evidence_locator(payload)
+    return payload
 
 
 def _json_prompt(payload: dict[str, Any]) -> str:
@@ -1949,6 +2323,14 @@ def _string_items(value: object) -> list[str]:
     return []
 
 
+def _bind_section_target(normalized: dict[str, Any], section: ReportSectionPlan) -> None:
+    """Bind absent/legacy empty identity, never relocate another explicit target."""
+    supplied = normalized.get("section_id")
+    if supplied not in (None, "", section.section_id):
+        raise LLMResponseError(f"Section response targets {supplied!r}, not requested {section.section_id!r}.")
+    normalized["section_id"] = section.section_id
+
+
 def _normalize_draft_response(response: dict[str, Any], section: ReportSectionPlan) -> dict[str, Any]:
     normalized = dict(response)
     nested = normalized.get("draft")
@@ -1965,7 +2347,7 @@ def _normalize_draft_response(response: dict[str, Any], section: ReportSectionPl
             if isinstance(value, str) and value.strip():
                 normalized["draft_markdown"] = value
                 break
-    normalized.setdefault("section_id", section.section_id)
+    _bind_section_target(normalized, section)
     normalized.setdefault("heading", section.heading)
     normalized.setdefault("status", "drafted")
     normalized.setdefault("draft_markdown", "")
@@ -2002,7 +2384,7 @@ def _is_claim_record_response(response: dict[str, Any]) -> bool:
 
 def _normalize_review_response(response: dict[str, Any], section: ReportSectionPlan) -> dict[str, Any]:
     normalized = dict(response)
-    normalized.setdefault("section_id", section.section_id)
+    _bind_section_target(normalized, section)
     normalized.setdefault("verdict", "warning")
     normalized.setdefault("findings", [])
     normalized.setdefault("context_requests", [])
@@ -2031,7 +2413,7 @@ def _normalize_finding(
     item.setdefault("type", "review")
     item.setdefault("severity", "minor")
     item.setdefault("message", item.get("suggested_action") or "Reviewer finding.")
-    item.setdefault("section_id", section.section_id)
+    _bind_section_target(item, section)
     item.setdefault("claim_id", "")
     item.setdefault("evidence_handles", [])
     item.setdefault("suggested_action", "")
@@ -2240,34 +2622,26 @@ def _needs_evidence_recheck(review: ReportSectionReview) -> bool:
     )
 
 
-def _merge_draft_into_memory(
+def _record_draft_diagnostics(
     memory: ReportMemory,
     draft: ReportSectionDraft,
     findings: list[ReviewerFinding],
 ) -> None:
-    # Claims are projected from adopted sections at the checkpoint boundary.
-    # This helper only accumulates diagnostic history, not another prose owner.
+    # Current claims/questions/limits are projected at the checkpoint boundary.
+    # Only diagnostic history accumulates; superseded draft notes do not.
     memory.reviewer_findings = _dedupe_findings(memory.reviewer_findings + findings)
-    for item in draft.open_questions:
-        if item and item not in memory.open_questions:
-            memory.open_questions.append(item)
-    for item in draft.limitations:
-        if item and item not in memory.limitations:
-            memory.limitations.append(item)
     decision = f"Section `{draft.section_id}` drafted with {len(draft.used_sources)} source handle(s)."
     if decision not in memory.key_decisions:
         memory.key_decisions.append(decision)
 
 
 def _dedupe_findings(findings: list[ReviewerFinding]) -> list[ReviewerFinding]:
-    seen: set[tuple[str, str, str]] = set()
     deduped: list[ReviewerFinding] = []
     for finding in findings:
-        key = (finding.type, finding.section_id, finding.message)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(finding)
+        # Identity, action, severity and evidence all belong to the allegation.
+        # Similar prose cannot erase distinct role records or requirements.
+        if finding not in deduped:
+            deduped.append(finding)
     return deduped
 
 
@@ -2282,6 +2656,8 @@ def _iteration(
     tool_results: list[ReportToolResult] | None = None,
     draft: ReportSectionDraft | None = None,
     revision_instructions: list[str] | None = None,
+    finding_checks: list[ReportFindingCheck] | None = None,
+    requested_findings: list[ReviewerFinding] | None = None,
 ) -> ReportIterationRecord:
     return ReportIterationRecord(
         iteration=iteration,
@@ -2294,6 +2670,8 @@ def _iteration(
         tool_results=tool_results or [],
         draft=draft.model_copy(deep=True) if draft is not None else None,
         revision_instructions=revision_instructions or [],
+        finding_checks=finding_checks or [],
+        requested_findings=requested_findings or [],
     )
 
 

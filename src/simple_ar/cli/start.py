@@ -214,7 +214,7 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
     allowed = list(args.allow)
     sources = args.sources
     reproduction_rows: list[str] = []
-    from simple_ar.report.templates import MATERIAL_REPORT_TEMPLATE
+    from simple_ar.report.templates import BUILTIN_TEMPLATE_NAMES, MATERIAL_REPORT_TEMPLATE
     writing_template = args.template or MATERIAL_REPORT_TEMPLATE
     if kind == "writing":
         from simple_ar.report.schema import ReportRuntimeConfig
@@ -303,6 +303,11 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
             rows.extend(['template = "reproduction"', "document_review = true", *reproduction_rows])
         elif kind == "writing":
             rows.extend([f"template = {_quote(writing_template)}", "document_review = true"])
+            if writing_template in {"auto", *BUILTIN_TEMPLATE_NAMES}:
+                # New guided tasks should plan an article from the request and
+                # supplied evidence. Custom templates retain their own topology;
+                # existing TOML tasks and checkpoints are not changed.
+                rows.append('outline_strategy = "adaptive"')
     elif kind == "data_analysis":
         rows.extend(["", "[analysis]", *[f"{key} = {_array(list(value)) if isinstance(value, tuple) else str(value) if type(value) is int else _quote(value)}"
                                              for key, value in analysis.items()]])

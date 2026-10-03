@@ -15,19 +15,46 @@ MATERIAL_REPORT_TEMPLATE = "material_report"
 BUILTIN_TEMPLATE_NAMES = {"source_review", "survey", "survey_long", "experiment", "reproduction", "analysis_report", MATERIAL_REPORT_TEMPLATE}
 
 
-def drafting_template_guidance(template: ReportTemplateBundle, memory: ReportMemory) -> str:
+def _adapted_builtin_plan(
+    template: ReportTemplateBundle, memory: ReportMemory, config: ReportRuntimeConfig | None = None,
+) -> bool:
+    if config is not None and config.template not in {"", "auto", *BUILTIN_TEMPLATE_NAMES}:
+        return False
+    return bool(memory.document_plan is not None and template.name in BUILTIN_TEMPLATE_NAMES
+        and memory.outline_planning.get("strategy") in {"evidence_organized_outline", "topic_specific_outline"}
+        and memory.outline_planning.get("status") == "adapted")
+
+
+def drafting_template_guidance(
+    template: ReportTemplateBundle, memory: ReportMemory, config: ReportRuntimeConfig | None = None,
+) -> str:
     """Do not reintroduce a built-in topology after evidence planning replaces it.
 
     The template's intended-use boundary remains relevant. Its old headings
     and draft order are not a second writing plan; the frozen document owns
-    those responsibilities. Custom/template/survey paths remain unchanged.
+    those responsibilities, including adapted surveys. Custom/unadapted paths
+    remain unchanged.
     """
-    if (memory.document_plan is None or template.name not in BUILTIN_TEMPLATE_NAMES
-            or memory.outline_planning.get("strategy") != "evidence_organized_outline"
-            or memory.outline_planning.get("status") != "adapted"):
+    if not _adapted_builtin_plan(template, memory, config):
         return template.template_markdown
     purpose = re.search(r"(?ims)^##\s+Intended Use\s*$\n(.*?)(?=^##\s|\Z)", template.template_markdown)
     return "## Intended Use\n\n" + purpose.group(1).strip() if purpose else ""
+
+
+def reviewing_template_guidance(
+    template: ReportTemplateBundle, memory: ReportMemory, config: ReportRuntimeConfig | None,
+) -> str:
+    """Default structure is a fallback, not a second frozen document plan.
+
+    Only the explicitly separated built-in structural block is projected out.
+    Factual checks/output requirements remain; custom criteria and old unsplit
+    snapshots are never guessed apart, modified or replaced with newer assets.
+    """
+    if (config is None or config.criteria not in {"", "auto", *BUILTIN_TEMPLATE_NAMES}
+            or not _adapted_builtin_plan(template, memory, config)):
+        return template.criteria_markdown
+    return re.sub(r"(?ms)^## Default Structure\s*\n.*?(?=^## |\Z)", "",
+                  template.criteria_markdown).strip() if "## Default Structure" in template.criteria_markdown else template.criteria_markdown
 
 
 def resolve_research_only_delivery(config, *, source_count: int):

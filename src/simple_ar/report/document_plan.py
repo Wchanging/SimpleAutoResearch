@@ -20,6 +20,20 @@ from simple_ar.report.schema import (
     ReportVisualIntent,
 )
 
+LENGTH_REQUEST_SCHEMA = {
+    "unit": "words", "scope": "whole_document",
+    "request_quote": "exact task quotation, or return null instead of this object",
+    "min_words": 0, "max_words": 0, "target_words": 0,
+}
+LENGTH_REQUEST_RULE = (
+    "For an explicit whole-document word limit/range, return length_request with the exact original task quotation "
+    "and numeric bounds (an exact count uses equal min/max; an upper limit uses min=0). Choose a target within it. "
+    "Section target_words are relative body shares: the controller reserves known title/headings/attachments before "
+    "freezing. References and future generated visuals can add unresolved cost; final delivery must be checked. "
+    "Return null if no such request, or if the request uses pages, characters or exclusions; do not convert units "
+    "or silently infer exclusions."
+)
+
 
 _RENDERABLE_FIGURE_VIEWS = {
     "taxonomy-map",
@@ -99,6 +113,86 @@ def visual_requirements(plan: ReportDocumentPlan | None, section: ReportSectionP
                 payload["delivery"] = "Existing figures are attached after drafting in this frozen owning section. Explain recorded values; do not generate image paths or duplicate the chart. Missing image links in a pre-assembly draft are not a missing deliverable."
             output["figures"].append(payload)
     return output
+
+
+def validate_length_request(value: Any, *, objective: str) -> dict[str, Any]:
+    """Validate a planner interpretation, not infer a word limit from keywords.
+
+    An exact task quotation anchors the interpretation. This does not certify
+    its semantics; the complete original request remains available to review.
+    Unsupported units/scopes must not be silently converted to word counts.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("length_request must be null or an explicit whole-document word request")
+    if value.get("unit") != "words" or value.get("scope") != "whole_document":
+        raise ValueError("length_request supports only explicit whole-document words; do not convert pages, characters or excluded-body scopes")
+    quote = value.get("request_quote")
+    if not isinstance(quote, str) or not quote.strip() or quote.strip() not in objective:
+        raise ValueError("length_request requires an exact quotation from the original task")
+    counts = {key: value.get(key) for key in ("min_words", "max_words", "target_words")}
+    if any(type(number) is not int for number in counts.values()):
+        raise ValueError("length_request word bounds and target must be integers")
+    minimum, maximum, target = (counts[key] for key in ("min_words", "max_words", "target_words"))
+    if not 0 <= minimum <= target <= maximum <= 50000 or target < 1:
+        raise ValueError("length_request requires 0 <= min <= target <= max <= 50000 and a positive target")
+    quoted_numbers = {int(number.replace(",", "")) for number in re.findall(r"\d+(?:,\d{3})*", quote)}
+    if maximum not in quoted_numbers or (minimum and minimum not in quoted_numbers):
+        raise ValueError("length_request bounds must occur in its original task quotation")
+    return {"unit": "words", "scope": "whole_document", "request_quote": quote.strip(), **counts}
+
+
+def check_document_length(budget: Mapping[str, Any], *, objective: str, token_count: int | None) -> dict[str, Any]:
+    """One side-effect-free check for canonical previews and final deliveries.
+
+    A preview remains a preview: the caller owns completeness and adoption.
+    Never infer a legacy contract or certify its semantic interpretation.
+    """
+    if not budget:
+        return {"status": "no_contract"}
+    try:
+        request = validate_length_request(budget, objective=objective)
+    except ValueError as exc:
+        return {"status": "invalid_contract", "reason": str(exc)}
+    if type(token_count) is not int or token_count < 0:
+        return {"status": "unavailable", **request}
+    status = ("below_range" if token_count < request["min_words"] else
+              "above_range" if token_count > request["max_words"] else "within_range")
+    return {"status": status, **request, "markdown_token_count": token_count}
+
+
+def reserve_document_words(
+    plan: ReportDocumentPlan, *, request: Mapping[str, Any], forecast: Mapping[str, Any],
+) -> ReportDocumentPlan:
+    """Allocate model prose after known assembly costs on this same frozen plan.
+
+    Section suggestions are relative weights, not genre-specific minimums.
+    Future citations and generated visuals remain explicit unknowns. This is a
+    planning aid; only the completed canonical preview can check final length.
+    """
+    if not request:
+        return plan
+    fixed = forecast.get("known_fixed_markdown_tokens")
+    if forecast.get("status") != "known_assembly_forecast" or type(fixed) is not int or fixed < 0:
+        raise ValueError("Cannot allocate whole-document words without a known assembly forecast")
+    remaining = request["target_words"] - fixed
+    if not plan.sections or remaining < len(plan.sections):
+        raise ValueError("Known assembly text leaves insufficient prose for the proposed sections; revise organization or clarify the length request, not drop registered evidence")
+    # Give each nonempty planned section one word, then distribute its share.
+    weights = [max(1, section.target_words) for section in plan.sections]
+    shares = [(remaining - len(weights)) * weight / sum(weights) for weight in weights]
+    allocation = [1 + int(share) for share in shares]
+    leftover = remaining - sum(allocation)
+    for index in sorted(range(len(weights)), key=lambda i: shares[i] - int(shares[i]), reverse=True)[:leftover]:
+        allocation[index] += 1
+    return plan.model_copy(update={
+        "target_words": request["target_words"],
+        "sections": [section.model_copy(update={"target_words": words}) for section, words in zip(plan.sections, allocation)],
+        "length_budget": {**request, **forecast, "model_body_target_words": remaining,
+            "interpretation_status": "planner_interpretation_anchored_to_task_not_semantically_verified",
+            "guidance": "The original request governs. Section shares are approximate, not minima. Known assembly text is reserved; unresolved future costs are not zero. Recheck the complete delivery, and trim redundancy rather than necessary evidence."},
+    })
 
 
 def supplied_figure_sources(context: ReportContext | None) -> list[dict[str, Any]]:

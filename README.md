@@ -19,7 +19,8 @@ neither format turns unverified material into a validated scientific result.
 > **Source-visible preview.** Structured setup and bounded native workflows are
 > available. Free-form conversation, general autonomous reproduction preparation,
 > and integrated external coding Agents are not yet offered. A completed session
-> is not a scientific-correctness or publication-quality certificate.
+> is not a scientific-correctness or publication-quality certificate. Invalid model
+> reviews can leave required work unresolved; inspect the audit before using a draft.
 >
 > A project license has not yet been selected. Public repository access is not
 > an open-source license.
@@ -54,13 +55,17 @@ These are intended workflow benefits, not evidence that the assistant outperform
 a general coding Agent. Cross-task quality and first-time user experience remain
 under validation.
 
-For writing from existing evidence, built-in templates also support opt-in
-evidence-organized sections (`report.outline_strategy = "adaptive"`). See the
+Guided writing from existing evidence uses adaptive article planning with built-in
+templates. Expert TOML tasks can opt in with `report.outline_strategy = "adaptive"`.
+Custom templates and saved tasks keep their structure. See the
 [writing configuration](docs/CONFIG_REFERENCE.md#writing-from-supplied-material).
 This organizes the draft; it does not certify claims or create missing experiments.
 Writing keeps imported analysis packages complete but links full row records by
 default, instead of filling the prose with raw tables. Set `report.data_tables = "full"`
 if row-by-row tables are part of the requested report.
+Experiment reports likewise keep full recorded evidence in a linked, portable
+package by default. This reduces duplicate provenance tables, not required results
+or review; recording evidence does not independently verify scientific claims.
 With adaptive planning, existing data figures can have an explicit owning section
 even when several sections cite the same material; assembly supplies the actual
 registered images rather than relying on model-created file links.
@@ -264,6 +269,8 @@ revision and prose revision are different actions—not one generic retry.
 - **Writing:** review, source backtracking and revision are model-assisted.
   Citation/metric audits and a compiled PDF do not certify correct claims,
   complete bibliography, academic style or publication readiness.
+  Check both the final audit and the reader-facing report: a section-level
+  `pass` does not resolve an outstanding whole-document requirement.
 - **Data and figures:** descriptive bars and numeric-coordinate line/scatter
   plots are supported. Arbitrary statistical inference, heatmaps and free-form
   scientific illustration are not covered by this guided data path.

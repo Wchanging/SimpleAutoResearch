@@ -16,6 +16,20 @@ from simple_ar.report.tool_gateway import ReportToolGateway
 
 
 class NarrativeTests(unittest.TestCase):
+    def test_length_observation_uses_full_adopted_drafts_not_prompt_excerpts(self):
+        plan = ReportSectionPlan(section_id="discussion", heading="Discussion",
+                                 goal="Interpret the observed results.", target_words=100)
+        draft = ReportSectionDraft(section_id="results", heading="Results",
+                                   draft_markdown="observed " * 1500)
+        memory = ReportMemory(section_plan=[
+            ReportSectionPlan(section_id="results", heading="Results", goal="Report observations.", target_words=200), plan,
+        ])
+        observation = narrative_context(memory, plan, [draft])["length_observation"]
+        self.assertEqual(observation["adopted_token_count"], 1500)
+        self.assertEqual(observation["planned_total_words"], 300)
+        self.assertEqual(observation["this_section_target_words"], 100)
+        self.assertIn("including tables", observation["counting_rule"])
+
     def test_supplied_material_results_are_not_restricted_to_local_experiment_artifacts(self):
         context = ReportContext(topic="Explain an existing draft", report_mode="supplied_materials")
         template = load_report_template_bundle(report_mode=context.report_mode,

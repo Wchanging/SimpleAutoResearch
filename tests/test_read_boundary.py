@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from simple_ar.research.contracts import DocumentRecord, TextChunk
 from simple_ar.research.documents.ingest import DocumentBundle
@@ -16,6 +17,59 @@ from simple_ar.research.evidence.reader import (
 
 
 class ReadBoundaryTests(unittest.TestCase):
+    def test_initial_selection_uses_source_positions_not_ingest_priority(self) -> None:
+        chunks = [TextChunk(chunk_id=f"unrelated-id-{30-index}", document_id="p",
+            source_path="paper.md", line_start=10 * index + 1, line_end=10 * index + 5,
+            text="Calibration heteroscedasticity." if index == 14 else "Ordinary source prose.",
+            metadata={"section": "body", "section_id": "body"}) for index in range(30)]
+        body_first = chunks[10:] + chunks[:10]
+        shuffled = chunks[::2] + chunks[1::2]
+        for focus in ("", "Calibration heteroscedasticity"):
+            expected = select_reading_chunks(chunks, max_chunks=6, focus=focus)
+            for stored in (body_first, shuffled):
+                before = list(stored)
+                actual = select_reading_chunks(stored, max_chunks=6, focus=focus)
+                self.assertEqual(actual, expected)
+                self.assertEqual(stored, before)
+                self.assertEqual([row.line_start for row in actual], sorted(row.line_start for row in actual))
+            self.assertEqual(len(expected), 6)
+        focused = select_reading_chunks(body_first, max_chunks=6, focus="Calibration heteroscedasticity")
+        self.assertIn(chunks[14], focused)
+        self.assertIn(chunks[13], focused)
+
+    def test_initial_source_order_is_per_document_with_legacy_position_fallback(self) -> None:
+        chunks = [TextChunk(chunk_id=f"{document}-{index}", document_id=document,
+            source_path=f"{document}.md", line_start=index + 1, text="Ordinary source prose.")
+            for index in range(12) for document in ("p", "q")]
+        reverse_within_sources = list(reversed(chunks))
+        selected = select_reading_chunks(reverse_within_sources, max_chunks=6)
+        self.assertEqual(len(selected), 6)
+        for document in ("p", "q"):
+            original = [row for row in chunks if row.document_id == document]
+            self.assertEqual([row for row in selected if row.document_id == document],
+                list(select_representative_chunks(original, max_chunks=3)))
+        for rows in (
+            [TextChunk(chunk_id="z", document_id="p", source_path="p.md", line_start=20, text="Late."),
+             TextChunk(chunk_id="a", document_id="p", source_path="p.md", text="Unlocated.")],
+            [TextChunk(chunk_id="z", document_id="p", source_path="one.md", line_start=20, text="Late."),
+             TextChunk(chunk_id="a", document_id="p", source_path="two.md", line_start=1, text="Other file.")],
+        ):
+            self.assertEqual(select_reading_chunks(rows, max_chunks=12), tuple(rows))
+
+    def test_initial_focus_neighbors_do_not_cross_source_files(self) -> None:
+        chunks = [TextChunk(chunk_id=f"c-{index}", document_id="p", source_path="one.md",
+            text="Ordinary source prose.", metadata={"section_id": f"s-{index}"}) for index in range(30)]
+        chunks[14] = TextChunk(chunk_id="target", document_id="p", source_path="one.md",
+            text="Calibration heteroscedasticity.", metadata={"section_id": "target"})
+        chunks[13] = TextChunk(chunk_id="foreign-neighbor", document_id="p", source_path="two.md",
+            text="Unrelated file.", metadata={"section": "body", "section_id": "foreign"})
+        with patch("simple_ar.research.evidence.reader.select_representative_chunks",
+                   wraps=select_representative_chunks) as overview:
+            selected = select_reading_chunks(chunks, max_chunks=6, focus="Calibration heteroscedasticity")
+        self.assertEqual(overview.call_args.kwargs["required_chunk_ids"], ("target", "c-15"))
+        self.assertIn(chunks[14], selected)
+        self.assertIn(chunks[15], selected)
+
     def test_task_focus_retrieves_unsampled_passage_without_expanding_budget(self) -> None:
         chunks = [TextChunk(chunk_id=f"c-{index}", document_id="p", text=f"General discussion {index}.")
                   for index in range(80)]
@@ -94,6 +148,76 @@ class ReadBoundaryTests(unittest.TestCase):
         selected = select_representative_chunks(chunks, max_chunks=4)
         self.assertEqual({chunk.metadata["section"] for chunk in selected},
                          {"abstract", "method", "experiments", "results"})
+
+    def test_overview_covers_each_section_boundary_before_spreading_interiors(self) -> None:
+        chunks = [TextChunk(chunk_id=f"s-{section}-{index}", document_id="p", source_path="p.md",
+            line_start=section * 100 + index + 1, text="Ordinary retained text.",
+            metadata={"section_id": f"s-{section}", "section": "body"})
+            for section in range(3) for index in range(15)]
+        for cap in (3, 6, 9):
+            selected = select_representative_chunks(chunks, max_chunks=cap)
+            self.assertEqual(len(selected), cap)
+            for section in range(3):
+                indices = {int(row.chunk_id.rsplit("-", 1)[-1]) for row in selected
+                           if row.metadata["section_id"] == f"s-{section}"}
+                self.assertEqual(len(indices), cap // 3)
+                self.assertIn(0, indices)
+                if cap >= 6:
+                    self.assertIn(14, indices)
+                if cap == 9:
+                    self.assertIn(7, indices)
+            self.assertEqual(selected, select_representative_chunks(list(reversed(chunks)), max_chunks=cap))
+
+    def test_task_pins_count_toward_section_and_document_coverage(self) -> None:
+        chunks = [TextChunk(chunk_id=f"{document}-{section}-{index}", document_id=document,
+            source_path=f"{document}.md", line_start=section * 100 + index + 1, text="Retained text.",
+            metadata={"section_id": f"{document}-{section}", "section": "body"})
+            for document in ("p", "q") for section in range(2) for index in range(8)]
+        pins = ("p-0-0", "p-0-1", "p-0-2")
+        selected = select_representative_chunks(chunks, max_chunks=8, required_chunk_ids=pins)
+        ids = {row.chunk_id for row in selected}
+        self.assertTrue(set(pins) <= ids)
+        self.assertEqual(len(selected), 8)
+        self.assertEqual(sum(row.document_id == "p" for row in selected), 4)
+        self.assertIn("p-1-0", ids)
+        for section in range(2):
+            self.assertIn(f"q-{section}-0", ids)
+            self.assertIn(f"q-{section}-7", ids)
+        for cap in (0, 1, 2):
+            bounded = select_representative_chunks(chunks, max_chunks=cap, required_chunk_ids=pins)
+            self.assertEqual(len(bounded), cap)
+
+    def test_pins_do_not_reintroduce_excluded_bibliography(self) -> None:
+        chunks = [TextChunk(chunk_id="body", document_id="p", text="Substantive source."),
+                  TextChunk(chunk_id="ref", document_id="p", text="Bibliography.",
+                            metadata={"section": "references"})]
+        self.assertEqual(select_representative_chunks(chunks, max_chunks=5,
+            required_chunk_ids=("body", "ref", "unknown")), (chunks[0],))
+
+    def test_unequal_sections_keep_cap_pins_and_comparable_source_order(self) -> None:
+        for document_count in (1, 2, 3):
+            chunks = [TextChunk(chunk_id=f"{document}-{section}-{index}", document_id=str(document),
+                source_path=f"{document}.md", line_start=section * 100 + index + 1, text="Retained text.",
+                metadata={"section_id": f"{document}-{section}"})
+                for document in range(document_count) for section in range(3) for index in range(section + 2)]
+            # Document discovery order is retained, especially when the budget
+            # cannot cover all sources. Only reverse comparable positions within
+            # each source; global document permutation is a different policy.
+            rearranged = [chunk for document in range(document_count)
+                          for chunk in reversed(chunks) if chunk.document_id == str(document)]
+            for cap in range(len(chunks) + 2):
+                for pins in ((), tuple(row.chunk_id for row in chunks[1:4])):
+                    selected = select_representative_chunks(chunks, max_chunks=cap, required_chunk_ids=pins)
+                    ids = {row.chunk_id for row in selected}
+                    self.assertEqual(len(selected), min(cap, len(chunks)))
+                    self.assertEqual(len(ids), len(selected))
+                    self.assertTrue(set(pins[:cap]) <= ids)
+                    self.assertEqual(selected, select_representative_chunks(rearranged,
+                        max_chunks=cap, required_chunk_ids=pins))
+                    if not pins:
+                        counts = [sum(row.document_id == str(document) for row in selected)
+                                  for document in range(document_count)]
+                        self.assertLessEqual(max(counts) - min(counts), 1)
 
     def test_paper_notes_receive_only_their_own_source_excerpts(self) -> None:
         class NoteClient:

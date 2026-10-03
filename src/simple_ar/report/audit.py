@@ -9,6 +9,8 @@ from typing import Any, Mapping
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
 from simple_ar.literature.models import Paper, bibliographic_details
+from simple_ar.report.document_plan import check_document_length
+from simple_ar.report.narrative import report_objective
 from simple_ar.report.projection import _declared_report_metrics, _verified_experiment_evidence
 from simple_ar.report.schema import (
     FACTUAL_REVIEW_FINDING_TYPES,
@@ -28,6 +30,10 @@ NUMBER_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])[-+]?(?:(?:\d{1,3}(?:,\d{3})+)|(?:\d+(?:\.\d+)?))"
     r"(?:[eE][-+]?\d+)?"
     r"(?:%|ms|s|sec|seconds)?(?![A-Za-z0-9_])"
+)
+METRIC_VISIBILITY_WARNING = (
+    "Some experiment metrics could not be mechanically matched to their values in the report body; "
+    "this does not establish omission or numerical contradiction."
 )
 
 
@@ -50,6 +56,8 @@ class ReportAuditCapabilityRequest:
     memory: ReportMemory | Mapping[str, Any]
     report_body_ref: ArtifactRef | None = None
     citation_cleanup_ref: ArtifactRef | None = None
+    experiment_evidence_ref: ArtifactRef | None = None
+    experiment_records_ref: ArtifactRef | None = None
 
 
 def build_report_audit(
@@ -66,10 +74,12 @@ def build_report_audit(
     findings = citation.warnings + metric.warnings + claim.warnings
     reviewer_findings = (
         list(memory.reviewer_findings)
-        + _mechanical_findings(findings)
+        + _mechanical_findings(findings, verify_messages={METRIC_VISIBILITY_WARNING}
+                               if metric.unmatched_metrics else set())
         + _reader_facing_handle_findings(report_body)
         + _source_scope_findings(report_body, context)
         + _bibliographic_findings(report_body, context)
+        + _document_length_findings(report, context, memory)
     )
     status = _overall_status([citation.status, metric.status, claim.status])
     if any(
@@ -93,8 +103,33 @@ def build_report_audit(
             "V2.4 audit combines local rule gates with Writer/Reviewer findings when agent mode is enabled.",
             "Mechanical checks remain conservative and provenance-focused.",
             "Semantic support of final prose is unchecked; metric visibility and section review do not prove final conclusions.",
+            "Length checking uses only an explicit task-anchored whole-document word budget in the frozen plan. Its whitespace-separated Markdown token count is not language-independent word counting or semantic validation of that interpretation; absent contracts are not inferred.",
         ],
     )
+
+
+def _document_length_findings(report: str, context: ReportContext, memory: ReportMemory) -> list[ReviewerFinding]:
+    """Check final text against the existing frozen interpretation, not a new policy."""
+    budget = memory.document_plan.length_budget if memory.document_plan else {}
+    request = check_document_length(budget, objective=report_objective(context, memory),
+                                    token_count=len(report.split()) if report.strip() else None)
+    if request["status"] == "no_contract":
+        return []  # Legacy prose requirements remain for review, not silent migration.
+    if request["status"] == "invalid_contract":
+        return [ReviewerFinding(finding_id="document-length-contract", type="delivery_length", severity="major",
+            required_action="verify", message=f"Saved document length contract cannot be checked: {request['reason']}",
+            suggested_action="Inspect the original task and frozen plan; do not infer replacement bounds or rewrite completed history.")]
+    if request["status"] == "unavailable":
+        return [ReviewerFinding(finding_id="document-length-unavailable", type="delivery_length", severity="major",
+            required_action="verify", message="Final document text is unavailable for its recorded whole-document length check.",
+            suggested_action="Supply the actual final report, not the model body or forecast alone.")]
+    actual = request["markdown_token_count"]
+    if request["status"] == "within_range":
+        return []
+    return [ReviewerFinding(finding_id="document-length-outside-budget", type="delivery_length", severity="major",
+        required_action="revise",
+        message=f"Final report has {actual} whitespace-separated Markdown tokens, outside its recorded whole-document range {request['min_words']}–{request['max_words']}. Task quotation: {request['request_quote']}",
+        suggested_action="Check the original requirement and counting convention, then revise the document within its existing allowance. Preserve necessary evidence; do not remove registered attachments or expand the budget to pass.")]
 
 
 def _bibliographic_findings(report_body: str, context: ReportContext) -> list[ReviewerFinding]:
@@ -194,6 +229,36 @@ def run_report_audit_capability(
             memory=report_memory,
         )
     )
+    attachment_error = ""
+    if (request.experiment_evidence_ref is None and request.experiment_records_ref is None
+            and re.search(r"\]\(experiment_evidence\.(?:md|json)\)", report_body)):
+        attachment_error = "Report links native experiment records but no registered record package was supplied to audit."
+    if request.experiment_evidence_ref is not None or request.experiment_records_ref is not None:
+        if request.experiment_evidence_ref is None or request.experiment_records_ref is None:
+            raise ValueError("Experiment attachment audit requires both recorded JSON and Markdown inputs.")
+        from simple_ar.report.projection import experiment_record_snapshot, experiment_record_markdown
+        package = context.read_input_json(request.experiment_evidence_ref)
+        records_text = context.read_input_text(request.experiment_records_ref)
+        sources = package.get("source_artifacts", [])
+        if not isinstance(sources, list) or any(not isinstance(row, dict)
+                or not isinstance(row.get("source"), dict) or not isinstance(row["source"].get("path"), str)
+                or not isinstance(row.get("copied_path"), str) for row in sources):
+            raise ValueError("Experiment attachment source manifest is malformed.")
+        directory = context.require_input(request.experiment_evidence_ref).parent.resolve()
+        files_present = all(re.fullmatch(r"experiment_sources/[0-9]{3}(?:\.[A-Za-z0-9_-]+)?", row["copied_path"])
+            and (directory / row["copied_path"]).is_file()
+            and not (directory / row["copied_path"]).is_symlink()
+            and (directory / row["copied_path"]).resolve().is_relative_to(directory) for row in sources)
+        if (package.get("schema_version") != "report_experiment_evidence.v1"
+                or package.get("records") != experiment_record_snapshot(report_context)
+                or records_text != experiment_record_markdown(report_context, sources) or not files_present):
+            attachment_error = "Experiment attachment differs from its recorded report inputs or a declared source copy is missing."
+    if attachment_error:
+        audit.metric_audit.status = "failed"
+        audit.metric_audit.warnings.append(attachment_error)
+        audit.status = "failed"
+        audit.reviewer_findings.append(ReviewerFinding(finding_id="experiment-attachment-consistency",
+            type="metric_mismatch", severity="major", message=attachment_error))
     if request.citation_cleanup_ref is not None:
         removed = context.read_input_json(request.citation_cleanup_ref)["removed_citations"]
         if removed:
@@ -295,7 +360,7 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
     warnings: list[str] = []
     status = "passed"
     if unmatched:
-        warnings.append("Some experiment metrics were not visible with their values in the report body.")
+        warnings.append(METRIC_VISIBILITY_WARNING)
         status = "warning"
     table_errors = [
         *_measurement_table_errors(report_body, context),
@@ -414,7 +479,7 @@ def _claim_audit(memory: ReportMemory) -> ClaimAudit:
     )
 
 
-def _mechanical_findings(messages: list[str]) -> list[ReviewerFinding]:
+def _mechanical_findings(messages: list[str], *, verify_messages: set[str] | None = None) -> list[ReviewerFinding]:
     ids = count(1)
     return [
         ReviewerFinding(
@@ -422,6 +487,11 @@ def _mechanical_findings(messages: list[str]) -> list[ReviewerFinding]:
             type="mechanical_audit",
             severity="minor" if "not cited" in message.lower() else "major",
             message=message,
+            required_action="verify" if message in (verify_messages or ()) else None,
+            suggested_action=("Inspect the current prose or table against the registered metric, condition, unit and displayed precision. "
+                "Do not infer omission from a failed literal match or force raw field names into the article. "
+                "Revise only a confirmed missing or incorrect result; unresolved associations remain unverified."
+                if message in (verify_messages or ()) else ""),
         )
         for message in messages
     ]

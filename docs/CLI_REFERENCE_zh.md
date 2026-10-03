@@ -6,6 +6,7 @@
 另写报告使用 `research-report --outline-strategy auto|template|adaptive`。
 非综述自适应需显式启用，自定义模板与保存的 checkpoint 计划不变；
 TOML 对应 `[report].outline_strategy`。
+新建 `start --kind writing` 引导任务使用内置模板时保存 `adaptive`；自定义模板和已保存任务保留原结构。
 
 数据展示：`research-session --report-data-tables linked|full` 或
 `research-report --data-tables linked|full`，对应 `[report].data_tables`。

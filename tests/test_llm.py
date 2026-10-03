@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -110,6 +111,53 @@ class LLMParsingTests(unittest.TestCase):
 
     def test_accept_single_object_array_from_compatible_gateway(self) -> None:
         self.assertEqual(parse_json_object('[{"a": 1}]'), {"a": 1})
+
+    def test_literal_unknown_string_escapes_preserve_scientific_and_path_text(self) -> None:
+        raw = r'{"math":"\(p\\lesssim0.02\)","path":"C:\work\q","nested":{"value":3}}'
+        expected = {"math": r"\(p\lesssim0.02\)", "path": r"C:\work\q", "nested": {"value": 3}}
+        for wrapper in (raw, "```json\n" + raw + "\n```", "Result:\n" + raw + "\nEnd."):
+            with self.subTest(wrapper=wrapper):
+                self.assertEqual(parse_json_object(wrapper), expected)
+        self.assertIn(r"\(", raw)
+
+    def test_valid_escapes_keep_the_standard_decoder_meaning(self) -> None:
+        raw = r'{"text":"line\n\t\/\"\\","unicode":"\u00e9","braces":"{text}"}'
+        self.assertEqual(parse_json_object(raw), json.loads(raw))
+        self.assertEqual(parse_json_object("prefix " + raw + " suffix"), json.loads(raw))
+
+    def test_damaged_outer_json_never_salvages_a_nested_record(self) -> None:
+        for raw in (
+            '{"broken":, "nested":{"looks_valid":true}}',
+            '{"unclosed":{"looks_valid":true}',
+            '{"broken":"unterminated, "nested":{"looks_valid":true}}',
+            '[{"looks_valid":true},',
+            'prefix [{"looks_valid":true}, suffix',
+            '{"broken":,} {"looks_valid":true}',
+            '```json\n{"broken":, "nested":{"looks_valid":true}}\n```',
+        ):
+            with self.subTest(raw=raw):
+                self.assertIsNone(parse_json_object(raw))
+
+    def test_unknown_escape_recovery_does_not_guess_unicode_controls_or_delimiters(self) -> None:
+        for raw in (
+            r'{"text":"\uNOTHEX","nested":{"valid":true}}',
+            r'{"text":"\q\uNOTHEX","nested":{"valid":true}}',
+            '{"text":"\\q\nunescaped newline","nested":{"valid":true}}',
+            r'{"text":"\q","nested":{"valid":true}',
+            r'{\q"nested":{"valid":true}}',
+        ):
+            with self.subTest(raw=raw):
+                self.assertIsNone(parse_json_object(raw))
+
+    def test_ask_json_literal_escape_recovery_does_not_send_another_request(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat"))
+        raw = r'{"draft_markdown":"\(x\\in R\)","nested":{"value":4}}'
+        response = {"choices": [{"message": {"content": raw}}]}
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response) as call:
+            self.assertEqual(client.ask_json("system", "user"),
+                {"draft_markdown": r"\(x\in R\)", "nested": {"value": 4}})
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(response["choices"][0]["message"]["content"], raw)
 
     def test_ask_json_reads_chat_content_blocks(self) -> None:
         client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat"))
@@ -806,6 +854,92 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(client_kwargs["max_retries"], 0)
         self.assertEqual(client_kwargs["base_url"], "https://example.test/v1")
         self.assertNotIn("timeout", client_kwargs)
+
+    def test_stream_failure_retries_without_adopting_partial_text(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 3, "total_tokens": 200})
+        client = LLMClient(
+            LLMSettings(api_key="test-key", api_mode="chat", stream=True,
+                        max_output_tokens=10, retry_attempts=2), budget_ledger=ledger,
+        )
+
+        class InterruptedStream:
+            closed = False
+
+            def __iter__(self):
+                yield {"choices": [{"delta": {"content": "unfinished"}}]}
+                raise RuntimeError("gateway decoder stopped unexpectedly")
+
+            def close(self):
+                self.closed = True
+
+        interrupted = InterruptedStream()
+        complete = iter([
+            {"choices": [{"delta": {"content": "complete"}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}},
+        ])
+        with patch("simple_ar.integrations.llm._call_openai_sdk",
+                   side_effect=[interrupted, complete]) as call, patch(
+                       "simple_ar.integrations.llm.time.sleep"):
+            self.assertEqual(client.ask("system", "user"), "complete")
+        self.assertTrue(interrupted.closed)
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual([row.status for row in ledger.entries], ["unknown", "settled"])
+        self.assertEqual(ledger.entries[1].actual["total_tokens"], 5)
+
+    def test_gateway_http2_failure_before_stream_iteration_is_uncertain_and_retryable(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 3, "total_tokens": 200})
+        client = LLMClient(
+            LLMSettings(api_key="test-key", api_mode="chat", stream=True,
+                        max_output_tokens=10, retry_attempts=2), budget_ledger=ledger,
+        )
+        with patch("simple_ar.integrations.llm._call_openai_sdk", side_effect=[
+            RuntimeError("Upstream HTTP/2 stream failed"),
+            {"choices": [{"message": {"content": "ok"}}]},
+        ]) as call, patch("simple_ar.integrations.llm.time.sleep"):
+            self.assertEqual(client.ask("system", "user"), "ok")
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(ledger.entries[0].status, "unknown")
+
+    def test_unclassified_provider_failure_does_not_imply_zero_charge_or_blind_retry(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 3, "total_tokens": 200})
+        client = LLMClient(
+            LLMSettings(api_key="test-key", api_mode="chat", max_output_tokens=10,
+                        retry_attempts=3), budget_ledger=ledger,
+        )
+        with patch("simple_ar.integrations.llm._call_openai_sdk",
+                   side_effect=RuntimeError("unexpected upstream failure")) as call:
+            with self.assertRaises(LLMError):
+                client.ask("system", "user")
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(ledger.entries[0].status, "unknown")
+        self.assertEqual(ledger.entries[0].actual, {"llm_requests": 1})
+        self.assertEqual(ledger.unknown_dimensions(), ("total_tokens",))
+
+    def test_sdk_status_metadata_overrides_misleading_body_text(self) -> None:
+        class ProviderFailure(RuntimeError):
+            def __init__(self, status, message):
+                super().__init__(message)
+                self.status_code = status
+
+        for status in (400, 401, 403):
+            with self.subTest(status=status):
+                ledger = BudgetLedger({"llm_requests": 3, "total_tokens": 200})
+                client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat",
+                    retry_attempts=3), budget_ledger=ledger)
+                with patch("simple_ar.integrations.llm._call_openai_sdk",
+                           side_effect=ProviderFailure(status, "503 service unavailable mentioned in invalid input")) as call:
+                    with self.assertRaises(LLMError):
+                        client.ask("system", "user")
+                self.assertEqual(call.call_count, 1)
+                self.assertEqual(ledger.entries[0].status, "released")
+
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", retry_attempts=2))
+        with patch("simple_ar.integrations.llm._call_openai_sdk", side_effect=[
+            ProviderFailure(503, "unknown upstream response"),
+            {"choices": [{"message": {"content": "ok"}}]},
+        ]) as call, patch("simple_ar.integrations.llm.time.sleep"):
+            self.assertEqual(client.ask("system", "user"), "ok")
+        self.assertEqual(call.call_count, 2)
 
     def test_openai_sdk_backend_passes_explicit_timeout_only(self) -> None:
         with patch("openai.OpenAI") as openai_cls:

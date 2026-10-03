@@ -16,9 +16,85 @@ from simple_ar.report.audit import build_report_audit
 from simple_ar.integrations.llm import LLMError
 from simple_ar.research.contracts import DocumentRecord, TextChunk
 from simple_ar.research.documents.ingest import DocumentBundle
+from report_review_fixtures import draft_quotes
 
 
 class SourceBacktrackingTests(unittest.TestCase):
+    def test_new_and_saved_synthesis_briefs_are_not_primary_verification(self):
+        from simple_ar.report.narrative import report_tool_context
+        context = ReportContext(topic="Unconfirmed comparison", report_mode="survey",
+            synthesis_markdown="Recorded comparison asserts two records describe one study.")
+        new = ReportToolGateway(context).call(ReportToolCall(tool_name="get_synthesis_brief"))
+        old = ReportToolResult(tool_name="get_synthesis_brief", content={
+            "text": context.synthesis_markdown, "truncated": False,
+            "total_characters": len(context.synthesis_markdown), "matching_handles": []})
+        before = old.model_dump(mode="json")
+        self.assertEqual(report_tool_context(old)["content"], new.content)
+        self.assertEqual(new.content["text_status"]["evidence_role"], "recorded_derived_context")
+        self.assertEqual(new.content["text_status"]["independent_verification"], "not_performed")
+        self.assertEqual(old.model_dump(mode="json"), before)
+        self.assertEqual(new.content["text"], context.synthesis_markdown)
+
+    def test_reprojecting_new_brief_preserves_coverage_and_author_counts(self):
+        from simple_ar.report.narrative import report_tool_context, _prompt_handle_view
+        handle = SourceHandle(handle="paper:projected", kind="paper", citation_key="P1", metadata={
+            "bibliography": {"authors": [f"Author {i}" for i in range(30)],
+                             "notes": [f"Bibliography note {i}" for i in range(7)]},
+            "reading_notes": {"method": "long method " * 200,
+                              "claim_scopes": [{"claim": f"Claim {i}"} for i in range(8)]}})
+        projected = _prompt_handle_view(handle)
+        tool = ReportToolResult(tool_name="get_paper_brief", content={"handles": [projected]})
+        twice = report_tool_context(tool)["content"]["handles"][0]
+        self.assertEqual(twice, projected)
+        self.assertEqual(twice["metadata"]["bibliography"]["recorded_authors_count"], 30)
+        self.assertEqual(twice["metadata"]["bibliography"]["author_names_omitted_from_prompt"], 24)
+        self.assertEqual(twice["metadata"]["bibliography"]["notes_omitted"], 3)
+        self.assertTrue(twice["metadata"]["reading_notes_truncated"])
+        self.assertEqual(twice["metadata"]["reading_notes"]["claim_scopes_omitted"], 4)
+        self.assertEqual(report_tool_context(tool, source_evidence=[projected])["content"]["handles"],
+                         [{"handle": handle.handle, "evidence_reference": "source_evidence"}])
+
+    def test_document_brief_references_only_exact_shared_evidence(self):
+        from simple_ar.report.narrative import report_tool_context, _prompt_handle_view
+        handle = SourceHandle(handle="paper:shared", kind="paper", citation_key="P1",
+            metadata={"evidence_passages": [{"chunk_id": "c1", "text": "Original condition."}]})
+        tool = ReportToolResult(tool_name="get_paper_brief", content={
+            "handles": [handle.model_dump(mode="json")],
+            "source_front_matter": {"text": "A separately fetched title."}})
+        original = tool.model_dump(mode="json")
+        reference = report_tool_context(tool, source_evidence=[_prompt_handle_view(handle)])
+        self.assertEqual(reference["content"]["handles"], [{"handle": "paper:shared",
+                                                           "evidence_reference": "source_evidence"}])
+        self.assertEqual(reference["content"]["source_front_matter"], original["content"]["source_front_matter"])
+        different = handle.model_copy(update={"metadata": {"evidence_passages": [
+            {"chunk_id": "c2", "text": "Conflicting condition."}]}})
+        retained = report_tool_context(tool, source_evidence=[_prompt_handle_view(different)])
+        self.assertEqual(retained["content"]["handles"], [_prompt_handle_view(handle)])
+        self.assertEqual(tool.model_dump(mode="json"), original)
+
+    def test_briefs_share_bounded_projection_without_losing_source_lookup(self):
+        from simple_ar.report.narrative import report_tool_context
+        handle = SourceHandle(handle="paper:large", kind="paper", paper_id="large", citation_key="P1",
+            metadata={"document_id": "doc", "reading_notes": {"method": "method " * 12000},
+                      "evidence_passages": [{"chunk_id": "c3", "text": "Original passage " * 1000}]})
+        context = ReportContext(topic="Check evidence", report_mode="survey", source_handles=[handle])
+        before = handle.model_dump(mode="json")
+        brief = ReportToolGateway(context, documents=self.documents).call(
+            ReportToolCall(tool_name="get_paper_brief", arguments={"citation_key": "P1"}))
+        projected = brief.content["handles"][0]
+        self.assertTrue(projected["metadata"]["reading_notes_truncated"])
+        self.assertTrue(projected["metadata"]["evidence_passages"][0]["truncated"])
+        self.assertEqual(projected["tool_args"], {"citation_key": "P1"})
+        self.assertLess(len(json.dumps(brief.model_dump(mode="json"))), 6000)
+        legacy = ReportToolResult(tool_name="get_paper_brief", content={"handles": [before]})
+        legacy_before = legacy.model_dump(mode="json")
+        self.assertEqual(report_tool_context(legacy)["content"]["handles"], [projected])
+        self.assertEqual(legacy.model_dump(mode="json"), legacy_before)
+        self.assertEqual(handle.model_dump(mode="json"), before)
+        original = ReportToolGateway(context, documents=self.documents).call(ReportToolCall(
+            tool_name="get_neighbor_chunks", arguments={"handle": handle.handle, "chunk_id": "c3"}))
+        self.assertIn("Original passage 3", json.dumps(original.content))
+
     def setUp(self):
         self.context = ReportContext(topic="Source check", report_mode="survey", source_handles=[SourceHandle(
             handle="paper:p", kind="paper", paper_id="p", metadata={"document_id": "doc",
@@ -127,7 +203,8 @@ class SourceBacktrackingTests(unittest.TestCase):
             def ask_json(inner, system, prompt, **kwargs):
                 self.assertIn("evidence-7", prompt)
                 self.assertNotIn("evidence-0", prompt)
-                self.assertIn('"extra_tool_context_omitted": 2', prompt)
+                payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                self.assertEqual(payload["extra_tool_context_omitted"], 2)
                 return {"verdict": "pass"}
         kwargs = self.report_kwargs(Client())
         section = kwargs["memory"].section_plan[0]
@@ -169,7 +246,8 @@ class SourceBacktrackingTests(unittest.TestCase):
                 if label == "report-reviewer-method-evidence":
                     self.assertIn("2 percent", prompt)
                     return {"verdict": "revise_required", "findings": [{"finding_id": "wrong-number",
-                        "type": "unsupported_claim", "severity": "major", "message": "Source says 2, not 99."}]}
+                        "type": "unsupported_claim", "severity": "major", "message": "Source says 2, not 99.",
+                        "draft_quotes": draft_quotes(prompt, "method")}]}
                 if "reviewer" in label:
                     self.assertIn("2 percent", prompt)
                     return {"verdict": "pass", "findings": []}
@@ -209,7 +287,8 @@ class SourceBacktrackingTests(unittest.TestCase):
                 if label == "report-reviewer-method-evidence":
                     raise LLMError("Provider unavailable")
                 if "reviewer" in label:
-                    if "extra_tool_context" in prompt:
+                    payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                    if payload["extra_tool_context"]:
                         return {"verdict": "pass"}
                     return {"verdict": "pass", "context_requests": [{"tool_name": "search_source_chunks",
                         "arguments": {"handle": "paper:p", "query": "original passage"}}]}
@@ -226,6 +305,67 @@ class SourceBacktrackingTests(unittest.TestCase):
         self.assertNotIn("report-writer-method", labels[before:])
         self.assertEqual(resumed_kwargs["gateway"].call_counts["search_source_chunks"], 1)
         self.assertEqual(len(result.tool_results), 1)
+
+    def test_mixed_lookup_is_saved_before_writer_failure_and_reused_on_resume(self):
+        self._check_mixed_lookup_checkpoint(interrupt_at_save=False)
+
+    def test_mixed_lookup_checkpoint_interruption_does_not_refetch_on_resume(self):
+        self._check_mixed_lookup_checkpoint(interrupt_at_save=True)
+
+    def _check_mixed_lookup_checkpoint(self, *, interrupt_at_save):
+        saved, labels = [], []
+        test = self
+        class Client:
+            resumed = False
+            def ask_json(inner, system, prompt, *, label="", **kwargs):
+                labels.append(label)
+                if "reviewer" in label:
+                    if label.endswith("-round-2"):
+                        return {"verdict": "pass"}
+                    payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                    requests = [] if inner.resumed else [{"tool_name": "search_source_chunks",
+                        "arguments": {"handle": "paper:p", "query": "original passage"}}]
+                    if inner.resumed:
+                        test.assertTrue(payload["extra_tool_context"])
+                        test.assertIn("Original passage", json.dumps(payload["extra_tool_context"]))
+                    return {"verdict": "revise_required", "context_requests": requests,
+                        "findings": [{"finding_id": "qualify", "type": "unsupported_claim",
+                            "severity": "major", "required_action": "revise", "message": "Use the source condition.",
+                            "draft_quotes": draft_quotes(prompt, "method")}]}
+                if "reviser" in label:
+                    test.assertIn("Original passage", prompt)
+                    if not inner.resumed:
+                        raise LLMError("Writer cannot send after the lookup")
+                    return {"section_id": "method", "draft_markdown": "Qualified source claim."}
+                test.assertFalse(inner.resumed, "Saved pending draft must not be redrafted")
+                return {"section_id": "method", "draft_markdown": "Unqualified source claim."}
+        client = Client()
+        def checkpoint(row):
+            saved.append(json.loads(json.dumps(row)))
+            if interrupt_at_save and row["tool_results"]:
+                raise RuntimeError("Interrupted after mixed lookup checkpoint")
+        kwargs = self.report_kwargs(client, max_review_iterations=1)
+        failure = RuntimeError if interrupt_at_save else LLMError
+        with self.assertRaises(failure):
+            run_report_agent(**kwargs, checkpoint_sink=checkpoint)
+        self.assertEqual(len(saved[-1]["tool_results"]), 1)
+        self.assertEqual(saved[-1]["sections"], [])
+        self.assertEqual(saved[-1]["pending_draft"]["draft_markdown"], "Unqualified source claim.")
+        event = saved[-1]["iterations"][-1]
+        self.assertEqual(event["action"], "review_context")
+        self.assertEqual(event["tool_results"], saved[-1]["tool_results"])
+        self.assertEqual(event["findings"][0]["finding_id"], "qualify")
+        before = len(labels)
+        client.resumed = True
+        resumed = self.report_kwargs(client, max_review_iterations=1)
+        with patch.object(resumed["gateway"], "call", wraps=resumed["gateway"].call) as call:
+            result = run_report_agent(**resumed, completed_checkpoint=saved[-1])
+            call.assert_not_called()
+        self.assertEqual(resumed["gateway"].call_counts["search_source_chunks"], 1)
+        self.assertEqual(len(result.tool_results), 1)
+        self.assertEqual(result.sections[0].draft_markdown, "Qualified source claim.")
+        self.assertNotIn("report-writer-method", labels[before:])
+        self.assertEqual(sum("reviser" in label for label in labels[before:]), 1)
 
     def test_resume_does_not_reset_the_source_tool_allowance(self):
         saved = []
@@ -285,7 +425,8 @@ class SourceBacktrackingTests(unittest.TestCase):
                 if label == "report-document-reviewer":
                     return {"section_reviews": [{"section_id": "method", "verdict": "revise_required",
                         "findings": [{"finding_id": "f", "type": "unsupported_claim", "severity": "major",
-                            "message": "Check source before adopting a rewrite."}]}]}
+                            "message": "Check source before adopting a rewrite.",
+                            "draft_quotes": draft_quotes(prompt, "method")}]}]}
                 if label.startswith("report-document-verifier-method"):
                     return {"verdict": "pass", "context_requests": [{"tool_name": "search_source_chunks",
                         "arguments": {"handle": "paper:p", "query": "missing condition"}}]}
@@ -311,7 +452,7 @@ class SourceBacktrackingTests(unittest.TestCase):
                 if label == "report-document-reviewer":
                     return {"section_reviews": [{"section_id": "method", "verdict": "revise_required",
                         "findings": [{"finding_id": "f", "type": "unsupported_claim", "severity": "major",
-                            "message": "Qualify the claim."}]}]}
+                            "message": "Qualify the claim.", "draft_quotes": draft_quotes(prompt, "method")}]}]}
                 if label.startswith("report-document-verifier") and "method" not in label:
                     return {"section_reviews": [{"section_id": "method", "verdict": "pass",
                         "context_requests": [{"tool_name": "search_source_chunks",
@@ -353,7 +494,8 @@ class SourceBacktrackingTests(unittest.TestCase):
                     self.assertIn("chunk_id", spec["input_schema"]["properties"])
                     return {"section_reviews": [{"section_id": "method", "verdict": "revise_required",
                         "findings": [{"finding_id": "f", "type": "evidence_gap", "severity": "major",
-                                      "message": "Check original passage", "section_id": "method"}],
+                                      "message": "Check original passage", "section_id": "method",
+                                      "draft_quotes": draft_quotes(prompt, "method")}],
                         "context_requests": [{"tool_name": "get_neighbor_chunks", "arguments": {"handle": "paper:p"}}]}]}
                 if label in {"report-document-reviser-method", "report-document-verifier-method"}:
                     self.assertIn("Original passage 3", prompt)

@@ -16,6 +16,38 @@ from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory, R
 
 
 class ReportMeasurementAuditTests(unittest.TestCase):
+    def test_unlocated_display_requires_verification_not_assumed_rewrite(self):
+        from simple_ar.report.schema import finding_requires_resolution
+        for name, body in (
+            ("group_A_mean_error", "| Group | Mean error |\n|---|---:|\n| A | 0.123 |"),
+            ("peak_signal_voltage", "The peak signal was 2.75 V."),
+            ("median_queue_time_ms", "No timing result was included."),
+        ):
+            with self.subTest(name=name):
+                value = 2.75 if "voltage" in name else 0.1234
+                context = ReportContext(topic="Displayed records", report_mode="experiment",
+                    metric_sources=[MetricSource(metric_id="observed", name=name, value=value, artifact="values.json")])
+                audit = build_report_audit(report=body, report_body=body, context=context, memory=ReportMemory())
+                self.assertEqual(audit.metric_audit.unmatched_metrics, ["observed"])
+                self.assertEqual(audit.status, "warning")
+                finding = next(row for row in audit.reviewer_findings if row.type == "mechanical_audit")
+                self.assertEqual(finding.required_action, "verify")
+                self.assertTrue(finding_requires_resolution(finding))
+                self.assertIn("does not establish omission", finding.message)
+                self.assertIn("condition, unit and displayed precision", finding.suggested_action)
+
+    def test_confirmed_table_error_is_not_downgraded_to_display_verification(self):
+        context = ReportContext(topic="Altered record", report_mode="experiment",
+            metric_sources=[MetricSource(metric_id="observed", name="accuracy", value=0.8,
+                artifact="values.json", label="candidate")])
+        body = _metric_ledger(context.metric_sources).replace("0.8", "0.9")
+        audit = build_report_audit(report=body, report_body=body, context=context, memory=ReportMemory())
+        self.assertEqual(audit.status, "failed")
+        self.assertEqual(audit.metric_audit.status, "failed")
+        confirmed = [row for row in audit.reviewer_findings if "Measurement table row" in row.message]
+        self.assertTrue(confirmed)
+        self.assertTrue(all(row.required_action is None for row in confirmed))
+
     def test_multi_condition_appendix_uses_measured_protocol_pairs(self):
         history = []
         sources = []

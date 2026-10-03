@@ -202,7 +202,26 @@ class ReportDocumentPlan(ReportModel):
     target_words: int = 0
     visual_budget: dict[str, int] = Field(default_factory=dict)
     visual_intents: list[ReportVisualIntent] = Field(default_factory=list)
+    length_budget: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda value: not value)
     notes: list[str] = Field(default_factory=list)
+
+
+class ReportDraftQuote(ReportModel):
+    """An exact heading/body quotation visible in an identified current section."""
+
+    section_id: str
+    quote: str
+
+
+class ReportEvidenceQuote(ReportModel):
+    """A source quotation or a controller-resolved current field selection."""
+
+    pointer: str
+    quote: str
+    role: Literal["declaration", "executor_record", "producer_output", "registered_result",
+                  "recorded_material", "derived_context"]
+    mode: Literal["quotation", "field_reference"] = Field(
+        default="quotation", exclude_if=lambda mode: mode == "quotation")
 
 
 class ReviewerFinding(ReportModel):
@@ -217,6 +236,8 @@ class ReviewerFinding(ReportModel):
     evidence_handles: list[str] = Field(default_factory=list)
     suggested_action: str = ""
     required_action: Literal["advisory", "revise", "verify"] | None = None
+    draft_quotes: list[ReportDraftQuote] = Field(default_factory=list, exclude_if=lambda quotes: not quotes)
+    evidence_quotes: list[ReportEvidenceQuote] = Field(default_factory=list, exclude_if=lambda quotes: not quotes)
 
 
 # A model may label a factual defect "minor" even when it remains unresolved.
@@ -333,6 +354,17 @@ class ReportSectionDraft(ReportModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class ReportFindingCheck(ReportModel):
+    """A judgement of a prior opinion against the current adopted draft."""
+
+    finding_id: str
+    status: Literal["resolved", "not_applicable", "unresolved"]
+    explanation: str
+    # Old string quotations remain target-section-only, never guessed by text.
+    draft_quotes: list[str | ReportDraftQuote] = Field(default_factory=list)
+    evidence_quotes: list[ReportEvidenceQuote] = Field(default_factory=list, exclude_if=lambda quotes: not quotes)
+
+
 class ReportSectionReview(ReportModel):
     """Reviewer output for one drafted report section."""
 
@@ -342,6 +374,7 @@ class ReportSectionReview(ReportModel):
     context_requests: list[ReportToolCall] = Field(default_factory=list)
     revision_instructions: list[str] = Field(default_factory=list)
     notes: str = ""
+    finding_checks: list[ReportFindingCheck] = Field(default_factory=list, exclude_if=lambda checks: not checks)
 
     @field_validator("revision_instructions", mode="before")
     @classmethod
@@ -400,6 +433,10 @@ class ReportIterationRecord(ReportModel):
     adopted: bool | None = None
     # Review instructions belong to the existing review event, not a second ledger.
     revision_instructions: list[str] = Field(default_factory=list)
+    finding_checks: list[ReportFindingCheck] = Field(default_factory=list, exclude_if=lambda checks: not checks)
+    # Rejected structured judgments remain diagnostic evidence, never findings.
+    rejected_review: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda review: not review)
+    requested_findings: list[ReviewerFinding] = Field(default_factory=list, exclude_if=lambda findings: not findings)
 
 
 class AgentReportResult(ReportModel):

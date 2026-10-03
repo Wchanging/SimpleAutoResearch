@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+import shutil
 from typing import Any
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
@@ -30,9 +31,11 @@ from simple_ar.report.citations import (
     strip_references_section,
 )
 from simple_ar.report.figures import ReportFigureRecord
+from simple_ar.report.data_delivery import analysis_delivery_block, attach_delivery_block
 from simple_ar.report.ports import DeterministicFigureRenderer, FigureRenderer
 from simple_ar.report.schema import (
     ReportDocumentPlan,
+    ReportContext,
     ReportRuntimeConfig,
     ReportSectionDraft,
 )
@@ -56,6 +59,8 @@ class ReportAssemblyRequest:
     table_analyses: tuple[ArtifactRef, ...] = ()
     # Source identity projected from the Writer snapshot, not another plan.
     analysis_handles: Mapping[str, str] = field(default_factory=dict)
+    experiment_context: ReportContext | Mapping[str, Any] | None = None
+    experiment_inputs: tuple[ArtifactRef, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.title.strip():
@@ -64,6 +69,11 @@ class ReportAssemblyRequest:
         object.__setattr__(self, "papers", tuple(dict(paper) for paper in self.papers))
         object.__setattr__(self, "citation_key_map", dict(self.citation_key_map))
         object.__setattr__(self, "analysis_handles", dict(self.analysis_handles))
+        if self.experiment_context is not None and not isinstance(self.experiment_context, ReportContext):
+            object.__setattr__(self, "experiment_context", ReportContext.model_validate(self.experiment_context))
+        object.__setattr__(self, "experiment_inputs", tuple(self.experiment_inputs))
+        if self.experiment_inputs and (self.experiment_context is None or self.experiment_context.report_mode != "experiment"):
+            raise ValueError("Experiment source copies require an experiment context.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +93,50 @@ def assemble_report_document(
     figure_renderer: FigureRenderer | None = None,
 ) -> ReportAssemblyResult:
     """Assemble explicit section drafts without changing their meaning."""
+
+    report_body, cited, removed_citations, config, document_plan = _prepare_assembly_text(request)
+    renderer = figure_renderer or DeterministicFigureRenderer()
+    if request.paired_comparisons and figure_renderer is None:
+        from simple_ar.report.figures import add_paired_measurement_figures
+        rendered = add_paired_measurement_figures(report_markdown=report_body, report_dir=report_dir,
+            comparisons=list(request.paired_comparisons), summaries=list(request.paired_summaries), config=config.figures)
+    else:
+        rendered = renderer.render(
+            report_markdown=report_body,
+            report_dir=report_dir,
+            config=config.figures,
+            template_name=request.template_name,
+            document_plan=document_plan,
+        )
+    # Keep figures in the citation-key body shared by Markdown, audit, and
+    # downstream exports instead of leaving them only in the display report.
+    report_body = rendered.report_markdown
+    return ReportAssemblyResult(
+        report_markdown=_display_report_text(report_body, cited, config, request.template_name),
+        report_body_markdown=report_body,
+        figures=tuple(rendered.figures),
+        removed_citations=tuple(removed_citations),
+    )
+
+
+def preview_report_document(request: ReportAssemblyRequest) -> ReportAssemblyResult:
+    """Use canonical text assembly without files or figure rendering.
+
+    Registered attachment text must already be placed in request.sections.
+    This predicts headings, citation display and references, not future renderer
+    output, attachment rechecks or the scientific validity of the content.
+    """
+    body, cited, removed, config, _ = _prepare_assembly_text(request)
+    return ReportAssemblyResult(
+        report_markdown=_display_report_text(body, cited, config, request.template_name),
+        report_body_markdown=body, removed_citations=tuple(removed),
+    )
+
+
+def _prepare_assembly_text(
+    request: ReportAssemblyRequest,
+) -> tuple[str, list[Paper], list[str], ReportRuntimeConfig, ReportDocumentPlan | None]:
+    """The single text preparation owner for read-only preview and delivery."""
 
     if request.table_analyses:
         raise ValueError("Analysis packages require run_report_capability with registered inputs.")
@@ -110,6 +164,9 @@ def assemble_report_document(
             else None
         )
     )
+    if request.experiment_context is not None:
+        from simple_ar.report.projection import _append_verified_experiment_evidence
+        sections = _append_verified_experiment_evidence(sections, request.experiment_context, config)
     report_body = assemble_report_sections(
         # The frozen plan is shared by drafting, review and final assembly.
         # Legacy/custom plans without a title retain the caller's heading.
@@ -121,22 +178,11 @@ def assemble_report_document(
         request.papers,
         request.citation_key_map,
     )
-    renderer = figure_renderer or DeterministicFigureRenderer()
-    if request.paired_comparisons and figure_renderer is None:
-        from simple_ar.report.figures import add_paired_measurement_figures
-        rendered = add_paired_measurement_figures(report_markdown=report_body, report_dir=report_dir,
-            comparisons=list(request.paired_comparisons), summaries=list(request.paired_summaries), config=config.figures)
-    else:
-        rendered = renderer.render(
-            report_markdown=report_body,
-            report_dir=report_dir,
-            config=config.figures,
-            template_name=request.template_name,
-            document_plan=document_plan,
-        )
-    # Keep figures in the citation-key body shared by Markdown, audit, and
-    # downstream exports instead of leaving them only in the display report.
-    report_body = rendered.report_markdown
+    return report_body, cited, removed_citations, config, document_plan
+
+
+def _display_report_text(report_body: str, cited: list[Paper], config: ReportRuntimeConfig, template_name: str) -> str:
+    """Format the same reader-facing text before or after figure insertion."""
     citation_map = citation_display_map(cited)
     report = append_references_section(
         display_citation_numbers(report_body, citation_map),
@@ -146,15 +192,10 @@ def assemble_report_document(
     report = apply_section_numbering(
         report,
         mode=config.section_numbering,
-        template_name=request.template_name,
+        template_name=template_name,
         style=config.style,
     )
-    return ReportAssemblyResult(
-        report_markdown=report,
-        report_body_markdown=report_body,
-        figures=tuple(rendered.figures),
-        removed_citations=tuple(removed_citations),
-    )
+    return report
 
 
 def _prepare_report_citations(
@@ -219,6 +260,7 @@ def run_report_capability(
 
     renderer = figure_renderer or DeterministicFigureRenderer()
     request, attachments, imported_figures = _attach_table_analyses(context, request)
+    attachments.extend(_attach_experiment_records(context, request))
     # Leave the default renderer implicit so the assembly boundary can choose
     # the structured paired-measurement renderer when experiment comparisons
     # are present.  A caller-supplied renderer remains authoritative.
@@ -314,11 +356,48 @@ def run_report_capability(
     )
 
 
+def _attach_experiment_records(context: CapabilityContext, request: ReportAssemblyRequest) -> list[ArtifactRef]:
+    """Keep the exact projected records and explicitly registered source files.
+
+    Fixed local links work in a session attempt or a standalone package. Old
+    session paths remain provenance, never assumed relative download links.
+    No directory discovery, model calls or scientific certification occurs.
+    """
+    from simple_ar.report.projection import experiment_record_snapshot, experiment_record_markdown
+
+    recorded = request.experiment_context
+    if recorded is None or recorded.report_mode != "experiment" or not recorded.metric_sources:
+        return []
+    attachments = []
+    sources = []
+    for index, ref in enumerate(dict.fromkeys(request.experiment_inputs), 1):
+        path = context.require_input(ref)
+        input_root = (context.input_store or context.store).root.resolve()
+        if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(input_root):
+            raise ValueError("Experiment records must be regular registered files inside their source store.")
+        local = f"experiment_sources/{index:03d}{path.suffix}"
+        target = context.store.resolve(local)
+        if target.is_symlink() or not target.resolve().is_relative_to(context.store.root.resolve()):
+            raise ValueError("Experiment copy destination must stay inside the report store.")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+        attachments.append(context.store.ref(local, kind="experiment_source_copy"))
+        sources.append({"source": ref.to_dict(), "copied_path": local})
+    attachments.append(context.store.write_json("experiment_evidence.json", {
+        "schema_version": "report_experiment_evidence.v1", "records": experiment_record_snapshot(recorded),
+        "source_artifacts": sources, "source_copy_scope": "explicit_registered_files_only" if sources else "projected_records_only",
+        "interpretation": "Declarations, executor records, producer outputs and derived values keep their original ownership; this package does not independently verify implementation or science.",
+    }, kind="report_experiment_evidence", schema="report_experiment_evidence.v1", producer="report.assembly"))
+    attachments.append(context.store.write_text("experiment_evidence.md", experiment_record_markdown(recorded, sources),
+        kind="report_experiment_evidence", schema="report_experiment_evidence.v1", producer="report.assembly"))
+    return attachments
+
+
 def _attach_table_analyses(
     context: CapabilityContext, request: ReportAssemblyRequest,
 ) -> tuple[ReportAssemblyRequest, list[ArtifactRef], list[ReportFigureRecord]]:
     """Copy registered data into the report; leave pure text assembly unchanged."""
-    from simple_ar.result_analysis.table import copy_analysis_package, table_values_markdown
+    from simple_ar.result_analysis.table import copy_analysis_package
 
     config = request.config if isinstance(request.config, ReportRuntimeConfig) else ReportRuntimeConfig.model_validate(request.config)
     attachments: list[ArtifactRef] = []
@@ -328,41 +407,21 @@ def _attach_table_analyses(
     plan = request.document_plan
     if plan is not None and not isinstance(plan, ReportDocumentPlan):
         plan = ReportDocumentPlan.model_validate(plan)
-    added_sections: list[ReportSectionDraft] = []
     for index, ref in enumerate(request.table_analyses, start=1):
         prefix = f"analyses/analysis-{index:03d}"
         result = copy_analysis_package(context.require_input(ref), context.store.root / prefix)
-        # Keep the recoverable package even when report figure inclusion is off.
-        blocks = [f"[Rechecked descriptive data and editable figures]({prefix}/analysis.md).",
-                  "Arithmetic was checked against copied user data; collection and scientific validity were not verified.",
-                  f"All {result['row_count']} input rows and rechecked values are retained in the copied package; no rows were sampled."]
-        if config.data_tables == "full":
-            blocks.extend(["", table_values_markdown(result)])
-        else:
-            blocks.append(f"[Complete numerical records]({prefix}/analysis.json); full row tables are not repeated in this prose report.")
-        handle = request.analysis_handles.get(ref.path)
-        placements = [row.section_id for row in plan.visual_intents
-                      if row.kind == "figure" and row.view == "supplied-data" and row.evidence_handles == [handle]] if plan else []
-        owners = placements or ([row.section_id for row in plan.sections if handle and handle in row.evidence_handles] if plan else [])
-        owner = owners[0] if len(owners) == 1 and any(row.section_id == owners[0] for row in sections) else ""
-        if config.figures.enabled and config.figures.mode != "off":
-            for figure in result["figures"]:
-                path = f"{prefix}/{figure['path']}"
-                blocks.extend(["", f"![Descriptive data]({path})", "", figure["caption"]])
-                figures.append(ReportFigureRecord(figure_id=f"supplied-analysis-{index}-{len(figures)+1}",
-                    title="Supplied descriptive data", path=path,
-                    caption=figure["caption"], source_artifacts=[ref.path], anchor=owner or f"supplied_analysis_{index}"))
-        body = "\n".join(blocks)
-        if owner:
-            sections = [row.model_copy(update={"draft_markdown": row.draft_markdown + "\n\n" + body})
-                        if row.section_id == owner else row for row in sections]
-        else:
-            added_sections.append(ReportSectionDraft(section_id=f"supplied_analysis_{index}",
-                heading=f"Supplied Descriptive Data {index}", draft_markdown=body))
+        block = analysis_delivery_block(result, index=index,
+            handle=request.analysis_handles.get(ref.path, ""), config=config, plan=plan,
+            section_ids=[row.section_id for row in sections])
+        for figure in block["figures"]:
+            figures.append(ReportFigureRecord(figure_id=f"supplied-analysis-{index}-{len(figures)+1}",
+                title="Supplied descriptive data", path=figure["path"],
+                caption=figure["caption"], source_artifacts=[ref.path], anchor=block["section_id"]))
+        sections = list(attach_delivery_block(sections, block))
         attachments.extend(context.store.ref(item.relative_to(context.store.root), kind="analysis_attachment")
                            for item in (context.store.root / prefix).rglob("*") if item.is_file())
     if request.table_analyses:
-        request = replace(request, sections=(*sections, *added_sections), table_analyses=())
+        request = replace(request, sections=tuple(sections), table_analyses=())
     return request, attachments, figures
 
 
@@ -384,5 +443,6 @@ __all__ = [
     "ReportAssemblyRequest",
     "ReportAssemblyResult",
     "assemble_report_document",
+    "preview_report_document",
     "run_report_capability",
 ]

@@ -671,6 +671,14 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def _reading_source_order(chunks: tuple[TextChunk, ...] | list[TextChunk]) -> list[TextChunk]:
+    """Use comparable retained positions, not ingest priority, within a source."""
+    documents: dict[str, list[TextChunk]] = {}
+    for chunk in chunks:
+        documents.setdefault(chunk.document_id, []).append(chunk)
+    return [chunk for rows in documents.values() for chunk in order_source_chunks(rows)]
+
+
 def select_representative_chunks(
     chunks: tuple[TextChunk, ...] | list[TextChunk], *, max_chunks: int,
     required_chunk_ids: tuple[str, ...] = (),
@@ -679,38 +687,34 @@ def select_representative_chunks(
 
     This is a sampling policy, not a claim that the selected text represents
     unseen parts of a paper. Bibliography chunks are excluded when the same
-    document has substantive text; section-less extraction is spread across
-    the document instead of taking only its opening pages.
+    document has substantive text. Section coverage includes retained boundaries
+    before filling interiors; task pins count toward that coverage and the cap.
     """
     if max_chunks < 1:
         return ()
+    chunks = _reading_source_order(chunks)
     required = set(required_chunk_ids)
     pinned = [chunk for chunk in chunks
               if chunk.chunk_id in required and chunk.metadata.get("section") != "references"][:max_chunks]
     pinned_ids = {chunk.chunk_id for chunk in pinned}
-    max_chunks -= len(pinned)
     documents: dict[str, list[TextChunk]] = {}
     for chunk in chunks:
-        if chunk.chunk_id in pinned_ids:
-            continue
         documents.setdefault(chunk.document_id, []).append(chunk)
     candidates = {
         document_id: [row for row in rows if row.metadata.get("section") != "references"] or rows
         for document_id, rows in documents.items()
     }
-    quotas = {document_id: 0 for document_id in candidates}
-    remaining = max_chunks
+    quotas = {document_id: sum(row.chunk_id in pinned_ids for row in rows)
+              for document_id, rows in candidates.items()}
+    remaining = max_chunks - len(pinned)
     while remaining:
-        advanced = False
-        for document_id, rows in candidates.items():
-            if remaining == 0:
-                break
-            if quotas[document_id] < len(rows):
-                quotas[document_id] += 1
-                remaining -= 1
-                advanced = True
-        if not advanced:
+        available = [document_id for document_id, rows in candidates.items()
+                     if quotas[document_id] < len(rows)]
+        if not available:
             break
+        document_id = min(available, key=quotas.get)
+        quotas[document_id] += 1
+        remaining -= 1
 
     selected_ids: set[str] = set(pinned_ids)
     for document_id, rows in candidates.items():
@@ -721,29 +725,45 @@ def select_representative_chunks(
         for index, row in enumerate(rows):
             section_id = str(row.metadata.get("section_id") or document_id)
             sections.setdefault(section_id, []).append(index)
-        anchors = [positions[len(positions) // 2] for positions in sections.values()]
-        if len(anchors) > quota:
+        chosen = {index for index, row in enumerate(rows) if row.chunk_id in pinned_ids}
+        anchors = [positions[0] for positions in sections.values()
+                   if not any(index in chosen for index in positions)]
+        if len(anchors) > quota - len(chosen):
             # Section type is useful for an overview, but never substitutes
             # for the actual text. Reserve a few distinct kinds before
             # spreading the remaining windows across the document.
             by_kind: dict[str, list[int]] = {}
             for index in anchors:
                 by_kind.setdefault(str(rows[index].metadata.get("section") or "body"), []).append(index)
-            chosen: set[int] = set()
+            represented_kinds = {str(rows[index].metadata.get("section") or "body") for index in chosen}
             for kind in ("abstract", "method", "experiments", "results", "limitations",
                          "discussion", "conclusion", "related_work", "introduction"):
                 if len(chosen) == quota:
                     break
                 options = by_kind.get(kind, [])
-                if options:
+                if options and kind not in represented_kinds:
                     chosen.add(options[len(options) // 2])
         else:
-            chosen = set(anchors)
+            chosen.update(anchors)
         while len(chosen) < quota:
-            pool = anchors if len(chosen) < len(anchors) else list(range(len(rows)))
+            unseen_anchors = [index for index in anchors if index not in chosen]
+            if unseen_anchors:
+                pool = unseen_anchors
+                covered = chosen
+            else:
+                # Global spacing overweights long neighboring sections and
+                # ignores definitions/qualifications at section boundaries.
+                # Share extra windows across sections, counting task pins;
+                # spread within each section instead of across the whole PDF.
+                positions = min(
+                    (positions for positions in sections.values() if any(index not in chosen for index in positions)),
+                    key=lambda positions: sum(index in chosen for index in positions),
+                )
+                pool = positions
+                covered = chosen.intersection(positions)
             next_index = max(
                 (index for index in pool if index not in chosen),
-                key=lambda index: (min(abs(index - prior) for prior in chosen) if chosen else 0, -index),
+                key=lambda index: (min(abs(index - prior) for prior in covered) if covered else 0, -index),
             )
             chosen.add(next_index)
         selected_ids.update(rows[index].chunk_id for index in chosen)
@@ -757,10 +777,11 @@ def select_reading_chunks(
     """Reserve a bounded part of an overview for task-relevant passages.
 
     Search all retained substantive chunks before sampling. Rare overlapping
-    terms rank passages; immediate same-document context shares the reserved
+    terms rank passages; neighboring retained same-source context shares the reserved
     quota. The remaining budget still covers sections and late text. This is
     lexical retrieval, not a relevance verdict, translation or claim audit.
     """
+    chunks = _reading_source_order(chunks)
     terms = source_query_terms(focus)
     if not terms or max_chunks < 3 or len(chunks) <= max_chunks:
         return select_representative_chunks(chunks, max_chunks=max_chunks)
@@ -778,14 +799,17 @@ def select_reading_chunks(
             break
         if not any(weights.get(term, 0) > 0 for term in overlaps[index]):
             break
-        # Original neighboring chunks, never cross-source context or invented
-        # text. Keep the hit before neighbors so a tiny budget retains it.
+        # Retained source order, not body-first storage priority. Positions can
+        # have gaps; neighboring retained chunks do not certify continuous text.
+        # Keep the hit before neighbors so a tiny budget retains it.
         for position in (index, index - 1, index + 1):
             if len(pinned) >= quota:
                 break
             if 0 <= position < len(candidates):
                 chunk = candidates[position]
-                if chunk.document_id == candidates[index].document_id and chunk.chunk_id not in pinned:
+                if (chunk.document_id == candidates[index].document_id
+                        and chunk.source_path == candidates[index].source_path
+                        and chunk.chunk_id not in pinned):
                     pinned.append(chunk.chunk_id)
     return select_representative_chunks(chunks, max_chunks=max_chunks,
                                          required_chunk_ids=tuple(pinned))

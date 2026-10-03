@@ -1656,7 +1656,9 @@ class ResearchApplicationTests(unittest.TestCase):
                                  "dataset_refs": [{"asset_id": "fixture"}], "split_spec": {"name": "test"},
                                  "metric_specs": [{"name": "accuracy", "unit": "fraction"}],
                                  "comparison_conditions": {"batch_size": 1}}},
-                    "report": {"figures": {"enabled": True, "max_figures": 1}}},
+                    # This fixture asserts inline aggregate rows; the default
+                    # linked presentation keeps them in the evidence package.
+                    "report": {"data_tables": "full", "figures": {"enabled": True, "max_figures": 1}}},
                     budget_limits={"process_invocations": 4, "process_wall_seconds": 20}))
             plan = app.controller.store.read_json(app.view().state_refs["work_plan"])
             self.assertEqual(plan["requested_outputs"][0]["status"], "pending")

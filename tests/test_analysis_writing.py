@@ -13,7 +13,7 @@ from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, Capabili
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMSettings
 from simple_ar.research.workflow_contracts import ResearchBrief
 from simple_ar.report.capability import ReportAssemblyRequest, run_report_capability
-from simple_ar.report.schema import AgentReportResult, ReportSectionDraft
+from simple_ar.report.schema import AgentReportResult, ReportSectionDraft, ReportRuntimeConfig
 from simple_ar.result_analysis.table import load_analysis_package, rebuild
 
 
@@ -209,6 +209,13 @@ class AnalysisWritingTests(unittest.TestCase):
                         if owner_count == 1:
                             self.assertLess(body.index('analyses/analysis-001/analysis.md'), body.index('## Limits'))
                         records = load_analysis_package(store.root / 'analyses/analysis-001/analysis.json')[0]['records']
+                        # The same pure block is visible before writing/review,
+                        # and assembly must not invent additional reader prose.
+                        from simple_ar.report.data_delivery import analysis_delivery_block
+                        preview = analysis_delivery_block(json.loads(path.read_text()), index=1,
+                            handle='material:data', config=ReportRuntimeConfig(data_tables=detail),
+                            plan=plan, section_ids=[row.section_id for row in drafts])
+                        self.assertIn(preview['markdown'], body)
                         self.assertEqual(records, load_analysis_package(path)[0]['records'])
                         self.assertEqual(path.read_bytes(), original)
                         self.assertEqual(drafts[0].draft_markdown, 'Supported observations.')

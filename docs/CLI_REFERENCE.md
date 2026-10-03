@@ -6,6 +6,8 @@ Writing outline options: `research-session --report-outline-strategy auto|templa
 and `research-report --outline-strategy auto|template|adaptive`. Non-survey adaptive
 planning is explicit; custom templates and saved checkpoint plans are retained.
 The TOML equivalent is `[report].outline_strategy`.
+New guided `start --kind writing` tasks select `adaptive` for built-in templates;
+custom templates and existing saved tasks retain their structure.
 
 Data presentation: `research-session --report-data-tables linked|full` or
 `research-report --data-tables linked|full` maps to `[report].data_tables`.

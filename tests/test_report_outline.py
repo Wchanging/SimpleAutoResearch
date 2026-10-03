@@ -76,7 +76,7 @@ class EvidenceOutlineTests(unittest.TestCase):
         self.assertEqual(drafting_template_guidance(template, self.memory), template.template_markdown)
         custom = template.model_copy(update={'name': 'custom', 'template_markdown': '## Custom responsibilities'})
         self.assertEqual(drafting_template_guidance(custom, frozen), custom.template_markdown)
-        for strategy in ('topic_specific_outline', 'deterministic_outline_with_full_evidence_budget'):
+        for strategy in ('deterministic_outline_with_full_evidence_budget',):
             kept = frozen.model_copy(update={'outline_planning': {'strategy': strategy, 'status': 'adapted'}})
             self.assertEqual(drafting_template_guidance(template, kept), template.template_markdown)
 
@@ -201,10 +201,12 @@ class EvidenceOutlineTests(unittest.TestCase):
         self.assertEqual(payload["execution_evidence"]["declared_protocol"]["resource_budget"]["device"], "requested_gpu")
 
     def test_projection_reports_shortened_inputs(self):
+        self.context.problem_markdown = self.context.goal_markdown = ""
         self.memory.objective = "x" * 4000
         self.memory.source_handles.extend(SourceHandle(handle=f"paper:{i}", kind="paper") for i in range(50))
         payload = evidence_outline_context(self.context, self.memory, ReportRuntimeConfig())
-        self.assertTrue(payload["objective"]["truncated"])
+        self.assertFalse(payload["objective"]["truncated"])
+        self.assertEqual(payload["objective"]["text"], self.memory.objective)
         self.assertEqual(payload["objective"]["total_characters"], 4000)
         self.assertEqual(payload["sources_omitted"], 11)
 
@@ -258,6 +260,137 @@ class EvidenceOutlineTests(unittest.TestCase):
     def test_older_plan_without_title_still_loads(self):
         from simple_ar.report.schema import ReportDocumentPlan
         self.assertEqual(ReportDocumentPlan.model_validate({"sections": []}).title, "")
+
+    def test_whole_word_request_reserves_assembly_and_freezes_one_plan(self):
+        from simple_ar.report.agent import _resolve_document_plan, _writer_prompt, _writer_recovery_prompt, _reviewer_prompt
+        from simple_ar.report.schema import ReportSectionDraft
+        from simple_ar.report.editor import review_document
+        self.context.problem_markdown = "Write a 350-500 word report. Keep the observed limits."
+        self.response["title"] = "Observed coverage and cost"
+        self.response["length_request"] = {"unit": "words", "scope": "whole_document",
+            "request_quote": "Write a 350-500 word report.", "min_words": 350, "max_words": 500, "target_words": 450}
+        client = Mock()
+        client.ask_json.return_value = self.response
+        config = ReportRuntimeConfig(template="reproduction", outline_strategy="adaptive")
+        template = load_report_template_bundle(report_mode="experiment", config=config)
+        frozen = _resolve_document_plan(self.adapt(client, config), config=config, context=self.context)
+        plan = frozen.document_plan
+        budget = plan.length_budget
+        self.assertGreater(budget["known_fixed_markdown_tokens"], 0)
+        self.assertEqual(plan.target_words, 450)
+        self.assertEqual(sum(row.target_words for row in plan.sections) + budget["known_fixed_markdown_tokens"], 450)
+        self.assertNotIn("length_request", frozen.outline_planning)
+        self.assertEqual(client.ask_json.call_count, 1)
+        restored = ReportMemory.model_validate(frozen.model_dump(mode="json"))
+        self.assertIs(_resolve_document_plan(restored, config=config, context=None), restored)
+        changed_request = self.context.model_copy(update={"problem_markdown": "Write 10,000 words."})
+        self.assertIs(_resolve_document_plan(restored, config=config, context=changed_request), restored)
+        section = frozen.section_plan[0]
+        draft = ReportSectionDraft(section_id=section.section_id, heading=section.heading, draft_markdown="Bounded observed result.")
+        common = dict(context=self.context, template=template, memory=frozen, section=section, config=config)
+        prompts = [_writer_prompt(**common, previous_draft=None, review=None, extra_context=[], source_batch_index=1,
+            source_batch_count=1, include_previous_draft=False, draft_mode="initial"),
+            _writer_recovery_prompt(context=self.context, memory=frozen, section=section, config=config,
+                previous_draft=None, review=None, extra_context=[], draft_mode="initial"),
+            _reviewer_prompt(**common, draft=draft)]
+        for prompt in prompts:
+            view = json.JSONDecoder().raw_decode(prompt[prompt.index("{"):])[0]
+            self.assertEqual(view["document_plan"]["length_budget"], budget)
+        reviewer = Mock()
+        reviewer.ask_json.return_value = {"section_reviews": []}
+        review_document(client=reviewer, template=template, memory=frozen, sections=[draft], config=config,
+            execution_summary={}, metric_summary={}, writing_objective=self.context.problem_markdown)
+        self.assertEqual(json.loads(reviewer.ask_json.call_args.args[1])["document_length_budget"], budget)
+
+    def test_length_request_without_exact_anchor_or_supported_scope_is_not_adopted(self):
+        from simple_ar.report.document_plan import validate_length_request
+        objective = "Write 350-500 words, not 3 pages."
+        valid = {"unit": "words", "scope": "whole_document", "request_quote": objective,
+            "min_words": 350, "max_words": 500, "target_words": 425}
+        self.assertEqual(validate_length_request(valid, objective=objective), valid)
+        for change in ({"request_quote": "Write 350-500 words."}, {"max_words": 700}, {"target_words": 600},
+                       {"unit": "pages"}, {"scope": "body_without_references"}, {"target_words": True}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                validate_length_request({**valid, **change}, objective=objective)
+        self.assertEqual(validate_length_request(None, objective=objective), {})
+        upper = {**valid, "min_words": 0, "max_words": 500, "request_quote": "500 words"}
+        self.assertEqual(validate_length_request(upper, objective="At most 500 words"), upper)
+        exact = {**valid, "min_words": 350, "max_words": 350, "target_words": 350, "request_quote": "350 words"}
+        self.assertEqual(validate_length_request(exact, objective="Write 350 words"), exact)
+
+    def test_invalid_length_budget_gets_only_the_existing_outline_correction(self):
+        self.context.problem_markdown = "Write 5 words."
+        self.response["title"] = "This title alone is already too long for five words"
+        self.response["length_request"] = {"unit": "words", "scope": "whole_document",
+            "request_quote": "Write 5 words.", "min_words": 5, "max_words": 5, "target_words": 5}
+        client = Mock()
+        client.ask_json.return_value = self.response
+        with self.assertRaises(LLMError):
+            self.adapt(client, ReportRuntimeConfig(template="reproduction", outline_strategy="adaptive"))
+        self.assertEqual(client.ask_json.call_count, 2)
+
+    def test_survey_planner_keeps_complete_task_and_freezes_task_scoped_length(self):
+        from simple_ar.report.agent import _resolve_document_plan, _outline_planner_prompt
+        from simple_ar.report.document_plan import LENGTH_REQUEST_SCHEMA
+        task = "Compare the supplied evidence. " + "Keep the scope explicit. " * 100 + "Write a 350-500 word review."
+        context = self.context.model_copy(update={"report_mode": "survey", "problem_markdown": task, "goal_markdown": task})
+        memory = self.memory.model_copy(update={"template": "survey", "report_mode": "survey",
+            "objective": task[:1200], "survey_contract": {"enabled": True,
+                "expected_coverage": {"target_words": 12000}},
+            "section_plan": [ReportSectionPlan(section_id=str(i), heading=f"Fallback {i}", goal="Compare sources.") for i in range(3)]})
+        config = ReportRuntimeConfig(template="survey", outline_strategy="adaptive", reviewer="disabled")
+        template = load_report_template_bundle(report_mode=context.report_mode, config=config)
+        response = {"sections": [{"heading": "Contrasting measurements", "goal": "Compare the recorded conditions."},
+                                  {"heading": "What the evidence leaves open", "goal": "State unresolved limitations."}],
+                    "length_request": {"unit": "words", "scope": "whole_document",
+                        "request_quote": "Write a 350-500 word review.", "min_words": 350, "max_words": 500, "target_words": 425}}
+        payload = json.loads(_outline_planner_prompt(context=context, template=template, memory=memory, config=config).split("\n\n", 1)[1])
+        self.assertEqual(payload["objective"], task)
+        self.assertEqual(payload["output_schema"]["length_request"], LENGTH_REQUEST_SCHEMA)
+        self.assertEqual(payload["objective"].count("Write a 350-500 word review."), 1)
+        client = Mock()
+        client.ask_json.return_value = response
+        adapted = _maybe_adapt_outline(client=client, context=context, memory=memory, template=template, config=config, emit=None)
+        frozen = _resolve_document_plan(adapted, config=config, context=context)
+        self.assertEqual(len(frozen.section_plan), 2)
+        self.assertEqual([r.heading for r in frozen.section_plan], [r["heading"] for r in response["sections"]])
+        self.assertTrue(all(not r.subsections for r in frozen.section_plan))
+        self.assertEqual(frozen.document_plan.target_words, 425)
+        self.assertEqual(sum(r.target_words for r in frozen.section_plan) + frozen.document_plan.length_budget["known_fixed_markdown_tokens"], 425)
+        self.assertEqual(client.ask_json.call_count, 1)
+        restored = ReportMemory.model_validate(frozen.model_dump(mode="json"))
+        changed = context.model_copy(update={"problem_markdown": "Write 10000 words."})
+        self.assertIs(_resolve_document_plan(restored, config=config, context=changed), restored)
+        self.assertIs(_maybe_adapt_outline(client=client, context=changed, memory=restored, template=template, config=config, emit=None), restored)
+        self.assertEqual(client.ask_json.call_count, 1)
+
+    def test_invalid_survey_length_uses_existing_correction_not_a_new_loop(self):
+        task = "Write 350-500 words."
+        context = self.context.model_copy(update={"report_mode": "survey", "problem_markdown": task})
+        memory = self.memory.model_copy(update={"template": "survey", "report_mode": "survey",
+            "survey_contract": {"enabled": True},
+            "section_plan": [ReportSectionPlan(section_id=str(i), heading=f"Fallback {i}", goal="Compare sources.") for i in range(3)]})
+        config = ReportRuntimeConfig(template="survey", outline_strategy="adaptive")
+        template = load_report_template_bundle(report_mode=context.report_mode, config=config)
+        for change in ({"unit": "pages"}, {"max_words": 900}, {"request_quote": "Write 350-500 words please."}):
+            with self.subTest(change=change):
+                client = Mock()
+                client.ask_json.return_value = {**self.response, "length_request": {
+                    "unit": "words", "scope": "whole_document", "request_quote": task,
+                    "min_words": 350, "max_words": 500, "target_words": 425, **change}}
+                with self.assertRaises(LLMError):
+                    _maybe_adapt_outline(client=client, context=context, memory=memory, template=template, config=config, emit=None)
+                self.assertEqual(client.ask_json.call_count, 2)
+
+    def test_absent_word_request_keeps_legacy_plan_and_serialization(self):
+        from simple_ar.report.agent import _resolve_document_plan
+        client = Mock()
+        client.ask_json.return_value = self.response
+        config = ReportRuntimeConfig(template="reproduction", outline_strategy="adaptive")
+        frozen = _resolve_document_plan(self.adapt(client, config), config=config, context=self.context)
+        self.assertEqual(frozen.document_plan.target_words, 0)
+        self.assertEqual(frozen.document_plan.sections[1].target_words, 300)
+        self.assertNotIn("length_budget", frozen.document_plan.model_dump(mode="json"))
 
 
 if __name__ == "__main__":

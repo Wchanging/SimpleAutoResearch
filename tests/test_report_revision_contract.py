@@ -11,6 +11,7 @@ from simple_ar.report.schema import (
 )
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
+from report_review_fixtures import draft_quotes
 
 
 def payload(prompt):
@@ -18,6 +19,158 @@ def payload(prompt):
 
 
 class RevisionContractTests(unittest.TestCase):
+    def test_planning_and_repair_allegations_are_not_promoted_to_source_facts(self):
+        from simple_ar.report.schema import ReportDocumentPlan
+        context, config, section, memory, template = self.objects()
+        section.goal = "Discuss an alternative named by planning but not established by the source."
+        baseline = ReportSectionDraft(section_id=section.section_id, heading=section.heading,
+            draft_markdown="Only the measured observation and its qualification are established.")
+        review = ReportSectionReview(section_id=section.section_id, verdict="revise_required", findings=[
+            ReviewerFinding(finding_id="fallible", type="unsupported_claim", severity="major", required_action="revise",
+                message="The alleged alternative appears in the prose.", suggested_action="Qualify that alternative.")])
+        original = review.model_dump(mode="json")
+        for planned in (False, True):
+            with self.subTest(planned=planned):
+                if planned:
+                    memory.document_plan = ReportDocumentPlan(sections=[section])
+                common = dict(context=context, memory=memory, section=section, config=config,
+                    previous_draft=baseline, review=review, draft_mode="section_revision")
+                normal = payload(_writer_prompt(**common, template=template, extra_context=[], source_batch_index=1,
+                    source_batch_count=1, include_previous_draft=True))
+                corrected = payload(_writer_recovery_prompt(**common))
+                for view in (normal, corrected):
+                    self.assertEqual(view["narrative_context"]["planning_status"]["scope"],
+                        "organizational_intent_not_current_prose_or_scientific_support")
+                    self.assertIn("not observed claims", " ".join(view["narrative_context"]["writing_rules"]))
+                    self.assertEqual(view["review_findings_status"]["independent_verification"], "not_performed")
+                    self.assertIn("do not manufacture", " ".join(view["narrative_context"]["writing_rules"]))
+                    self.assertEqual(view["review_findings"], original["findings"])
+                self.assertEqual(normal["review_findings_status"], corrected["review_findings_status"])
+                from simple_ar.report.agent import _reviewer_context
+                checked = _reviewer_context(context=context, memory=memory, section=section, template=template,
+                    config=config, draft=baseline, previous_draft=baseline, revision_review=review)
+                self.assertEqual(checked["revision_context"]["review_opinions_status"],
+                    normal["review_findings_status"])
+                self.assertEqual(checked["revision_context"]["target_findings"], original["findings"])
+        self.assertEqual(review.model_dump(mode="json"), original)
+        self.assertEqual(baseline.draft_markdown, "Only the measured observation and its qualification are established.")
+
+    def test_single_section_responses_cannot_relocate_explicit_target(self):
+        from simple_ar.report.agent import _normalize_draft_response, _normalize_review_response
+        context, config, section, memory, template = self.objects()
+        bad_draft = {"section_id": "other", "draft_markdown": "A real-looking but misdirected body."}
+        before = dict(bad_draft)
+        with self.assertRaisesRegex(LLMResponseError, "not requested"):
+            _normalize_draft_response(bad_draft, section)
+        self.assertEqual(bad_draft, before)
+        for response in ({"section_id": "other", "verdict": "pass"}, {"verdict": "pass", "findings": [
+                {"section_id": "other", "message": "A misplaced opinion."}]}):
+            with self.assertRaisesRegex(LLMResponseError, "not requested"):
+                _normalize_review_response(response, section)
+        self.assertEqual(_normalize_draft_response({"draft_markdown": "Observed only.", "heading": "Display heading"}, section)["section_id"], section.section_id)
+        self.assertEqual(_normalize_review_response({"findings": [{"message": "Legacy observation."}]}, section)["findings"][0]["section_id"], section.section_id)
+        self.assertEqual(_normalize_draft_response({"heading": "Display heading"}, section)["heading"], "Display heading")
+        for identity in (None, ""):
+            response = {"section_id": identity, "findings": [{"section_id": identity, "message": "Legacy observation."}]}
+            normalized = _normalize_review_response(response, section)
+            self.assertEqual(normalized["section_id"], section.section_id)
+            self.assertEqual(normalized["findings"][0]["section_id"], section.section_id)
+            self.assertIs(response["section_id"], identity)
+            self.assertEqual(_normalize_draft_response({"section_id": identity}, section)["section_id"], section.section_id)
+        for identity in (False, 0, " "):
+            with self.assertRaisesRegex(LLMResponseError, "not requested"):
+                _normalize_draft_response({"section_id": identity}, section)
+
+    def test_wrong_section_review_uses_existing_one_format_correction(self):
+        context, config, section, memory, template = self.objects()
+        draft = ReportSectionDraft(section_id=section.section_id, heading=section.heading, draft_markdown="Observed only.")
+        calls = []
+        class Client:
+            def ask_json(self, system, prompt, **kwargs):
+                calls.append(payload(prompt))
+                return {"section_id": "other" if len(calls) == 1 else section.section_id, "verdict": "pass"}
+        reviewed = _review_section_with_recovery(client=Client(), context=context, memory=memory, section=section,
+            template=template, config=config, draft=draft, label="target-review")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(reviewed.section_id, section.section_id)
+        self.assertEqual(calls[0]["narrative_context"], calls[1]["narrative_context"])
+
+    def test_normal_and_format_recovery_share_required_actions_not_opinion_messages(self):
+        context, config, section, memory, template = self.objects()
+        original = ReportSectionDraft(section_id=section.section_id, heading=section.heading, draft_markdown="Observed limitation only.")
+        review = ReportSectionReview(section_id=section.section_id, verdict="revise_required",
+            revision_instructions=["Retain attribution."], findings=[
+                ReviewerFinding(finding_id="required", type="style", severity="minor", required_action="revise",
+                    message="Repeated material", suggested_action="Remove repeated prose while retaining the qualification."),
+                ReviewerFinding(finding_id="advice", type="style", severity="major", required_action="advisory",
+                    message="Optional style", suggested_action="Add an optional heading."),
+                ReviewerFinding(finding_id="verify", type="evidence_gap", severity="major", required_action="verify",
+                    message="An unverified allegation", suggested_action="Replace the observed condition with this alleged one."),
+                ReviewerFinding(finding_id="no_action", type="style", severity="major", required_action="revise",
+                    message="This opinion is not itself a rewrite instruction.")])
+        before = review.model_dump(mode="json")
+        common = dict(context=context, memory=memory, section=section, config=config,
+            previous_draft=original, review=review, draft_mode="section_revision")
+        ordinary = payload(_writer_prompt(**common, template=template, extra_context=[], source_batch_index=1,
+            source_batch_count=1, include_previous_draft=True))
+        recovery = payload(_writer_recovery_prompt(**common))
+        expected = ["Retain attribution.", "Remove repeated prose while retaining the qualification."]
+        self.assertEqual(ordinary["review_instructions"], expected)
+        self.assertEqual(recovery["review_instructions"], expected)
+        self.assertEqual(ordinary["narrative_context"]["edit_scope"], recovery["narrative_context"]["edit_scope"])
+        self.assertEqual(ordinary["narrative_context"]["edit_scope"]["eligible_section_ids"], [section.section_id])
+        self.assertEqual([row["finding_id"] for row in ordinary["review_findings"]], ["required", "advice", "verify", "no_action"])
+        self.assertEqual(review.model_dump(mode="json"), before)
+
+    def test_revision_observation_counts_actual_candidate_without_forcing_shrinkage(self):
+        from simple_ar.report.agent import _reviewer_context
+        context, config, section, memory, template = self.objects()
+        baseline = ReportSectionDraft(section_id=section.section_id, heading=section.heading, draft_markdown="One observed value.")
+        candidate = baseline.model_copy(update={"draft_markdown": "One observed value with necessary qualification."})
+        view = _reviewer_context(context=context, memory=memory, section=section, template=template, config=config,
+            draft=candidate, revision_review=self.review(), previous_draft=baseline)
+        contract = view["revision_context"]
+        self.assertEqual(contract["length_observation"]["baseline_section_tokens"], 3)
+        self.assertEqual(contract["length_observation"]["candidate_section_tokens"], 6)
+        self.assertEqual(contract["length_observation"]["candidate_minus_baseline_tokens"], 3)
+        self.assertIn("Remove the significance claim", " ".join(contract["effective_instructions"]))
+        self.assertEqual(contract["revision_instructions"], self.review().revision_instructions)
+        unknown = revision_context(self.review(), None, candidate=candidate)["length_observation"]
+        self.assertIsNone(unknown["baseline_section_tokens"])
+        self.assertIsNone(unknown["candidate_minus_baseline_tokens"])
+        other = baseline.model_copy(update={"section_id": "different_target"})
+        self.assertIsNone(revision_context(self.review(), other, candidate=candidate)["length_observation"]["candidate_minus_baseline_tokens"])
+
+    def test_all_findings_retained_but_only_two_highest_priority_targets_revised(self):
+        context, config, section, memory, template = self.objects(document_review=True)
+        memory.section_plan.extend([ReportSectionPlan(section_id=sid, heading=sid, goal="Facts")
+                                    for sid in ("body", "third")])
+        labels = []
+        class Client:
+            def ask_json(client, system, prompt, *, label='', **kwargs):
+                labels.append(label)
+                if label == 'report-document-reviewer':
+                    return {'section_reviews': [{'section_id': sid, 'verdict': 'revise_required',
+                        'findings': [{'finding_id': sid + '-defect', 'type': 'unsupported_claim',
+                                      'severity': level, 'required_action': 'revise',
+                                      'message': 'A concrete qualification is missing.',
+                                      'draft_quotes': draft_quotes(prompt, sid)}]}
+                        for sid, level in [('conclusion', 'minor'), ('body', 'major'), ('third', 'critical')]]}
+                if label == 'report-document-verifier':
+                    return {'section_reviews': []}
+                if 'reviewer' in label or 'verifier' in label:
+                    return {'verdict': 'pass'}
+                sid = next(sid for sid in ('conclusion', 'body', 'third') if label.endswith(sid))
+                return {'section_id': sid, 'draft_markdown': 'Qualified evidence.'}
+        result = run_report_agent(client=Client(), context=context, memory=memory, config=config,
+                                  template=template, gateway=ReportToolGateway(context))
+        self.assertEqual([row.section_id for row in result.iterations if row.action == 'document_revise'],
+                         ['third', 'body'])
+        self.assertNotIn('report-document-reviser-conclusion', labels)
+        self.assertTrue(any(row.finding_id == 'conclusion-defect' for row in result.memory.reviewer_findings))
+        self.assertTrue(any(row.type == 'document_revision_unresolved' for row in result.memory.reviewer_findings))
+        self.assertFalse(any(row.type == 'document_review_unavailable' for row in result.memory.reviewer_findings))
+
     def objects(self, **settings):
         context = ReportContext(topic='Supplied observations', report_mode='supplied_materials')
         config = ReportRuntimeConfig(template='analysis_report', max_review_iterations=1, **settings)
@@ -26,11 +179,12 @@ class RevisionContractTests(unittest.TestCase):
         template = load_report_template_bundle(report_mode=context.report_mode, config=config)
         return context, config, section, memory, template
 
-    def review(self):
+    def review(self, prompt=None):
         return ReportSectionReview(section_id='conclusion', verdict='revise_required', findings=[
             ReviewerFinding(finding_id='f1', type='unsupported_claim', severity='major',
                             message='The draft turns descriptive observations into a significance claim.',
-                            suggested_action='Remove the significance claim; retain the evidence limit.')],
+                            suggested_action='Remove the significance claim; retain the evidence limit.',
+                            draft_quotes=draft_quotes(prompt, 'conclusion') if prompt else [])],
             revision_instructions=['Remove the repeated table.', 'Keep the source attribution and qualification.'])
 
     def test_ordinary_and_recovery_writer_can_remove_wrong_or_repeated_content(self):
@@ -82,7 +236,7 @@ class RevisionContractTests(unittest.TestCase):
                         self.assertEqual(row['revision_context']['revision_instructions'], self.review().revision_instructions)
                         self.assertIn('Old significance claim.', row['revision_context']['original_section']['prose_windows'][0]['text'])
                         # Even if still bad, do not grant another revision on recovery.
-                    return self.review().model_dump(mode='json')
+                    return self.review(prompt).model_dump(mode='json')
                 return {'section_id': 'conclusion', 'heading': 'Conclusion',
                         'draft_markdown': 'Candidate still unqualified.' if 'reviser' in label else 'Old significance claim.'}
         client = Client()
@@ -119,7 +273,7 @@ class RevisionContractTests(unittest.TestCase):
             def ask_json(client, system, prompt, *, label='', **kwargs):
                 labels.append(label)
                 if label == 'report-document-reviewer':
-                    review = self.review()
+                    review = self.review(prompt)
                     if client.resumed:
                         review.revision_instructions = ['A different new suggestion; do not overwrite saved request.']
                     return {'section_reviews': [review.model_dump(mode='json')]}
@@ -156,12 +310,12 @@ class RevisionContractTests(unittest.TestCase):
         class Client:
             def ask_json(client, system, prompt, *, label='', **kwargs):
                 if label == 'report-document-reviewer':
-                    return {'section_reviews': [self.review().model_dump(mode='json')]}
+                    return {'section_reviews': [self.review(prompt).model_dump(mode='json')]}
                 if label == 'report-document-verifier-conclusion':
                     row = payload(prompt)
                     targets.append(row['revision_context'])
                     self.assertEqual(row['revision_context']['target_findings'][0]['finding_id'], 'f1')
-                    return self.review().model_dump(mode='json')
+                    return self.review(prompt).model_dump(mode='json')
                 if 'reviewer' in label:
                     return {'verdict': 'pass'}
                 sid = 'body' if 'body' in label else 'conclusion'
@@ -184,7 +338,7 @@ class RevisionContractTests(unittest.TestCase):
             def ask_json(client, system, prompt, *, label='', **kwargs):
                 labels.append(label)
                 if label == 'report-document-reviewer':
-                    return {'section_reviews': [self.review().model_dump(mode='json')]}
+                    return {'section_reviews': [self.review(prompt).model_dump(mode='json')]}
                 if label == 'report-document-verifier':
                     return {'section_reviews': []}
                 if label == 'report-document-verifier-conclusion':
@@ -228,9 +382,9 @@ class RevisionContractTests(unittest.TestCase):
             def ask_json(client, system, prompt, *, label='', **kwargs):
                 labels.append(label)
                 if label == 'report-document-reviewer':
-                    return {'section_reviews': [self.review().model_dump(mode='json')]}
+                    return {'section_reviews': [self.review(prompt).model_dump(mode='json')]}
                 if label == 'report-document-verifier-conclusion':
-                    return self.review().model_dump(mode='json')
+                    return self.review(prompt).model_dump(mode='json')
                 if 'reviewer' in label:
                     return {'verdict': 'pass'}
                 if client.resumed and 'reviser' in label:
@@ -267,7 +421,7 @@ class RevisionContractTests(unittest.TestCase):
                     def ask_json(client, system, prompt, *, label='', **kwargs):
                         labels.append(label)
                         if label == 'report-document-reviewer':
-                            return {'section_reviews': [self.review().model_dump(mode='json')]}
+                            return {'section_reviews': [self.review(prompt).model_dump(mode='json')]}
                         if label == 'report-document-verifier':
                             return {'section_reviews': []}
                         if label == 'report-document-verifier-conclusion':
@@ -276,7 +430,8 @@ class RevisionContractTests(unittest.TestCase):
                             if client.revisions == 1:
                                 return {'section_id': 'conclusion', 'verdict': 'revise_required',
                                         'findings': [{'finding_id': 'citation-1', 'type': 'citation_misuse',
-                                                      'severity': 'minor', 'message': 'Necessary citation lost.'}],
+                                                      'severity': 'minor', 'message': 'Necessary citation lost.',
+                                                      'draft_quotes': draft_quotes(prompt, 'conclusion')}],
                                         'revision_instructions': ['Restore the nearby citation.']}
                             self.assertIn('Restore the nearby citation.', contract['revision_instructions'])
                             return {'verdict': 'pass'}
@@ -331,9 +486,9 @@ class RevisionContractTests(unittest.TestCase):
             def ask_json(client, system, prompt, *, label='', **kwargs):
                 labels.append(label)
                 if label == 'report-document-reviewer':
-                    return {'section_reviews': [self.review().model_dump(mode='json')]}
+                    return {'section_reviews': [self.review(prompt).model_dump(mode='json')]}
                 if label == 'report-document-verifier-conclusion':
-                    return self.review().model_dump(mode='json')
+                    return self.review(prompt).model_dump(mode='json')
                 if 'reviewer' in label:
                     return {'verdict': 'pass'}
                 return {'section_id': 'body' if 'body' in label else 'conclusion',
@@ -367,7 +522,8 @@ class RevisionContractTests(unittest.TestCase):
                     ids = ['third'] if client.resumed else ['conclusion', 'body']
                     return {'section_reviews': [{'section_id': sid, 'verdict': 'revise_required',
                             'findings': [{'finding_id': sid + '-attribution', 'type': 'citation_misuse',
-                                          'severity': 'major', 'message': 'Missing source attribution.'}],
+                                          'severity': 'major', 'message': 'Missing source attribution.',
+                                          'draft_quotes': draft_quotes(prompt, sid)}],
                             'revision_instructions': ['Clarify source attribution.']} for sid in ids]}
                 if label == 'report-document-verifier':
                     return {'section_reviews': []}

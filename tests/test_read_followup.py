@@ -28,6 +28,74 @@ class FakeClient:
 
 
 class ReadingFollowupTests(unittest.TestCase):
+    def project(self, bundle, note):
+        read = ReadResult(status="partial", bundle=bundle, paper_notes=(note,))
+        context = ReportContext(topic="review", report_mode="survey", source_handles=[
+            SourceHandle(handle="paper:p", kind="paper", paper_id="p")])
+        return attach_report_read_evidence(context, ReportMemory(), documents=bundle, read=read,
+            read_ref=ArtifactRef(path="read.json", kind="read_result"))[0].source_handles[0]
+
+    def test_full_query_pool_does_not_erase_referenced_section_conditions(self):
+        # Different source settings share the same transport rule, with no
+        # domain keyword or opinion about which statement is scientifically true.
+        for condition in ("Final interval includes overflow values.",
+                          "Noise comparison fixes the spectral index."):
+            with self.subTest(condition=condition):
+                overview = [TextChunk(f"base-{i}", "p", condition if kind == "method" else kind,
+                    metadata={"section_id": kind, "section": kind})
+                    for i, kind in enumerate(("front_matter", "results", "discussion", "method"))]
+                queries = [TextChunk(f"query-{i}", "p", "Prefix. " * 200 + f"Late result {i}.",
+                    metadata={"section_id": "results", "section": "results"}) for i in range(6)]
+                passages = [{"chunk_id": chunk.chunk_id, "character_start": 1600,
+                    "character_end": len(chunk.text), "text": chunk.text[1600:], "truncated": True}
+                    for chunk in queries]
+                note = {"paper_id": "p", "evidence_refs": [chunk.chunk_id for chunk in overview],
+                    "reading_followup": {"passages": passages, "revision_performed": True}}
+                original = json.dumps(note, sort_keys=True)
+                bundle = DocumentBundle([DocumentRecord("p", "Source", "local_files")], {}, {}, [], [*overview, *queries])
+                handle = self.project(bundle, note)
+                kept = handle.metadata["evidence_passages"]
+                self.assertEqual([row["chunk_id"] for row in kept[:2]], ["query-0", "query-1"])
+                self.assertEqual(kept[:2], passages[:2])  # No recentering or prefix substitution.
+                self.assertEqual(len(kept), 6)
+                self.assertIn(condition, json.dumps(_prompt_handle_view(handle)))
+                from simple_ar.report.narrative import review_source_evidence, report_tool_context
+                view = _prompt_handle_view(handle)
+                self.assertIn(condition, json.dumps(review_source_evidence([view])))
+                from simple_ar.report.schema import ReportToolResult
+                twice = report_tool_context(ReportToolResult(tool_name="get_paper_brief", content={"handles": [view]}))
+                self.assertEqual(twice["content"]["handles"][0], view)
+                self.assertTrue(view["metadata"]["evidence_passages_truncated"])
+                self.assertEqual(json.dumps(note, sort_keys=True), original)
+
+    def test_claim_local_references_and_unused_slots_are_not_lost(self):
+        method = TextChunk("method", "p", "Comparison requires paired inputs.")
+        queries = [TextChunk(f"q-{i}", "p", f"Measured result {i}.") for i in range(6)]
+        foreign = TextChunk("foreign", "other", "Different source with the same title.")
+        passages = [{"chunk_id": c.chunk_id, "character_start": 0, "character_end": len(c.text), "text": c.text}
+                    for c in queries]
+        note = {"paper_id": "p", "evidence_refs": [],
+            "claim_scopes": [{"claim": "A bounded comparison", "evidence_refs": ["method", "method", "foreign", "missing"]}],
+            "reading_followup": {"passages": [passages[0], passages[0], {**passages[1], "text": "Invented"}, *passages[1:]]}}
+        bundle = DocumentBundle([DocumentRecord("p", "Source", "local_files")], {}, {}, [], [method, *queries, foreign])
+        kept = self.project(bundle, note).metadata
+        self.assertEqual(len(kept["evidence_passages"]), 6)
+        self.assertEqual(len({row["chunk_id"] for row in kept["evidence_passages"]}), 6)
+        self.assertIn("paired inputs", json.dumps(kept))
+        self.assertNotIn("Invented", json.dumps(kept["evidence_passages"]))
+        self.assertNotIn("Different source", json.dumps(kept["evidence_passages"]))
+        self.assertTrue(kept["evidence_passages_truncated"])
+
+    def test_only_query_windows_keep_their_existing_budget_and_exact_offsets(self):
+        chunk = TextChunk("q", "p", "prefix middle suffix")
+        passages = [{"chunk_id": "q", "character_start": start, "character_end": end, "text": chunk.text[start:end]}
+                    for start, end in ((0, 6), (7, 13), (14, 20))]
+        note = {"paper_id": "p", "evidence_refs": ["q"], "reading_followup": {"passages": passages}}
+        bundle = DocumentBundle([DocumentRecord("p", "Source", "local_files")], {}, {}, [], [chunk])
+        metadata = self.project(bundle, note).metadata
+        self.assertEqual(metadata["evidence_passages"], passages)
+        self.assertFalse(metadata["evidence_passages_truncated"])
+
     def bundle(self):
         chunks = [TextChunk(chunk_id=f"c-{index}", document_id="p", text=f"Ordinary discussion {index}.")
                   for index in range(40)]

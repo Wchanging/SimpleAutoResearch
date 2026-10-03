@@ -224,6 +224,10 @@ class _ClaimRecordThenDraftLLM(_TrackingReportLLM):
 
 
 def _extract_prompt_value(prompt: str, key: str) -> str:
+    payload = json.JSONDecoder().raw_decode(prompt[prompt.index("{"):])[0]
+    section = payload.get("section", {})
+    if key in section:
+        return str(section[key])
     match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]+)"', prompt)
     return match.group(1) if match else ""
 

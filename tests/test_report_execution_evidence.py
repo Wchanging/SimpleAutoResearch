@@ -2,8 +2,11 @@
 import json
 import unittest
 
+from report_review_fixtures import draft_quotes
+
 from simple_ar.report.agent import (
     _writer_prompt, _writer_recovery_prompt, _reviewer_prompt, run_report_agent,
+    WRITER_SYSTEM, REVIEWER_SYSTEM,
 )
 from simple_ar.report.execution_evidence import execution_record, report_execution_evidence
 from simple_ar.report.schema import (
@@ -79,6 +82,11 @@ class ReportExecutionEvidenceTests(unittest.TestCase):
         self.assertEqual(writer["global_research_context"]["execution_evidence"], expected)
         self.assertEqual(recovery["execution_evidence"], expected)
         self.assertEqual(reviewer["execution_evidence"], expected)
+        self.assertIn("not an observation", " ".join(writer["style_rules"]))
+        self.assertIn("not observed execution", " ".join(recovery["style_rules"]))
+        self.assertNotIn("executed project", " ".join(recovery["style_rules"]))
+        self.assertIn("declarations", WRITER_SYSTEM)
+        self.assertIn("declaration/executor/producer", REVIEWER_SYSTEM)
 
     def test_rejected_document_candidate_survives_verifier_failure_and_checkpoint(self):
         memory = ReportMemory(section_plan=[
@@ -93,7 +101,8 @@ class ReportExecutionEvidenceTests(unittest.TestCase):
                 if label == "report-document-reviewer":
                     return {"section_reviews": [{"section_id": "setup", "verdict": "revise_required",
                         "findings": [{"finding_id": "f1", "type": "unsupported_claim", "severity": "major",
-                                      "message": "Setup was declared, not validated.", "section_id": "setup"}]}]}
+                                      "message": "Setup was declared, not validated.", "section_id": "setup",
+                                      "draft_quotes": draft_quotes(prompt, "setup")}]}]}
                 if label == "report-document-reviser-setup":
                     return {"section_id": "setup", "heading": "Local Setup", "draft_markdown": "Candidate not adopted."}
                 if label == "report-document-verifier-setup":

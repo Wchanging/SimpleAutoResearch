@@ -201,9 +201,10 @@ class ReviewActionTests(unittest.TestCase):
         self.assertEqual(sum('reviser' in label for label in labels), 1)
         self.assertEqual(result.memory.reviewer_findings[0].required_action, 'verify')
 
-    def test_document_review_sees_minor_required_work_and_explicit_action_schema(self):
+    def test_historical_review_is_neutral_but_current_actions_are_explicit(self):
         objects = self.objects()
         objects['memory'].reviewer_findings = [self.finding('verify'), self.finding('advisory', finding_id='polish')]
+        before = [row.model_dump(mode='json') for row in objects['memory'].reviewer_findings]
         seen = []
         class Client:
             def ask_json(client, system, prompt, **kwargs):
@@ -211,9 +212,17 @@ class ReviewActionTests(unittest.TestCase):
                 return {'section_reviews': []}
         review_document(client=Client(), template=objects['template'], memory=objects['memory'],
             sections=[ReportSectionDraft(section_id='findings', heading='Findings', draft_markdown='Text')],
+            config=objects['config'], execution_summary={}, metric_summary={},
+            historical_findings=[objects['memory'].reviewer_findings[0]])
+        self.assertEqual([row['finding_id'] for row in seen[0]['historical_findings_to_check']], ['scope'])
+        for field in ('required_action', 'severity', 'suggested_action'):
+            self.assertNotIn(field, seen[0]['historical_findings_to_check'][0])
+        self.assertEqual([row.model_dump(mode='json') for row in objects['memory'].reviewer_findings], before)
+        self.assertNotIn('findings', seen[0]['output_schema']['section_reviews'][0])
+        review_document(client=Client(), template=objects['template'], memory=objects['memory'],
+            sections=[ReportSectionDraft(section_id='findings', heading='Findings', draft_markdown='Text')],
             config=objects['config'], execution_summary={}, metric_summary={})
-        self.assertEqual([row['finding_id'] for row in seen[0]['unresolved_section_findings']], ['scope'])
-        self.assertIn('required_action', seen[0]['output_schema']['section_reviews'][0]['findings'][0])
+        self.assertIn('required_action', seen[1]['output_schema']['section_reviews'][0]['findings'][0])
 
 
 if __name__ == '__main__':

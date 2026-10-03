@@ -70,6 +70,30 @@ def _copy_image(source: Path, output: Path, index: int) -> str:
     return target.relative_to(output).as_posix()
 
 
+def _copy_experiment_records(root: Path, output: Path) -> list[str]:
+    """Copy the native recorded package, not arbitrary local link targets."""
+    package_path = root / "experiment_evidence.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    if package.get("schema_version") != "report_experiment_evidence.v1":
+        raise ReportExportError("Unrecognized experiment record package.")
+    sources = package.get("source_artifacts")
+    if not isinstance(sources, list) or any(not isinstance(row, dict)
+            or not isinstance(row.get("copied_path"), str)
+            or not re.fullmatch(r"experiment_sources/[0-9]{3}(?:\.[A-Za-z0-9_-]+)?", row["copied_path"]) for row in sources):
+        raise ReportExportError("Experiment record source manifest is invalid.")
+    paths = list(dict.fromkeys(["experiment_evidence.md", "experiment_evidence.json",
+                               *(row["copied_path"] for row in sources)]))
+    for relative in paths:
+        source = root / relative
+        if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(root):
+            raise ReportExportError(f"Missing or out-of-scope experiment attachment: {relative}")
+    for relative in paths:
+        target = output / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / relative, target)
+    return paths
+
+
 def _plain_inlines(inlines: list[dict]) -> str:
     return " ".join(str(node.get("c", "")) for node in _nodes(inlines) if node.get("t") == "Str")
 
@@ -111,17 +135,18 @@ def _bind_figure_captions(ast: dict, captions: dict[str, list[dict]]) -> list[st
     return bound
 
 
-def _breakable_code(text: str) -> str:
-    """Escape literal code and allow breaks at identifier/path separators.
-
-    Constructed TeX only: input Markdown still cannot supply raw TeX.
-    """
+def _tex_literal(text: str, *, break_after: str) -> str:
+    """Escape display text before adding controller-owned line-break hints."""
     escapes = {"\\": r"\textbackslash{}", "{": r"\{", "}": r"\}", "$": r"\$",
                "&": r"\&", "#": r"\#", "%": r"\%", "_": r"\_",
                "~": r"\textasciitilde{}", "^": r"\textasciicircum{}"}
-    content = "".join(escapes.get(char, char) + (r"\allowbreak{}" if char in "_/-.:" else "")
-                      for char in text)
-    return r"\texttt{" + content + "}"
+    return "".join(escapes.get(char, char) + (r"\allowbreak{}" if char in break_after else "")
+                   for char in text)
+
+
+def _breakable_code(text: str) -> str:
+    """Construct escaped inline code with identifier/path break opportunities."""
+    return r"\texttt{" + _tex_literal(text, break_after="_/-.:") + "}"
 
 
 def _scientific_unicode_preamble(*fragments: str) -> str:
@@ -219,6 +244,10 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
     try:
         image_targets = {url: _copy_image(path, output, index)
                          for index, (url, path) in enumerate(image_sources.items(), start=1)}
+        recorded_links = {node["c"][-1][0] for node in _nodes([blocks, abstract]) if node.get("t") == "Link"}
+        copied_records = _copy_experiment_records(root, output) if recorded_links & {
+            "experiment_evidence.md", "experiment_evidence.json"} else []
+        manifest["experiment_record_files"] = copied_records
         external_sources: list[str] = []
         for node in _nodes([blocks, abstract, source_ast]):
             if node.get("t") == "Image":
@@ -228,7 +257,7 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
                 url = urlsplit(target)
                 if target in image_targets:
                     node["c"][-1][0] = image_targets[target]
-                elif not url.scheme and not url.netloc and url.path and target != "references.bib":
+                elif not url.scheme and not url.netloc and url.path and target not in {"references.bib", *copied_records}:
                     # Source evidence may live outside this report. Do not
                     # silently copy data or ship dangling filesystem links.
                     external_sources.append(target)
@@ -238,6 +267,11 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
         for node in _nodes([blocks, abstract]):
             if node.get("t") == "Code":
                 node.update(t="RawInline", c=["latex", _breakable_code(node["c"][1])])
+            elif node.get("t") == "Str" and "/" in node["c"]:
+                # TeX does not normally break slash-separated prose tokens.
+                # Preserve text/font/numbers; only add breaks after slashes.
+                # Math and URL targets are different AST nodes, not rewritten.
+                node.update(t="RawInline", c=["latex", _tex_literal(node["c"], break_after="/")])
 
         def latex(fragment: list[dict]) -> str:
             document = {**ast, "blocks": fragment}
@@ -291,9 +325,14 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
             "Dependencies: pdflatex, bibtex, acmart and its packages; Pandoc for regeneration; librsvg for SVG conversion.\n"
             "Compile in this directory: pdflatex -no-shell-escape -halt-on-error main.tex; bibtex main; "
             "pdflatex -no-shell-escape -halt-on-error main.tex (twice).\n"
+            "For incomplete bibliography records ACM may emit nested brackets in natbib labels. "
+            "The built-in report-export --compile handles generated labels without inventing metadata. "
+            "For manual builds, brace the full optional label in the generated main.bbl if citations remain undefined; "
+            "repeat after running bibtex. Do not replace unknown authors/dates with guessed values.\n"
             "source.md uses the exported figure paths, not the original report directory.\n"
-            "Local source-evidence links are retained as labels; their original targets are listed in export.json.\n"
-            "External datasets and source artifacts are not copied or redistributed automatically.\n"
+            "Native experiment record links and their explicitly registered source copies travel with this project.\n"
+            "Other local source-evidence links are retained as labels; their original targets are listed in export.json.\n"
+            "No arbitrary linked datasets or source directories are copied automatically.\n"
             "The built-in compile option restricts file access and records logs. Add author/venue metadata yourself.\n",
             encoding="utf-8",
         )

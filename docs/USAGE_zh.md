@@ -89,6 +89,7 @@ SIMPLE_AR_LLM_STREAM=true
 - `SIMPLE_AR_LLM_REASONING_EFFORT` 是可选的、由模型文档定义的推理强度，例如 `low` 或 `high`，只会通过 Chat Completions 的 provider 扩展字段转发。`SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` 仅在调用方和客户端均未设置输出上限时作为兜底上限，不会覆盖显式的单次调用上限。
 - `SIMPLE_AR_LLM_THINKING` 可选，通过 Chat Completions 的 `extra_body` 传入 `thinking.type=enabled` 或 `disabled`，默认不传。仅对明确支持该参数的模型启用；强制思考模型不能关闭，`disabled` 也不能同时设置 `SIMPLE_AR_LLM_REASONING_EFFORT`。
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 默认是每次 provider 尝试 180 秒；慢速服务商可以设置更大的正数，只有明确设为 `0` / `off` / `none` / `unlimited` 才不向 provider 传客户端超时。
+  该设置传给传输客户端，不保证持续收到事件的流在相同墙钟时间内结束；重试也会延长逻辑调用。断流的实际用量不能确认时保留未知状态，不当成已确认零费用。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传输出上限。只有你确实想限制模型输出长度时才设置正数。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时、5xx 响应和 Cloudflare 524 origin timeout。
 - `SIMPLE_AR_LLM_MAX_WORKERS` 可选，限制单进程内每批模型请求的并发数；不设置则保留各阶段默认并发。服务商限流时可设为 `1`，不改变研究会话协议。

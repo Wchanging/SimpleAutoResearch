@@ -74,6 +74,41 @@ class ReportExportTests(unittest.TestCase):
         self.assertIn(r"\textbackslash{}input\{secret\}\%", rendered)
         self.assertNotIn(r"\input{", rendered)
 
+    def test_slash_prose_breaks_without_font_change_or_rewriting_math_and_urls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = self._source(root)
+            document = _ast()
+            document["blocks"].append({"t": "Para", "c": [
+                {"t": "Str", "c": "train/validation/calibration/test"},
+                {"t": "Space"}, {"t": "Str", "c": "10,123/3,639/2,048/5,803"},
+                {"t": "Space"}, {"t": "Str", "c": r"x/\input{secret}%"},
+                {"t": "Math", "c": [{"t": "InlineMath"}, "a/b"]},
+                {"t": "Link", "c": [["", [], []], [{"t": "Str", "c": "source"}],
+                    ["https://example.test/a/b", ""]]},
+            ]})
+            converted = []
+            def convert(argv, **kwargs):
+                if "--to=json" in argv:
+                    return json.dumps(document)
+                data = json.loads(kwargs["text"])
+                if "--to=latex" in argv:
+                    converted.append(data)
+                return "converted text"
+            with patch("simple_ar.report.export.shutil.which", return_value="pandoc"), patch(
+                    "simple_ar.report.export._run", side_effect=convert):
+                export_acm_report(source, root / "acm")
+            para = converted[1]["blocks"][-1]["c"]
+            self.assertEqual(para[0], {"t": "RawInline", "c": ["latex",
+                r"train/\allowbreak{}validation/\allowbreak{}calibration/\allowbreak{}test"]})
+            self.assertEqual(para[2]["c"][1], r"10,123/\allowbreak{}3,639/\allowbreak{}2,048/\allowbreak{}5,803")
+            self.assertNotIn(r"\texttt", para[0]["c"][1])
+            self.assertNotIn(r"\input{", para[4]["c"][1])
+            self.assertIn(r"\textbackslash{}input\{secret\}\%", para[4]["c"][1])
+            self.assertEqual(para[5], document["blocks"][-1]["c"][5])
+            self.assertEqual(para[6]["c"][-1][0], "https://example.test/a/b")
+            self.assertIn("incomplete bibliography", (root / "acm/README.txt").read_text())
+
     def _source(self, root: Path) -> Path:
         report = root / "report"
         report.mkdir()
