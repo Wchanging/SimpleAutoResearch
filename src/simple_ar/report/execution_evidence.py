@@ -96,7 +96,7 @@ def report_execution_evidence(context: ReportContext) -> dict[str, Any]:
             "Executor records prove invocation and recorded completion, not dataset contents, algorithm correctness or unrecorded hardware.",
             "A timeout is a configured limit; duration_sec is the observed elapsed time.",
             "A passed run and correct metric values do not independently validate the implementation mechanism.",
-            "Output previews are bounded producer text, not complete data or independent verification. Use a registered output handle to read more; an absent attachment does not prove no file was produced.",
+            "Output previews are bounded producer text, not complete data or independent verification. An object_fields inventory shows only which top-level fields exist, not their values. Use a registered output handle/literal field query to read needed fields before reporting them missing; an absent attachment does not prove no file was produced.",
             "Producer attachments support recorded local observations, not literature attribution. Name their registered role in prose; do not require or fabricate paper citation keys or treat tool handles as Markdown link targets.",
         ],
     }

@@ -27,9 +27,11 @@ from simple_ar.research.evidence.derivation import (
     build_novelty_checks,
 )
 from simple_ar.research.prompts import SYNTHESIZE_SYSTEM, synthesize_user_prompt
+from simple_ar.research.evidence.reader import reading_followup_context
 
 
 SynthesisStatus = Literal["ready", "needs_review"]
+COMPARISON_RELATIONS = {"agreement", "conditional_difference", "conflict", "not_comparable", "single_source"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +79,7 @@ class SynthesisResult:
     generation_mode: Literal["deterministic", "llm"] = "deterministic"
     diagnostics: tuple[str, ...] = ()
     execution_context: str = ""
+    comparisons: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Return a compact JSON-serializable summary."""
@@ -91,6 +94,7 @@ class SynthesisResult:
             "hypothesis_character_count": len(self.hypothesis_markdown),
             "diagnostics": list(self.diagnostics),
             "execution_context_character_count": len(self.execution_context),
+            "comparison_count": len(self.comparisons),
         }
 
     def to_handoff_dict(self) -> dict[str, Any]:
@@ -111,6 +115,7 @@ class SynthesisResult:
             "generation_mode": self.generation_mode,
             "diagnostics": list(self.diagnostics),
             "execution_context": self.execution_context,
+            "comparisons": [dict(row) for row in self.comparisons],
         }
 
     def for_idea(self, idea_id: str) -> "SynthesisResult":
@@ -191,6 +196,7 @@ class SynthesisResult:
             generation_mode=_generation_mode(data.get("generation_mode")),
             diagnostics=tuple(str(item) for item in data.get("diagnostics", [])),
             execution_context=str(data.get("execution_context") or ""),
+            comparisons=tuple(dict(row) for row in _mapping_rows(data.get("comparisons"))),
         )
 
 
@@ -216,7 +222,7 @@ def _synthesize_deterministic_evidence(request: SynthesisRequest) -> SynthesisRe
     diagnostics = _diagnostics(pack, ideas, require_ideas=request.purpose == "research")
     return SynthesisResult(
         status="ready" if not diagnostics else "needs_review",
-        gap_summary=build_gap_summary(pack),
+        gap_summary=build_gap_summary(pack, require_execution=request.purpose == "research"),
         ideas=tuple(ideas),
         novelty_checks=tuple(novelty_checks),
         experiment_contract=experiment_contract,
@@ -309,26 +315,8 @@ def _add_llm_synthesis(
         )
 
     pack = dict(request.evidence_pack)
-    counts = pack.get("counts")
-    source_count = (
-        int(counts["documents"])
-        if isinstance(counts, Mapping) and counts.get("documents") is not None else None
-    )
-    prompt = synthesize_user_prompt(
-            _evidence_notes_markdown(pack),
-            _bounded_pack_json(pack),
-            str(pack.get("evidence_snippets") or ""),
-            json.dumps(
-                {
-                    "topic": pack.get("topic", ""),
-                    "coverage": pack.get("coverage", {}),
-                    "counts": pack.get("counts", {}),
-                    "deterministic_idea_count": len(result.ideas),
-                },
-                ensure_ascii=False,
-            ),
-            source_count=source_count,
-    )
+    cards = _bounded_pack_json(pack)
+    excerpts = str(pack.get("evidence_snippets") or "")
     system = SYNTHESIZE_SYSTEM
     if request.purpose == "evidence_review":
         system = "Synthesize supplied source evidence for a review or a fixed-protocol reproduction. Distinguish source claims, reported observations, interpretation and unknowns. Never invent evidence."
@@ -338,9 +326,35 @@ def _add_llm_synthesis(
             "Source measurements are prior work, not a local run. This task does not request innovative candidates or a new experiment protocol; "
             "do not return idea_candidates or a proposed hypothesis. Use the supplied source identifiers for provenance.\n\n"
             + "\n".join(CLAIM_SCOPE_RULES) + "\n\n"
-            + _evidence_notes_markdown(pack) + "\n\nStructured source context:\n" + _bounded_pack_json(pack)
-            + "\n\nSource excerpts:\n" + str(pack.get("evidence_snippets") or "")
+            + "Structured source context:\n" + cards
+            + "\n\nSource excerpts:\n" + excerpts
         )
+    else:
+        counts = pack.get("counts")
+        prompt = synthesize_user_prompt("", cards, excerpts, json.dumps({
+            "deterministic_idea_count": len(result.ideas),
+        }, ensure_ascii=False), source_count=(int(counts["documents"])
+            if isinstance(counts, Mapping) and counts.get("documents") is not None else None))
+    prompt += (
+        "\n\nAlso return comparisons: a list of substantive, task-relevant comparisons, not one summary per paper. "
+        "Each object has dimension (the actual question or property compared), relation "
+        "(agreement, conditional_difference, conflict, not_comparable, or single_source), "
+        "evidence_refs (exact supplied IDs), observations (what each source actually establishes), "
+        "conditions (settings, definitions, units or assumptions affecting comparison), "
+        "interpretation (why the evidence matters to the user), and unresolved_question. "
+        "A difference in setting or metric is not a contradiction. Preserve counterevidence. "
+        "Use single_source when only one independent source supports an assessment; return [] when no comparison is supported. "
+        "These are model interpretations, not independently verified facts. Do not introduce new studies or measurements."
+    )
+    prompt += "\nComparison response contract:\n" + json.dumps({
+        "comparisons": {"type": "array", "item_fields": {
+            "dimension": {"type": "string"},
+            "relation": {"type": "string", "allowed_values": sorted(COMPARISON_RELATIONS)},
+            "evidence_refs": {"type": "array", "items": "exact ID strings from allowed_motivation_refs; not invented note/section IDs"},
+            "observations": {"type": "string or array of nonempty strings"},
+            "conditions": {"type": "string or array of nonempty strings"},
+            "interpretation": {"type": "string"}, "unresolved_question": {"type": "string"}}},
+    }, ensure_ascii=False)
     response = client.ask_json(system, prompt, label="research-synthesis")
     for round_index in range(2):
         if trace is not None:
@@ -349,6 +363,7 @@ def _add_llm_synthesis(
             if not isinstance(response, Mapping):
                 raise LLMError("LLM synthesis response must be a JSON object.")
             synthesis_markdown = _required_text(response, "synthesis_markdown")
+            comparisons = _parse_evidence_comparisons(response.get("comparisons"), pack)
             if request.purpose == "evidence_review":
                 if response.get("idea_candidates"):
                     raise LLMError("Evidence-review synthesis must not generate research candidates.")
@@ -376,6 +391,7 @@ def _add_llm_synthesis(
             synthesis_markdown=synthesis_markdown,
             hypothesis_markdown=hypothesis_markdown,
             generation_mode="llm",
+            comparisons=comparisons,
         )
 
     novelty_checks = build_novelty_checks(
@@ -396,8 +412,40 @@ def _add_llm_synthesis(
         synthesis_markdown=synthesis_markdown,
         hypothesis_markdown=hypothesis_markdown,
         generation_mode="llm",
+        comparisons=comparisons,
         diagnostics=tuple(_diagnostics(pack, list(llm_ideas))),
     )
+
+
+def _parse_evidence_comparisons(value: Any, pack: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Preserve explicit comparison work inside the existing synthesis result."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise LLMError("comparisons must be a list")
+    available = allowed_evidence_refs(pack)
+    rows = []
+    for index, row in enumerate(value):
+        if not isinstance(row, Mapping):
+            raise LLMError("comparison must be an object")
+        dimension = _required_text(row, "dimension")
+        interpretation = _required_text(row, "interpretation")
+        relation = row.get("relation")
+        if not isinstance(relation, str) or relation not in COMPARISON_RELATIONS:
+            raise LLMError(f"comparisons[{index}].relation must be ONE string from {sorted(COMPARISON_RELATIONS)}; received {relation!r}")
+        refs = _idea_string_list(row.get("evidence_refs"), "evidence_refs", index + 1, owner="comparisons")
+        if not refs or set(refs) - available:
+            raise LLMError(f"comparisons[{index}].evidence_refs requires known source evidence refs; unknown IDs: {sorted(set(refs) - available)}")
+        normalized = {"dimension": dimension, "relation": relation, "evidence_refs": refs,
+                      "interpretation": interpretation}
+        for key in ("observations", "conditions"):
+            normalized[key] = _idea_string_list(row.get(key, []), key, index + 1, allow_scalar=True, owner="comparisons")
+        question = row.get("unresolved_question", "")
+        if not isinstance(question, str):
+            raise LLMError("comparison unresolved_question must be text")
+        normalized["unresolved_question"] = question
+        rows.append(normalized)
+    return tuple(rows)
 
 
 _IDEA_LIST_FIELDS = (
@@ -496,22 +544,23 @@ def _idea_string_list(
     index: int,
     *,
     allow_scalar: bool = False,
+    owner: str = "idea_candidates",
 ) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
         if allow_scalar and value.strip():
             return [value.strip()]
-        raise LLMError(f"LLM idea_candidates[{index - 1}].{key} must be a JSON list.")
+        raise LLMError(f"LLM {owner}[{index - 1}].{key} must be a JSON list.")
     if not isinstance(value, list):
         raise LLMError(
-            f"LLM idea_candidates[{index - 1}].{key} must be a JSON list or string."
+            f"LLM {owner}[{index - 1}].{key} must be a JSON list or string."
         )
     values: list[str] = []
     for item in value:
         if not isinstance(item, str) or not item.strip():
             raise LLMError(
-                f"LLM idea_candidates[{index - 1}].{key} must contain non-empty strings."
+                f"LLM {owner}[{index - 1}].{key} must contain non-empty strings."
             )
         values.append(item.strip())
     return list(dict.fromkeys(values))
@@ -591,13 +640,21 @@ def _has_evidence(pack: Mapping[str, Any]) -> bool:
 
 
 def _bounded_pack_json(pack: Mapping[str, Any]) -> str:
-    """Serialize compact card evidence without sending full source text."""
+    """Serialize the shared evidence view used by model and readable notes."""
+
+    return json.dumps(_selected_pack(pack), ensure_ascii=False, default=str)
+
+
+def _selected_pack(pack: Mapping[str, Any]) -> dict[str, Any]:
+    """Select current interpretations once, keeping source excerpts separate."""
 
     selected: dict[str, Any] = {
         "topic": pack.get("topic", ""),
         "coverage": pack.get("coverage", {}),
         "counts": pack.get("counts", {}),
         "limitations": pack.get("limitations", []),
+        "interpretation_status": "Current adopted reading interpretations, not independent source verification; "
+            "lookup passages remain source text and superseded notes remain only in the saved Read trace.",
         # Make the closed provenance boundary explicit in the model-facing
         # context.  The validator remains authoritative, but an exact
         # allowlist reduces avoidable retries when a model remembers a nearby
@@ -609,66 +666,69 @@ def _bounded_pack_json(pack: Mapping[str, Any]) -> str:
         # User constraints are not optional background. Truncating the tail can
         # erase a permission or evaluation boundary while appearing complete.
         selected["execution_context"] = execution_context
+        selected["execution_context_status"] = (
+            "A requested goal is not evidence that code, data or an environment is ready. "
+            "Preserve explicitly supplied execution constraints; otherwise identify what must be prepared, "
+            "without describing missing assets as a prepared boundary."
+        )
     selection: dict[str, Any] = {}
-    for key in ("paper_cards", "claim_cards", "method_cards", "dataset_cards"):
+    for key in ("paper_cards", "claim_cards", "method_cards", "dataset_cards", "paper_notes"):
         value = pack.get(key)
         if isinstance(value, list):
             selected[key] = value[:24]
             selection[key] = {"included": min(len(value), 24), "available": len(value)}
+    selected["paper_notes"] = [
+        {**row, "reading_followup": reading_followup_context(row.get("reading_followup"), include_passages=True)}
+        for row in _mapping_rows(selected.get("paper_notes"))
+    ]
     selected["context_selection"] = selection
-    return json.dumps(selected, ensure_ascii=False, default=str)
+    return selected
 
 
 def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
-    """Create a small readable evidence view for the synthesis prompt."""
+    """Render the same selected evidence for deterministic/human inspection."""
 
+    pack = _selected_pack(pack)
     lines = [f"# Evidence Notes\n\nTopic: {pack.get('topic', '')}"]
     execution_context = _execution_context_text(pack)
     if execution_context:
         lines.extend(
             [
                 "\n## User research request and execution context",
-                "A requested goal is not evidence that code, data or an environment is ready. "
-                "Preserve explicitly supplied execution constraints; otherwise identify what must be prepared, "
-                "without describing missing assets as a prepared boundary.",
+                pack["execution_context_status"],
                 execution_context,
             ]
         )
-    for key, heading, fields in (
-        ("paper_cards", "Papers", ("paper_id", "title", "method_summary")),
-        ("claim_cards", "Claims", ("claim_id", "paper_id", "claim")),
-        ("method_cards", "Methods", ("method_id", "paper_id", "name")),
-        ("dataset_cards", "Datasets", ("dataset_id", "paper_id", "name")),
-        (
-            "paper_notes",
-            "Model Reading Notes",
-            ("paper_id", "title", "problem", "method", "key_claims", "claim_scopes", "limitations", "open_questions",
-             "evidence_refs", "confidence", "relation_to_topic", "synthesis_hint",
-             "reading_coverage", "reading_followup"),
-        ),
+    for key, heading in (
+        ("paper_cards", "Papers"), ("claim_cards", "Claims"),
+        ("method_cards", "Methods"), ("dataset_cards", "Datasets"),
+        ("paper_notes", "Model Reading Notes"),
     ):
         rows = pack.get(key)
         if not isinstance(rows, list) or not rows:
             continue
         lines.append(f"\n## {heading}")
-        for row in rows[:24]:
+        if key == "paper_notes":
+            lines.append(pack["interpretation_status"])
+        for row in rows:
             if not isinstance(row, Mapping):
                 continue
             values = []
-            for field in fields:
-                value = row.get(field)
-                if value is None or value == "" or value == []:
+            for field_name, value in row.items():
+                if value is None or value == "" or value == [] or value == {}:
                     continue
                 text = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value).strip()
                 # Keep the reader's compact notes intact, including caveats and
                 # uncertainty; do not compress only the positive method story.
                 if key != "paper_notes" and len(text) > 360:
                     text = text[:360] + " [truncated; consult source card]"
-                values.append(f"{field}: {text}")
+                values.append(f"{field_name}: {text}")
             if values:
                 lines.append("- " + " | ".join(values))
-        if len(rows) > 24:
-            lines.append(f"[coverage] {len(rows) - 24} {key} rows omitted; this is not the complete evidence set.")
+        selection = pack["context_selection"][key]
+        omitted = selection["available"] - selection["included"]
+        if omitted:
+            lines.append(f"[coverage] {omitted} {key} rows omitted; this is not the complete evidence set.")
     return "\n".join(lines)
 
 

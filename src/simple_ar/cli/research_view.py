@@ -29,7 +29,7 @@ DESCRIPTIONS = {
     "research_design": "Design the selected experiment",
     "refine_implementation": "Clarify unresolved implementation decisions within the accepted design",
     "prepare_implementation": "Prepare a fresh workspace without repeating valid measurements",
-    "prepare_execution": "Prepare the isolated project workspace",
+    "prepare_execution": "Prepare the configured project workspace or task environment",
     "implement": "Locate code, propose edits, review and validate",
     "analysis": "Compare measured results with the hypothesis",
     "matrix_analysis": "Analyze paired experiment results",

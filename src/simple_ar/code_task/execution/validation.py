@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -82,8 +84,9 @@ def validate_code_task(
 ) -> CodeTaskValidationResult:
     """Validate Python files in a code-task workspace.
 
-    The validator is intentionally lightweight. Syntax errors are always
-    errors. Risky imports and calls are warnings by default, and become errors
+    The validator is intentionally lightweight. Syntax errors are errors except
+    byte-identical files proven present in the frozen Git-worktree or initial
+    syntax-error baseline, which remain visible warnings in non-strict mode. Risky imports/calls become errors
     in strict mode. This keeps ordinary benchmark projects usable while still
     making security-sensitive behavior visible.
 
@@ -114,7 +117,7 @@ def validate_code_task(
         for path in _iter_workspace_files(paths.workspace_dir):
             if path.suffix == ".py" and (max_file_bytes <= 0 or path.stat().st_size <= max_file_bytes):
                 try:
-                    names.update(name for name, _ in _imports(ast.parse(path.read_text(encoding="utf-8", errors="replace"))))
+                    names.update(name for name, _ in _imports(ast.parse(path.read_bytes(), filename=str(path))))
                 except SyntaxError:
                     pass  # Reported by the ordinary syntax pass below.
         import_availability = _external_import_availability(str(external_python), names)
@@ -149,6 +152,14 @@ def validate_code_task(
             issues=issues,
             import_availability=import_availability,
         )
+        if not strict and issues and issues[-1]["code"] == "syntax_error" and issues[-1]["path"] == rel_path:
+            baseline = _unchanged_git_baseline(path, rel_path, paths.workspace_dir, manifest, max_file_bytes)
+            if baseline:
+                issues[-1].update(severity="warning", baseline_status="byte_identical_frozen_git_source",
+                                  baseline_commit=baseline)
+            elif (manifest_section(manifest, "workspace").get("initial_syntax_errors", {}).get(rel_path)
+                  == hashlib.sha256(path.read_bytes()).hexdigest()):
+                issues[-1].update(severity="warning", baseline_status="byte_identical_initial_syntax_error")
 
     error_count = sum(1 for item in issues if item["severity"] == "error")
     warning_count = sum(1 for item in issues if item["severity"] == "warning")
@@ -161,7 +172,7 @@ def validate_code_task(
         "max_file_bytes": max_file_bytes,
         "workspace": str(paths.workspace_dir),
         "dependency_interpreter": str(external_python or sys.executable),
-        "validation_scope": "static syntax and import discovery; not runtime or scientific validation",
+        "validation_scope": "static syntax and import discovery; proven unchanged initial syntax defects are warnings unless strict; not runtime or scientific validation",
         "file_count": scanned_files,
         "python_file_count": python_files,
         "issue_count": len(issues),
@@ -191,6 +202,39 @@ def validate_code_task(
     )
 
 
+def _unchanged_git_baseline(path: Path, relative: str, workspace: Path,
+                            manifest: dict[str, Any], max_file_bytes: int) -> str:
+    """Use existing immutable provenance, never a live source or previous failure.
+
+    Only inspect files that failed parsing. Unknown provenance remains an error;
+    neither test directory names nor an equal error message excuse a mutation.
+    Git reads are bounded and do not execute repository code or hooks.
+    """
+    record = manifest_section(manifest, "workspace")
+    provenance = record.get("git")
+    commit = provenance.get("origin_commit") if isinstance(provenance, dict) else None
+    if record.get("selected_mode", record.get("mode")) != "git_worktree" or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        return ""
+    prefix = str(record.get("project_relative_path") or "")
+    parts = [part for part in (prefix + "/" + relative).split("/") if part not in {"", "."}]
+    if ".." in parts or any("\\" in part for part in parts):
+        return ""
+    if not path.resolve().is_relative_to(workspace.resolve()):
+        return ""
+    object_name = commit + ":" + "/".join(parts)
+    limit = max_file_bytes if max_file_bytes > 0 else 500_000
+    try:
+        size = subprocess.run(["git", "-C", str(workspace), "cat-file", "-s", object_name],
+                              capture_output=True, timeout=5, check=False)
+        if size.returncode != 0 or int(size.stdout) > limit:
+            return ""
+        original = subprocess.run(["git", "-C", str(workspace), "show", object_name],
+                                  capture_output=True, timeout=5, check=False)
+        return commit if original.returncode == 0 and original.stdout == path.read_bytes() else ""
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return ""
+
+
 def _validate_python_file(
     path: Path,
     *,
@@ -200,9 +244,10 @@ def _validate_python_file(
     issues: list[dict[str, Any]],
     import_availability: dict[str, bool] | None = None,
 ) -> None:
-    text = path.read_text(encoding="utf-8", errors="replace")
     try:
-        tree = ast.parse(text, filename=rel_path)
+        # Parse source bytes like Python: honor UTF-8 BOM/PEP 263 cookies and
+        # reject invalid encodings rather than replacing characters silently.
+        tree = ast.parse(path.read_bytes(), filename=rel_path)
     except SyntaxError as exc:
         issues.append(
             _issue(

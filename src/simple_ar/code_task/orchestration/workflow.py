@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from glob import escape
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from simple_ar.code_task.workspace.modes import (
     create_workspace,
     suggested_python_executable,
 )
+from simple_ar.code_task.runtime.state import utcnow_iso as _utcnow_iso
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ def initialize_code_task(
     edit_scope_mode: str | None = None,
     edit_scope_allowed_patterns: tuple[str, ...] = (),
     edit_scope_protected_patterns: tuple[str, ...] = (),
+    data_inputs: tuple[str, ...] = (),
 ) -> CodeTaskInitResult:
     """Initialize a local code-task run without modifying the source project.
 
@@ -113,6 +115,9 @@ def initialize_code_task(
             glob patterns. Empty means any non-protected workspace path.
         edit_scope_protected_patterns: Additional workspace-relative glob
             patterns that are read-only for patch proposals and applications.
+        data_inputs: Explicit project-relative data files/directories. Independent
+            copies retain their runtime paths and become protected edit inputs;
+            incidental file-size limits do not apply to this selection.
 
     Returns:
         Paths and metadata for the initialized code-task run.
@@ -151,6 +156,7 @@ def initialize_code_task(
             include=workspace_include,
             exclude=workspace_exclude,
             reuse_source_venv=workspace_reuse_source_venv,
+            data_inputs=data_inputs,
         )
     )
     workspace_dir = workspace.project_root
@@ -160,7 +166,9 @@ def initialize_code_task(
     edit_scope = default_edit_scope(
         mode=edit_scope_mode,
         allowed_patterns=edit_scope_allowed_patterns,
-        protected_patterns=edit_scope_protected_patterns,
+        protected_patterns=(*edit_scope_protected_patterns,
+                            *(pattern for name in data_inputs
+                              for pattern in (escape(name), escape(name.rstrip("/")) + "/**"))),
     )
     allowed_patterns = tuple(str(item) for item in edit_scope["allowed_patterns"])
     protected_patterns = tuple(str(item) for item in edit_scope["protected_patterns"])
@@ -287,7 +295,15 @@ def _manifest(
             **copy_report.to_json(),
             "max_file_bytes": max_file_bytes,
         },
-        "workspace": workspace.to_manifest(run_dir=run_dir),
+        "workspace": {
+            **workspace.to_manifest(run_dir=run_dir),
+            # Freeze only initial syntax failures, reusing existing index
+            # checksums. Later index refreshes must not redefine this baseline.
+            "initial_syntax_errors": {
+                row["path"]: row["sha256"] for row in codebase_index.get("files", [])
+                if row.get("kind") == "python" and row.get("python", {}).get("syntax_ok") is False
+            },
+        },
         "codebase": {
             "file_count": project.get("file_count", 0),
             "python_file_count": project.get("python_file_count", 0),
@@ -338,7 +354,3 @@ def _init_result_schema(primary_metric: str, metric_directions: dict[str, str]) 
         "required_metrics": required,
         "metric_directions": dict(metric_directions),
     }
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")

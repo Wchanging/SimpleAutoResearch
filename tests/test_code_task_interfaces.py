@@ -5,6 +5,7 @@ import unittest
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 from simple_ar.code_task.analysis.interfaces import (
     dependency_context,
@@ -17,12 +18,32 @@ from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
 from simple_ar.code_task.generation.common import safe_relative_path, string_list
 from simple_ar.code_task.generation.review import review_generated_project
 from simple_ar.code_task.generation.writer import _response_self_reports_defect, write_generated_project
-from simple_ar.code_task import initialize_code_task, review_code_task_changes
+from simple_ar.code_task import initialize_code_task, review_code_task_changes, build_code_task_context_pack
+from simple_ar.code_task.analysis.index import build_codebase_index
+from simple_ar.code_task.analysis.repo_map import build_repo_map
 from simple_ar.code_task.execution.environment import resolve_code_task_command
-from simple_ar.core.artifacts import read_json, write_json, write_text
+from simple_ar.core.artifacts import read_json, read_jsonl, write_json, write_text
 
 
 class CodeTaskInterfaceTests(unittest.TestCase):
+    def test_source_loader_attributes_are_not_missing_local_apis_but_typos_still_are(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / 'pkg').mkdir()
+            (project / 'pkg/__init__.py').write_text('VALUE = 1\n')
+            (project / 'pkg/implementation.py').write_text('VALUE = 2\n')
+            (project / 'consumer.py').write_text(
+                'import pkg as package\nimport pkg.implementation as local\n'
+                'from pkg.implementation import __file__\n'
+                'values = (local.__file__, local.__name__, local.__doc__, local.__package__, '
+                'local.__loader__, local.__spec__, local.__cached__, local.__builtins__, '
+                'local.__dict__, package.__path__)\n'
+                'unknown = local.__invented_loader_flag__\n'
+                'bad_package = local.__path__\n')
+            findings = find_local_api_mismatches(project)
+            self.assertEqual({row['missing_symbol'] for row in findings},
+                             {'__invented_loader_flag__', '__path__'})
+
     def test_external_python_preserves_virtualenv_symlink_entrypoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable = Path(tmp) / "env" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
@@ -383,6 +404,26 @@ class CodeTaskInterfaceTests(unittest.TestCase):
             )
             self.assertEqual(find_local_api_mismatches(project), [])
 
+            # Possible module bindings include branch-local imports/exports.
+            # Python scope, not package names or task exceptions, owns this.
+            write_text(project / "bridge.py",
+                "try:\n    from collections.abc import Mapping as MappingAlias\n"
+                "except ImportError:\n    MappingAlias = dict\n"
+                "if True:\n    class BranchType:\n        private_member = 1\n"
+                "    def branch_function():\n        private_local = 1\n"
+                "else:\n    alternative = 2\n"
+                "left, right = (1, 2)\nimport os.path\n")
+            write_text(project / "dynamic.py", "def __getattr__(name):\n    return name\n")
+            write_text(project / "conditional.py", "if True:\n    from lib.util import *\n")
+            write_text(project / "consumer.py",
+                "from bridge import MappingAlias, BranchType, branch_function, alternative, left, right, os\n"
+                "from bridge import private_member, private_local, missing, path\n"
+                "from dynamic import runtime_name\nfrom conditional import Thing\n")
+            with patch('importlib.import_module', side_effect=AssertionError('Do not execute user code')):
+                findings = find_local_api_mismatches(project)
+            self.assertEqual({row['missing_symbol'] for row in findings},
+                             {'private_member', 'private_local', 'missing', 'path'})
+
     def test_review_warns_when_planned_public_api_is_not_exported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
@@ -535,6 +576,79 @@ class CodeTaskInterfaceTests(unittest.TestCase):
 
             self.assertEqual(result.status, "failed")
             self.assertTrue(any(row["category"] == "interface_compatibility" for row in report["findings"]))
+
+
+class LocalImportTests(unittest.TestCase):
+    """Static local-interface discovery without importing the project."""
+
+    def project(self, directory):
+        root = Path(directory) / 'project'
+        root.mkdir()
+        sources = {
+            'src/acme/__init__.py': '',
+            'src/acme/entry.py': 'from .worker import transform\nfrom . import settings\nimport numpy\n',
+            'src/acme/worker.py': 'from . import hidden\ndef transform(x):\n    return x\n',
+            'src/acme/settings.py': 'SCALE = 1\n',
+            'src/acme/hidden.py': 'VALUE = 2\n',
+            'noise.py': 'def entry_transform():\n    return "noise"\n',
+            'src.py': 'import acme.worker as worker\n',
+        }
+        for name, content in sources.items():
+            write_text(root / name, content)
+        return root
+
+    def test_exact_relative_references_do_not_import_project_or_external_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.project(directory)
+            with patch('importlib.import_module', side_effect=AssertionError('No imports')):
+                index = build_codebase_index(root)
+                mapping = build_repo_map(index)
+            entry = next(row for row in index['files'] if row['path'] == 'src/acme/entry.py')
+            self.assertEqual(entry['python']['imports'], ['numpy', 'worker'])  # Historical top-level summary unchanged.
+            refs = entry['python']['import_references']
+            self.assertIn({'module': 'worker', 'level': 1, 'names': ['transform']}, refs)
+            rows = {row['path']: row for row in mapping['files']}
+            self.assertEqual(rows['src/acme/entry.py']['local_import_paths'],
+                ['src/acme/worker.py', 'src/acme/__init__.py', 'src/acme/settings.py'])
+            self.assertEqual(rows['src.py']['local_import_paths'], ['src/acme/worker.py'])
+            self.assertNotIn('local_import_paths', rows['noise.py'])
+
+    def test_ambiguous_root_src_modules_and_escape_are_not_guessed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.project(directory)
+            write_text(root / 'acme/worker.py', 'VALUE = "alternative"\n')
+            write_text(root / 'acme/escape.py', 'from ...outside import value\n')
+            rows = {row['path']: row for row in build_repo_map(build_codebase_index(root))['files']}
+            self.assertNotIn('local_import_paths', rows['src.py'])
+            self.assertNotIn('local_import_paths', rows['acme/escape.py'])
+            self.assertIn('src/acme/worker.py', rows['src/acme/entry.py'].get('local_import_paths', []))
+            self.assertNotIn('acme/worker.py', rows['src/acme/entry.py'].get('local_import_paths', []))
+
+    def test_legacy_index_keeps_no_guessed_association(self):
+        with tempfile.TemporaryDirectory() as directory:
+            index = build_codebase_index(self.project(directory))
+            for row in index['files']:
+                row.get('python', {}).pop('import_references', None)
+            self.assertFalse(any(row.get('local_import_paths') for row in build_repo_map(index)['files']))
+
+    def test_explicit_targets_required_evidence_then_one_hop_reading_with_original_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            root = self.project(directory)
+            write_text(root / 'conditions.toml', 'scale = 1\n')
+            write_text(directory / 'task.md', 'Fix entry_transform in noise.py')
+            run = directory / 'run'
+            initialize_code_task(run_dir=run, code_root=root, task_file=directory / 'task.md',
+                benchmark_command='python -m unittest', edit_scope_allowed_patterns=('*.py',),
+                edit_scope_protected_patterns=('src/acme/worker.py',))
+            pack = build_code_task_context_pack(run, max_files=3,
+                preferred_paths=('src/acme/entry.py',), max_total_chars=300, max_source_chars_per_file=100)
+            self.assertEqual(pack.selected_files, ('src/acme/entry.py', 'src/acme/worker.py', 'src/acme/__init__.py'))
+            rows = read_jsonl(pack.snippets_path)
+            self.assertEqual(rows[1]['access_role'], 'read_only_evidence')
+            self.assertTrue(any('static local import' in reason for reason in rows[1]['reasons']))
+            self.assertNotIn('src/acme/hidden.py', pack.selected_files)  # No transitive expansion.
+            self.assertLessEqual(sum(row['chars'] for row in rows), 300)
 
 
 if __name__ == "__main__":

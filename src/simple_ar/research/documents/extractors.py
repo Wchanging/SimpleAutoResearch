@@ -13,20 +13,23 @@ from simple_ar.research.documents.ports import (
     DocumentResolver,
     LocalDocumentResolver,
     ParsedDocument,
+    MATERIAL_TEXT_SUFFIXES, HTML_SUFFIXES,
 )
+from simple_ar.research.documents.sections import abstract_excerpt as _abstract
 
 
 EXTRACTION_SCHEMA_VERSION = "fulltext_extraction.v1"
-TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 MOJIBAKE_SEGMENT_PATTERN = re.compile(r"鈥[\u4e00-\u9fff]")
 
 
 class LocalDocumentParser:
     """Default local parser used when no external parser is injected."""
 
-    def __init__(self, *, parser_backend: str = "basic", max_pdf_pages: int = 20) -> None:
+    def __init__(self, *, parser_backend: str = "basic", max_pdf_pages: int | None = None) -> None:
         self.parser_backend = str(parser_backend or "basic").strip().lower() or "basic"
-        self.max_pdf_pages = max(1, int(max_pdf_pages))
+        if max_pdf_pages is not None and (isinstance(max_pdf_pages, bool) or int(max_pdf_pages) < 1):
+            raise ValueError("max_pdf_pages must be positive when supplied.")
+        self.max_pdf_pages = int(max_pdf_pages) if max_pdf_pages is not None else None
 
     @classmethod
     def from_source_plan(cls, source_plan: SourcePlan) -> "LocalDocumentParser":
@@ -34,29 +37,46 @@ class LocalDocumentParser:
 
         return cls(
             parser_backend=str(source_plan.budget.get("parser_backend") or "basic"),
-            max_pdf_pages=_positive_int(
-                source_plan.budget.get("max_pdf_pages"),
-                default=20,
-            ),
+            max_pdf_pages=source_plan.budget.get("max_pdf_pages"),
         )
 
     def parse(self, path: Path) -> ParsedDocument:
         """Parse one local resource using the existing backend semantics."""
 
         if self.parser_backend == "unstructured":
+            if path.suffix.lower() == ".pdf" and self.max_pdf_pages is not None:
+                raise RuntimeError("unstructured PDF parsing cannot enforce max_pdf_pages; use the basic parser or omit the limit")
             return ParsedDocument(_read_unstructured(path), "unstructured")
 
         suffix = path.suffix.lower()
-        if suffix in TEXT_SUFFIXES:
+        if suffix in MATERIAL_TEXT_SUFFIXES:
             return ParsedDocument(_read_text(path), "plain_text")
-        if suffix in {".html", ".htm"}:
+        if suffix in HTML_SUFFIXES:
             return ParsedDocument(_html_to_text(_read_text(path)), "basic_html")
         if suffix == ".pdf":
+            coverage: dict[str, object] = {}
             return ParsedDocument(
-                _read_pdf(path, max_pages=self.max_pdf_pages),
+                _read_pdf(path, max_pages=self.max_pdf_pages, coverage=coverage),
                 "pypdf_optional",
+                coverage=coverage,
             )
         raise RuntimeError(f"unsupported_fulltext_suffix:{suffix or 'none'}")
+
+
+def document_extraction_limitations(records: list[DocumentRecord]) -> tuple[str, ...]:
+    """Observed parser limits for reading/writing, never semantic certification."""
+    notes = []
+    for record in records:
+        coverage = record.metadata.get("fulltext_extraction", {}).get("coverage", {})
+        if coverage.get("truncated") is True:
+            notes.append(f"Source {record.document_id} extracted {coverage.get('extracted_pages')}/"
+                         f"{coverage.get('total_pages')} PDF pages; unextracted pages are unavailable. "
+                         "Parsed text is not complete source access.")
+        empty = coverage.get("empty_text_pages", [])
+        if empty:
+            notes.append(f"Source {record.document_id} returned no text on {len(empty)} PDF page(s); "
+                         "blank extraction does not establish that those pages contain no information.")
+    return tuple(notes)
 
 
 def apply_fulltext_extraction(
@@ -152,16 +172,14 @@ def _parse_hint(
         )
 
     try:
-        if parser is None:
-            text, parser_name = _extract_text(resolution.path, source_plan=source_plan)
-        else:
-            parsed = parser.parse(resolution.path)
-            if not isinstance(parsed, ParsedDocument):
-                raise TypeError(
-                    f"document parser returned {type(parsed).__name__}; "
-                    "expected ParsedDocument"
-                )
-            text, parser_name = parsed.text, parsed.parser
+        parsed = (parser or LocalDocumentParser.from_source_plan(source_plan)).parse(resolution.path)
+        if not isinstance(parsed, ParsedDocument):
+            raise TypeError(
+                f"document parser returned {type(parsed).__name__}; "
+                "expected ParsedDocument"
+            )
+        text, parser_name = parsed.text, parsed.parser
+        coverage = dict(parsed.coverage)
     except Exception as exc:  # pragma: no cover - parser backend behavior varies by environment.
         return record, _row(
             record,
@@ -181,7 +199,7 @@ def _parse_hint(
             hint=hint,
         )
 
-    text_path = resolution.path if resolution.path.suffix.lower() in TEXT_SUFFIXES else _write_extracted_text(
+    text_path = resolution.path if resolution.path.suffix.lower() in MATERIAL_TEXT_SUFFIXES else _write_extracted_text(
         extraction_dir=extraction_dir,
         record=record,
         text=text,
@@ -194,6 +212,7 @@ def _parse_hint(
         "extracted_text_path": str(text_path),
         "hint_kind": str(hint.get("kind") or ""),
         "chars": len(text),
+        "coverage": coverage,
     }
     parsed_record = replace(
         record,
@@ -213,15 +232,11 @@ def _parse_hint(
         hint=hint,
         chars=len(text),
         parser=parser_name,
+        coverage=coverage,
     )
 
 
-def _extract_text(path: Path, *, source_plan: SourcePlan) -> tuple[str, str]:
-    parsed = LocalDocumentParser.from_source_plan(source_plan).parse(path)
-    return parsed.text, parsed.parser
-
-
-def _read_pdf(path: Path, *, max_pages: int) -> str:
+def _read_pdf(path: Path, *, max_pages: int | None, coverage: dict[str, object] | None = None) -> str:
     if not _path_looks_like_pdf(path):
         raise RuntimeError("invalid_pdf_header")
     try:
@@ -230,8 +245,14 @@ def _read_pdf(path: Path, *, max_pages: int) -> str:
         raise RuntimeError("pypdf is not installed; install it or keep PDF parsing disabled") from exc
     reader = PdfReader(str(path))
     parts: list[str] = []
+    empty_pages: list[int] = []
     for page in reader.pages[:max_pages]:
         parts.append(page.extract_text() or "")
+        if not parts[-1].strip():
+            empty_pages.append(len(parts))
+    if coverage is not None:
+        coverage.update(total_pages=len(reader.pages), extracted_pages=len(parts), page_limit=max_pages,
+                        truncated=len(parts) < len(reader.pages), empty_text_pages=empty_pages)
     return "\n".join(parts)
 
 
@@ -256,30 +277,47 @@ def _read_unstructured(path: Path) -> str:
 
 
 class _HTMLTextParser(HTMLParser):
+    # Preserve document structure, not DOM text-node boundaries. Inline spans,
+    # citations and emphasis must not split a heading or scientific sentence.
+    BLOCK_TAGS = {"address", "article", "blockquote", "caption", "dd", "div", "dl", "dt",
+                  "figcaption", "figure", "h1", "h2", "h3", "h4", "h5", "h6", "li",
+                  "main", "ol", "p", "pre", "section", "table", "tr", "ul", "title"}
+    SKIP_TAGS = {"script", "style", "noscript", "nav", "form", "dialog"}
+
     def __init__(self) -> None:
         super().__init__()
         self.parts: list[str] = []
         self.skip_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() in {"script", "style", "noscript"}:
+        tag = tag.lower()
+        if tag in self.SKIP_TAGS:
             self.skip_depth += 1
+        elif not self.skip_depth:
+            if tag in self.BLOCK_TAGS or tag in {"br", "hr"}:
+                self.parts.append("\n")
+                if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                    self.parts.append("#" * int(tag[1]) + " ")
+            elif tag in {"td", "th"}:
+                self.parts.append("\t")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in {"script", "style", "noscript"} and self.skip_depth:
+        tag = tag.lower()
+        if tag in self.SKIP_TAGS and self.skip_depth:
             self.skip_depth -= 1
+        elif not self.skip_depth and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if not self.skip_depth:
-            stripped = data.strip()
-            if stripped:
-                self.parts.append(stripped)
+            self.parts.append(re.sub(r"\s+", " ", data))
 
 
 def _html_to_text(text: str) -> str:
     parser = _HTMLTextParser()
     parser.feed(text)
-    return "\n".join(parser.parts)
+    return "\n".join(re.sub(r"[^\S\n]+", " ", line).strip()
+                     for line in "".join(parser.parts).splitlines()).strip()
 
 
 def _write_extracted_text(*, extraction_dir: Path, record: DocumentRecord, text: str) -> Path:
@@ -332,6 +370,7 @@ def _row(
     hint: dict[str, Any] | None = None,
     chars: int | None = None,
     parser: str | None = None,
+    coverage: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     return {
         "document_id": record.document_id,
@@ -343,6 +382,7 @@ def _row(
         "source_path": str(source_path) if source_path else None,
         "extracted_text_path": str(extracted_text_path) if extracted_text_path else None,
         "chars": chars,
+        "coverage": dict(coverage or {}),
     }
 
 
@@ -382,24 +422,11 @@ def _repair_common_mojibake(text: str) -> str:
     return repaired
 
 
-def _abstract(text: str, *, limit: int = 1200) -> str:
-    return " ".join(text.split())[:limit]
-
-
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _safe_name(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
     return safe[:120] or "document"
-
-
-def _positive_int(value: object, *, default: int) -> int:
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return default

@@ -1,80 +1,62 @@
-﻿# Configuration Reference
+# Configuration Reference
 
 [中文版本](CONFIG_REFERENCE_zh.md)
 
-For a first task, use [guided setup](#guided-setup); the full field tables are
-optional expert reference. `.env` holds global connections, while task TOML
-holds case-specific inputs and execution limits. Reading/revision bounds and
-their evidence limits are described in [workflows](WORKFLOWS.md), not new
-configuration layers. Do not interpret a configured review as verified science.
+This is the field reference for task configuration. Start with [Usage](USAGE.md) if you do not need expert settings; commands are listed in [CLI Reference](CLI_REFERENCE.md).
 
 ## Guided setup
 
-Online setup reads abstracts and supplied local materials by default. Add
-`--fulltext` with `--sources search` to explicitly allow remote full-text retrieval
-and PDF downloads using the existing document pipeline. Availability and extraction
-remain best-effort; missing full text is recorded, not treated as read. Local
-materials mode never enables network retrieval through this option.
+`start` saves ordinary research TOML and, for repair, a referenced CodeTask TOML. Chat and structured setup share this serializer; a setup draft is not an execution session.
 
-`simple-ar start` offers `survey`, `bug_fix`, prepared `reproduction`, material-based `writing` and descriptive `data_analysis`, generating ordinary research
-TOML and (for code) CodeTask TOML plus task text. The same default/TOML/explicit
-CLI precedence applies; this is not a second configuration schema.
+| Setting | Location |
+| --- | --- |
+| Provider connection and secret | Global `.env` |
+| Goal, inputs, delivery and resource limits | Research TOML |
+| Editable project, protection and project interpreter | Referenced CodeTask TOML |
 
-```bash
-simple-ar start --kind survey --goal "Compare uncertainty estimation methods" --sources search --prepare-only
+Precedence is built-in defaults → TOML → explicit CLI options. CLI lists replace file lists. Paths resolve from the configuration location where documented; command argv remains literal. Confirmed chat settings cannot silently replace explicit user choices.
+
+For repair, `--project-python PATH` writes `[environment] mode="external"` and `python="..."` in CodeTask TOML. Omission keeps current. This selects an existing interpreter, without installing dependencies.
+
+For reproduction, `--project` supplies read-only preparation and the default command cwd. `--data-path` registers data; `--output-files JSON` maps producer files to `execution.output_files`. Neither authorizes edits or infers results from arbitrary paths.
+
+Optional dependency preparation for a single Python command uses:
+
+```toml
+[execution.environment]
+mode = "venv"
+requirements = ["requirements.txt"] # relative to execution.cwd
+install_project = false
+timeout_sec = 300
+# python_executable = "/path/to/base/python"
 ```
 
-`--sources materials` requires repeatable `--document PATH` and disallows online
-search. `bug_fix` requires `--project`, `--validate` and repeatable `--allow` edit
-patterns. Defaults: isolated copy, current Python, 300-second validation timeout,
-one repair, protected tests and `.env`. The command is authorized execution, not
-an OS sandbox. Edit generated CodeTask TOML for custom environment/scope/timeouts.
+The default is current execution without installation. Preparation uses the shared process budget/logs and stops measurement on failure. Build code/network access is possible; this is not an OS sandbox or general provisioning. See [workflow boundaries](WORKFLOWS.md#explicit-task-dependency-preparation).
 
-For prepared reproduction, supply local papers, the published conclusion, data/adaptation,
-comparison criteria and metric names. The environment, data and executable must already be
-ready. Setup does not install dependencies, invent a method or run a baseline. For example:
-
-```bash
-simple-ar start --kind reproduction --goal "Check the paper's coverage conclusion" \
-  --document paper.pdf --hypothesis "Known weights retain coverage under covariate shift" \
-  --dataset "Prepared synthetic adaptation" --expected-outcome "Compare coverage with nominal 0.9" \
-  --metric coverage --cwd ./prepared-project --timeout-sec 300 --prepare-only \
-  --command python run.py --seed 7
-```
-
-Put `--command` last: everything after it is process argv, not setup options, and is
-not interpreted by a shell. Interactive setup asks for argv as a JSON list. Defaults:
-current working directory/environment, one invocation, 300 seconds, reproduction report
-with whole-document review; API totals remain unset. `--metric` is repeatable; the first
-is primary. The command must emit metrics supported by the existing executor (for example
-`coverage: 0.91`). Edit the generated TOML for richer result schemas, accepted protocol
-details or explicit additional capacity before execution. This is a conclusion check,
-not an automatic full-paper reproduction.
-
-Inputs are saved under `--output-root` (default `runs/assistant`); asset paths
-are absolute and output `sessions` resolves relative to the generated research
-TOML. Setup never modifies the original project or copies credentials into config.
-API totals remain unlimited unless configured.
-
-`--prepare-only` makes no API/process calls. `--yes` accepts setup only;
-`--interaction` still controls execution decisions (default `checkpoints`).
-Missing non-interactive input fails instead of waiting. Declining the final
-confirmation retains saved inputs. After execution begins, resume the printed
-session via `research-session --session-root PATH --model MODEL`, not another `start`.
-Use the model selected at setup (`env` by default); data-analysis setup saves
-`model.name = ""` and its resume command omits `--model`.
+For source access, `materials_only` excludes online search; `--fulltext` permits best-effort remote retrieval for an online survey. Unavailable or truncated material stays explicit.
 
 ## Writing from supplied material
+
+Put length and genre requirements in the task goal, not additional environment
+variables. New adaptive article planning distinguishes "about 1,200 words" (a
+soft target) from "1,000–1,200 words" (hard bounds). It does not invent a tolerance,
+convert pages into words, or silently alter saved plans. Targets guide composition;
+they do not make a short or incomplete report acceptable. Review still checks the
+original request, evidence and complete canonical delivery. No new TOML field is
+required for this distinction.
 
 `start --kind writing --goal "Explain my existing results" --material notes.md --prepare-only`
 saves ordinary TOML: `task.kind = "writing"`, `task.outputs = ["report"]`,
 `assets.materials = ["notes.md"]`, `model.name = "env"`.
 `--document`/`assets.papers` identifies a bibliographic source, not a draft;
-repeat `--material` for additional drafts, notes or result descriptions.
-Paths resolve from the configuration directory. Supported inputs are Markdown, text and PDF;
+repeat `--material` for additional drafts, notes or result descriptions. Ordinary JSON
+objects/arrays are accepted as unverified supplied text, not computed analysis packages.
+Malformed JSON fails before guided setup saves the task; a declared `table_analysis.*`
+package must pass the existing loader, never silently fall back to unverified text.
+Paths resolve from the configuration directory. Supported inputs are Markdown, text, HTML/HTM and PDF;
 `assets.materials` also accepts completed `table_analysis.v1` `analysis.json` files with
 their adjacent copied data. They use the same config field, not a second task/runtime.
-Arithmetic is rechecked and native SVGs regenerated. The complete data package stays
+Arithmetic is rechecked and SVG/PDF/PNG figures regenerated through the same renderer. The complete data package stays
 beside the report. By default, `[report].data_tables = "linked"` links its full numerical
 records rather than repeating every row table in the prose; `"full"` includes those
 tables too. Neither setting samples or drops data. Figures and data links enter the
@@ -93,12 +75,54 @@ No measurements are sampled. Assembly preview and delivery share this text; the 
 still needs its required results. Attachment audit checks projected values, companion
 text and declared copy presence, not scientific validity or later byte-level tampering.
 ACM export carries this native package; arbitrary linked files are not discovered or copied.
-Writing imports cap each JSON/input at 20 MiB; incomplete/stale packages fail before writing.
+Analysis-package imports cap each JSON/input at 20 MiB; incomplete/stale packages fail before writing.
 This verifies the calculation, not data collection or scientific claims.
 Raw tables are not automatically treated as verified experiment results. Execution configuration
 is rejected. Extracted text is persisted and reused on resume; search, synthesis and experiments
 are not prerequisites. Supplied results remain unverified external assertions.
 Guided writing defaults to `report.template = "material_report"` and `report.document_review = true`.
+Experts can add `review_scope = "document"` to draft the multi-section body before
+the existing whole-document inspection/revision, avoiding mandatory preliminary
+section reviews. It requires `document_review = true`; default `section` retains
+the previous sequence, and single-section documents retain section inspection.
+The same checkpoint, evidence tools and per-section revision limits apply; saved
+drafts are not certified as individually reviewed. Change saved report settings
+through the supported explicit report-refresh path, not by editing a checkpoint.
+Joint drafting is independent of review timing. Newly guided data reports
+(`start --kind data_analysis --with-report`, also via chat) explicitly generate
+both scopes below. Other guided task kinds and existing configs retain their
+defaults; expert configs can choose the same settings:
+
+```toml
+[report]
+document_review = true
+review_scope = "document"
+draft_scope = "document"
+```
+
+This composes all remaining sections together using the frozen plan and shared
+evidence, then runs the existing independent document review. The default source
+strategy `full` is required; `batch_refine` is not compatible. Default
+`draft_scope = "section"` preserves separate draft calls and historical checkpoint
+identity. The existing `max_section_tokens` is a per-call cap, so a positive value
+bounds the whole joint answer. A validated complete section set is saved in the
+same checkpoint; resuming a saved body does not regenerate it. In this explicit
+mode, cross-section corrections also form one complete candidate. Historical
+opinion checks and an independent complete-manuscript inspection precede joint
+adoption; unsuccessful corrections retain the original sections. The existing
+`max_review_iterations` bounds joint candidate rounds. Previously consumed
+per-section rounds and pending legacy corrections are retained on recovery;
+upgrading does not grant fresh correction or model budgets. Candidate drafts and
+  their original correction requests share the existing iteration/checkpoint trace.
+  With `allow_source_backtracking = true`, a joint Writer may request one optional
+  read-only batch before each initial composition or joint correction. The batch
+  is bounded by `max_backtracking_calls` and the existing six-result prompt window;
+  it shares the gateway's per-tool limits with review. Requests/results are saved
+  before and after reading; recovery does not replay allocated reads. Setting the
+  option to false also disables these Writer requests. No live search, arbitrary
+  path reads or new execution authority is introduced.
+This is not an
+automatic long-document strategy or a claim of scientific quality.
 This explains supplied material without requiring an experiment or a failed objective.
 `analysis_report` remains available for unmet/uncertain experiment goals. Explicit saved
 templates are retained; a started writing task with an automatic default reuses its
@@ -140,19 +164,52 @@ value_unit = "seconds"
 
 `file` resolves relative to this TOML; `value_columns` and nonempty `observation_unit` are required.
 `group_column` and `value_unit` default empty (ungrouped / unknown unit). Optional fields:
-`mode = "observations"` computes count/mean/sample std, or `"values"` preserves supplied summaries
-with unique labels; `missing = "reject"` or explicitly `"omit"`; `width = "wide"` or `"column"`;
+`attribution = "Dataset title, release, credit or public URL"` preserves a user-declared
+source in the frozen analysis and downstream writing. It does not fetch that URL,
+verify collection or invent bibliographic metadata. Omit it when unknown; it is not required.
+`mode = "observations"` aggregates rows into group count/mean/sample std and empirical quartiles. `"values"` preserves supplied numeric values:
+bars require unique labels; line/scatter retains every complete coordinate pair, including raw individual observations.
+These mode names describe transformations, not whether the source data are observational.
+`missing = "reject"` or explicitly `"omit"`; `width = "wide"` or `"column"`;
 physical input/output limits `max_mb = 20`, `max_figures = 100` (positive, adjustable).
 Missing values are never zero-filled; nonfinite/nonnumeric values fail. No inferred error bars or
-scientific verdict. The task accepts only its descriptive output, not execution or literature options.
-`plot` defaults to `"bar"`. `plot = "line"` or `"scatter"` requires `mode = "values"`
-and a numeric `x_column`, with no `group_column`; `x_unit` defaults empty (unknown).
+scientific verdict. The task requires `data_analysis` output and optionally `report`,
+not execution or online research. Set `outputs = ["data_analysis", "report"]`
+and `[model].name = "env"` to analyze, plot and write in the same session.
+The completed package feeds the existing material writer and audit. With a report,
+optional `[assets].materials = ["README.md"]`
+adds local data documentation/notes and `[assets].papers = ["reference.pdf"]`
+adds reference sources. Use text/Markdown/HTML/PDF, not another raw table or JSON
+analysis package. Retained material passages and recomputed results remain
+distinct; documentation does not override `[analysis]` or authorize search.
+Analysis-only reads only the table and ignores model settings; adding a report
+requires a model and retains the same session budget.
+`plot` defaults to `"bar"` (means). `plot = "box"` requires observation rows and
+shows Q1–Q3, median and observed min–max, not uncertainty or Tukey outlier cutoffs.
+Quartiles interpolate at `(n−1)p`; all valid observations contribute. Labels include
+counts/omissions, and pages for one column share a scale. Supplied summaries cannot
+recover quartiles; box plots do not accept coordinate or Pearson options.
+`plot = "heatmap"` requires `mode = "values"` and a unique row-label `group_column`.
+Selected columns must express a user-declared compatible quantity/unit; their raw
+values share one global color scale, including across row/column pages. No normalization,
+sorting, clustering or correlation calculation is implied. Explicit `missing = "omit"`
+keeps absent cells gray/NA, including an entirely missing column; an entirely missing
+matrix cannot be colored. `max_points` limits cells per SVG page, including missing cells,
+and `max_figures` limits pages, without sampling. Full labels and values remain in the
+analysis package and downstream writing. Heatmaps do not accept coordinate, Pearson,
+paired-baseline or shared-coordinate-layout settings.
+
+`plot = "line"` or `"scatter"` requires `mode = "values"`
+and a numeric `x_column`; `x_unit` defaults empty (unknown). Optional `group_column`
+identifies distinct series, not paired observations or replicate aggregation.
 Each selected value column gets its own axis by default. Explicit `series_layout = "shared"`
 puts selected line/scatter series on common axes with a legend, using their declared common
 `value_unit`; unit compatibility is not independently checked. It does not normalize values.
 The shared panel counts all selected series' positions towards `max_points`; no series is dropped.
-Lines require unique x, sort by x and
-break at missing y; scatter retains duplicate x. x must be present even with `missing = "omit"`.
+Lines require unique x within each group, sort by x and break at missing y.
+Scatter retains duplicate x; explicit `missing = "omit"` retains rows with missing
+x/y in the package but does not plot those positions. Lines still require complete x.
+Category legends paginate without dropping groups; all pages of a coordinate panel use the same axes.
 `max_points = 10000` is a positive, adjustable coordinate-output limit; overflow
 fails without sampling. Coordinates are not aggregated or fitted. See the
 [complete example](../examples/data-curves/README.md).
@@ -160,6 +217,35 @@ Model connections are not used or required. Setup checks shape and explicit colu
 within `max_mb` before persisting a new task; numeric validation happens at ingestion.
 Settings and input bytes freeze at ingest; changing them requires a new task, while resume
 reuses completed snapshots without rereading the original file. See [workflow](WORKFLOWS.md).
+
+For an explicit same-row comparison, set `paired_baseline = "baseline"` and select
+that column plus candidate columns in `value_columns`. This requires
+`mode = "observations"`, `plot = "bar"` or `"box"`, and a common quantity/unit declared by the
+user. Each row must represent a matched pair; grouping remains optional. The result
+retains candidate-minus-baseline differences, pair/missing-pair counts, mean difference,
+sample standard deviation and standard error. `missing = "omit"` omits a pair if
+either value is absent; it does not subtract independently filtered column means.
+Difference plots show ±1 standard error for at least two pairs, assuming independent
+pairs. This is not a confidence interval, significance test or automatic improvement
+verdict. Saved packages recompute paired values when imported into writing.
+With `plot = "box"`, method panels show their marginal distributions on a common
+scale; a separate panel still shows matched mean differences and SE. Marginal
+distributions retain each column's nonmissing values, while differences use complete
+pairs only. Figure metadata records what is actually drawn; computed SD is not
+an uncertainty bar unless the renderer explicitly draws it.
+
+For a different question—linear association of two supplied measurements—set
+`association = "pearson"` on a line/scatter task with explicit numeric `x_column`
+and selected y columns. Default `"none"` does not compute correlation. Each
+declared group/column uses only its jointly present coordinate pairs; no groups
+are pooled and no coordinates or figures are changed. The analysis package and
+writing show Pearson r, complete/missing-pair counts and undefined-value reasons.
+Constant axes or fewer than two pairs have no coefficient; with two nonconstant
+pairs r is necessarily ±1. This is descriptive linear association, not a paired
+mean difference, regression, significance test, confidence interval or causal
+effect. A small r does not rule out nonlinear association. Coordinate mode
+`"values"` means supplied x/y values are retained, not that every row is an
+independent experiment. There is no extra model or dependency.
 
 ## Global `.env`
 
@@ -193,46 +279,63 @@ File-relative paths resolve from the TOML directory; command argv remains litera
 
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
-| `[task]` | `goal`, `kind`, `outputs`, `output_root`, `selected_idea_id` | New sessions require `goal`. Kinds: `auto` (default), `survey`, `bug_fix`, `measurement`, `reproduction`, `writing`, `data_analysis`. `measurement` requires `["experiments"]`; `reproduction` includes `experiments` and optionally `report`; `writing` only accepts `report`; `data_analysis` only accepts its same-name output. Other outputs: `summary`, `report`, `experiments`, `bug_fix`. `output_root` defaults `runs/research-session`. Optional `selected_idea_id` selects an existing grounded candidate. |
+| `[task]` | `goal`, `kind`, `outputs`, `output_root`, `selected_idea_id` | New sessions require `goal`. Kinds: `auto` (default), `survey`, `bug_fix`, `measurement`, `reproduction`, `writing`, `data_analysis`. `measurement` requires `["experiments"]`; `reproduction` includes `experiments` and optionally `report`; `writing` only accepts `report`; `data_analysis` requires its same-name output and optionally `report`. Other outputs: `summary`, `report`, `experiments`, `bug_fix`. `output_root` defaults `runs/research-session`. Optional `selected_idea_id` selects an existing grounded candidate. |
 | `[model]` | `name`, `feasibility_review_model`, `max_output_tokens` | A file config defaults `name` to `env`, which reads `SIMPLE_AR_MODEL`; `name = ""` selects deterministic processing. Optional `feasibility_review_model` routes only the source-backed implementation feasibility audit to another model on the same provider and session budget; it is saved for resume and cannot be changed within an existing session. `max_output_tokens` is optional. Credentials stay in the environment. |
+| `[budget]` | `total_tokens`, `llm_requests`, `process_invocations`, `process_wall_seconds` | Token/request caps are optional for a new session (omitted means no cap for that dimension). Process values default from the task shape; set them explicitly when execution is requested. Resume keeps the saved ledger and does not reset usage. |
 
 An independent feasibility review can challenge a candidate's mechanism before
 CodeTask or training. It is still model judgment, not an executable proof of
 the method or an improvement claim. If it is omitted, the main model performs
 the review. Use the same `feasibility_review_model` on resume (or omit it to
 reuse the saved choice).
-| `[budget]` | `total_tokens`, `llm_requests`, `process_invocations`, `process_wall_seconds` | Token/request caps are optional for a new session (omitted means no cap for that dimension). Process values default from the task shape; set them explicitly when execution is requested. Resume keeps the saved ledger and does not reset usage. |
 
 ### Research inputs and behavior
 
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
-| `[research]` | `providers`, `queries`, `max_results`, `max_chunks`, `max_pdf_pages`, `read_max_shortlist`, `idea_limit`, `cache_dir` | Lists are optional; CLI defaults are `max_results = 10`, `max_chunks = 300`, `idea_limit = 3`. `max_pdf_pages` is an optional positive local-PDF extraction ceiling (default `20`); changing it requires a new session because existing extracted evidence is frozen. `read_max_shortlist` is optional (default: all papers up to 24); explicitly supplied papers are retained within this reading limit, and an over-limit request fails visibly. `cache_dir` is optional and is not a safe resume-change because it is not persisted. |
+| `[research]` | `providers`, `queries`, `max_results`, `max_chunks`, `max_pdf_pages`, `read_max_shortlist`, `idea_limit`, `cache_dir` | Lists are optional; CLI defaults are `max_results = 10`, `max_chunks = 300`, `idea_limit = 3`. Omit `max_pdf_pages` to extract all PDF pages; a supplied positive integer explicitly limits extraction and records truncation. Changing it requires a new session because existing extracted evidence is frozen. `read_max_shortlist` is optional (default: all papers up to 24); explicitly supplied papers are retained within this reading limit, and an over-limit request fails visibly. `cache_dir` is optional and is not a safe resume-change because it is not persisted. |
 | `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `max_fulltext_documents`, `max_pdf_mb`, `materials_only` | These switches default false and optional caps are unset. `materials_only = true` consumes supplied local inputs (`assets.papers`, or writing `assets.materials`) and disables search; it does not disable model reading. Writing always uses local-only scope. Guided `start --fulltext --sources search` enables PDF cache retention with a 4-document, 20 MiB-per-PDF limit; expert TOML may adjust the positive caps. Remote PDFs require both PDF permission and cache retention. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
 | `[research]` | `max_iterations`, `interaction` | `max_iterations` defaults to `1`; `0` stops after the first analysis. `interaction` defaults to `checkpoints` for a new CLI session and accepts `assisted`, `checkpoints`, or `autonomous`. Critical facts and permissions block every mode. |
-| `[assets]` | `papers`, `materials` | Read-only local Markdown/text/PDF paths, resolved from the TOML directory. `papers` identifies bibliographic sources; `materials` is for `writing` drafts, notes, result descriptions or completed `table_analysis.v1` packages with copied data, not independently measured experiment metrics. Writing requires at least one input and rejects duplicate/dual-role files. |
+| `[assets]` | `papers`, `materials`, `data` | Paths resolve from the TOML directory. `papers` identifies bibliographic sources; `materials` is for `writing` drafts, notes, result descriptions or completed `table_analysis.v1` packages with copied data, not independently measured experiment metrics. Writing requires at least one input and rejects duplicate/dual-role files. `data` names execution inputs; isolated CodeTask preparation copies declared project data, while direct/external inputs remain in place. No split verification or automatic argv substitution. |
 
-Explicitly supplied local PDFs are parsed best-effort (the default parser reads
-at most 20 pages unless `max_pdf_pages` is set) even when `use_fulltext = false`; that flag governs remote
+Explicitly supplied local PDFs are parsed best-effort (all pages by default,
+or the explicitly configured `max_pdf_pages`) even when `use_fulltext = false`; that flag governs remote
 full-text retrieval. `allow_pdf_download = false` does not exclude a PDF already
-on disk. Parser failures remain diagnostics, not invented paper content.
+on disk. Observed total/extracted pages, truncation and empty-text pages travel
+with extraction provenance. Reading windows remain bounded independently;
+extracting all pages is not full understanding or OCR. Old bundles without
+coverage cannot be retrospectively certified. Parser failures remain diagnostics,
+not invented paper content.
+The page ceiling is implemented by the basic PDF parser. The optional
+`unstructured` backend rejects an explicit PDF ceiling it cannot enforce;
+external parsers must declare their own observed coverage.
 
 ### Execution and report
 
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
 | `[execution]` | `command`, `cwd`, `timeout_sec`, `code_task_config` | Choose one execution boundary: literal argv `command` plus an existing absolute `cwd`, or a CodeTask TOML reference. Omit both for literature-only work. `timeout_sec` is optional and defaults at the CLI/application boundary. |
+| `[execution.environment]` | `mode`, `requirements`, `install_project`, `python_executable`, `timeout_sec` | Optional single-command task venv: `mode = "venv"`; project-relative requirements list defaults empty, `install_project` defaults false, base Python defaults to this runtime, per-step timeout defaults 300. Omission keeps current-environment execution. Allocate preparation process capacity explicitly in expert TOML; guided start includes it. |
 | `[execution]` | `primary_metric`, `metrics`, `metric_directions` | Optional measurement schema; directions use `higher`, `lower`, `resource`, or `ignore`. |
 | `[execution]` | `output_files` | Optional mapping of at most eight attachment names to relative POSIX files under the process-owned `SIMPLE_AR_OUTPUT_DIR`. Only declared UTF-8 regular files up to 2 MiB each receive bounded previews and registered read handles; missing/unreadable attachments are recorded separately from execution success. |
 | `[execution]` | `pairs`, `seeds`, `seed_flag`, `seed_count` | Optional explicit comparison inputs. `pairs` contains unique integer `seed` plus literal `baseline_command` and `candidate_command`; compact seed expansion requires a literal command and explicit seed flag/count. Natural-language seed requests are not parsed. |
 | `[execution]` | `baseline_policy`, `baseline_ref`, `protocol` | Policy is `run`, `skip`, or `reuse`; `reuse` requires a passed current-session artifact whose command, schema, protocol conditions, protected assets and preparation lineage match. `protocol` uses the existing experiment contract and does not certify data contents. |
-| `[report]` | `template`, `reviewer`, `max_review_iterations`, `document_review`, `max_section_tokens`, `max_cited_sources`, `figures` | `template` defaults to `auto`; `reviewer` defaults to `llm`; CLI review iterations default to `1`. Optional `document_review = true` adds bounded cross-section review of at most two target sections, with up to `max_review_iterations` corrections per target; saved rejected candidates consume this allowance on recovery. It is off by default. `max_section_tokens = 0` omits a per-call output cap. Optional positive `max_cited_sources` bounds distinct final citations without truncating the search/reading pool; the writer sees the bound, and final audit fails if the document exceeds it. Omit it for no source-count cap. Figures are deterministic by default; set `[report.figures].enabled = false` or `mode = "off"` for text-only output. |
+| `[report]` | `template`, `reviewer`, `max_review_iterations`, `document_review`, `max_section_tokens`, `max_cited_sources`, `figures` | `template` defaults to `auto`; `reviewer` defaults to `llm`; CLI review iterations default to `1`. Optional `document_review = true` adds cross-section review: argument-led plans can correct their frozen sections; legacy plans retain two targets. Each target has at most `max_review_iterations` corrections; rejected candidates consume the allowance and recovery does not reset it. Document review is off by default. `max_section_tokens = 0` omits a per-call output cap. Positive `max_cited_sources` bounds distinct final citations without truncating the reading pool; final audit records excess. Omit it for no source-count cap. Figures are deterministic by default; set `[report.figures].enabled = false` or `mode = "off"` for text-only output. |
+| `[report]` | `max_document_review_prompt_chars` | Optional expert complete-request character cap; default `0` adds no hidden assembled-prompt cap. Existing retrieval windows, 60,000-character manuscript window, model capacity and cumulative session budget still apply. A positive cap refuses an oversized review rather than truncating evidence or claiming it was performed. |
 
 Explicit `outputs` cannot be combined with `--with-report`/`--no-report`. Report structure
 selection never overrides measured facts or certifies scientific success. Changed
 search/ingestion settings are rejected on resume when they differ from saved values;
 explicit report settings can invalidate only writer/report/audit outputs, not research
 evidence or measurements. Use `research-report` to add a report to an existing prefix.
+
+`report.figures.max_figures = 0` selects automatic generation, not text-only output.
+For an adaptive document it uses only supported, evidence-bound planned diagrams;
+it does not invent figures to fill a target. Supplied images can coexist with these
+diagrams. A positive value is an explicit overall report limit, including imported
+analysis figures; excess fails rather than silently dropping user data. Disable
+generation with `enabled = false` or `mode = "off"`. These native diagrams are
+editable concept overviews, not arbitrary mechanism illustrations or image synthesis.
 
 Choose `task.kind = "measurement"` only to run and analyze one supplied command
 as-is, without literature discovery, candidate design, CodeTask editing, or a
@@ -275,7 +378,8 @@ measurements, and optionally write a reproduction report. Set `research.material
 provide `assets.papers`, `execution.command`, and `execution.protocol` with at least
 `hypothesis`, `dataset`, and `expected_outcome`. Use `baseline_policy = "skip"`
 and a finite process timeout. This mode does not propose innovations, edit code,
-expand seeds, or install/discover a missing environment. Paired comparisons and
+expand seeds, or discover a missing environment. Dependency installation requires the
+explicit `execution.environment` venv profile described above. Paired comparisons and
 CodeTask use the ordinary research path. Report `template = "reproduction"` preserves
 the distinction between a published result, an adapted check, and local observations.
 See [the complete CPU-only case](../examples/conformal_reproduction/README.md).
@@ -461,6 +565,11 @@ Sparse/empty workspace options remain limited to standalone CodeTask.
 | `[edit_scope].mode` | Optional label stored in `manifest.json`; it does not change behavior by itself. |
 | `[safety].max_file_bytes` | Max copied file size for copy/sparse modes. This avoids accidentally copying huge model/data artifacts. |
 | `[safety].validation_max_file_bytes` | Max file size scanned by static validation. |
+
+Static checks honor Python source encoding. In a Git worktree, a syntax defect
+in a byte-identical file from the recorded frozen commit stays a visible warning
+unless strict validation is enabled. Changed/new invalid files and unverified
+baselines remain errors; this is not a test-folder exemption or runtime success.
 
 ### Execute And Budget Fields
 

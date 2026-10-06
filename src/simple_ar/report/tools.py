@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from simple_ar.report.schema import ReportToolSpec
+from simple_ar.report.schema import ReportToolCall, ReportToolSpec
 
 
 class GetPaperBriefArgs(BaseModel):
@@ -82,6 +82,17 @@ def report_tool_specs() -> list[ReportToolSpec]:
             GetCodeTaskResultArgs,
         ),
     ]
+
+
+def validate_report_reads(requests: object, *, limit: int) -> list[ReportToolCall]:
+    """Share the bounded read-only request contract across planning and writing."""
+    if not isinstance(requests, list) or len(requests) > limit:
+        raise ValueError(f"Report reads require a list of at most {limit} requests.")
+    calls = [ReportToolCall.model_validate(row) for row in requests]
+    allowed = {spec.name for spec in report_tool_specs() if set(spec.permissions) == {"read"}}
+    if any(call.tool_name not in allowed for call in calls):
+        raise ValueError("Report reads may use registered read-only tools only.")
+    return calls
 
 
 def _spec(name: str, description: str, args_model: type[BaseModel]) -> ReportToolSpec:

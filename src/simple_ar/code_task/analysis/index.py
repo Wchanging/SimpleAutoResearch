@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import json
 import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from simple_ar.core.artifacts import write_json
-from simple_ar.retrieval.index import kind_for_path
+from simple_ar.retrieval.index import json_summary, kind_for_path
+from simple_ar.code_task.runtime.state import utcnow_iso as _utcnow_iso
 
 
 IGNORED_DIR_NAMES = {
@@ -32,6 +32,11 @@ IGNORED_FILE_NAMES = {
     ".env",
     ".git",
 }
+
+
+def is_python_environment(directory: Path) -> bool:
+    """A venv's standard marker identifies installed dependencies, regardless of name."""
+    return (directory / "pyvenv.cfg").is_file()
 
 
 def build_codebase_index(
@@ -100,22 +105,26 @@ def build_codebase_index(
     return index
 
 
-def _iter_files(root: Path) -> list[Path]:
-    files: list[Path] = []
+def project_python_files(root: Path) -> list[Path]:
+    """Share the index's source boundary with static checks and repair lookup."""
+    return sorted(path for path in _iter_files(root) if path.suffix == ".py")
+
+
+def _iter_files(root: Path) -> Iterator[Path]:
     for current, dirnames, filenames in os.walk(root):
+        current_path = Path(current)
         dirnames[:] = [
             dirname
             for dirname in dirnames
             if dirname not in IGNORED_DIR_NAMES and not dirname.startswith(".")
+            and not is_python_environment(current_path / dirname)
         ]
-        current_path = Path(current)
         for filename in filenames:
             if filename in IGNORED_FILE_NAMES or filename.startswith(".env"):
                 continue
             path = current_path / filename
             if path.is_file():
-                files.append(path)
-    return files
+                yield path
 
 
 def _index_file(root: Path, path: Path) -> dict[str, Any]:
@@ -140,9 +149,8 @@ def _index_file(root: Path, path: Path) -> dict[str, Any]:
 
 
 def _python_summary(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8", errors="replace")
     try:
-        tree = ast.parse(text)
+        tree = ast.parse(path.read_bytes(), filename=str(path))
     except SyntaxError as exc:
         return {
             "syntax_ok": False,
@@ -163,6 +171,14 @@ def _python_summary(path: Path) -> dict[str, Any]:
     return {
         "syntax_ok": True,
         "imports": imports,
+        "import_references": [
+            {"module": alias.name, "level": 0, "names": []}
+            for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+        ] + [
+            {"module": node.module or "", "level": node.level,
+             "names": [alias.name for alias in node.names if alias.name != "*"]}
+            for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        ],
         "functions": functions,
         "classes": classes,
         "has_main_guard": _has_main_guard(tree),
@@ -261,7 +277,7 @@ def _summary_for_file(
     except OSError:
         return ""
     if kind == "json":
-        summary = _json_summary(text[:8192])
+        summary = json_summary(text[:8192])
         if summary:
             return summary
     if kind == "python":
@@ -293,26 +309,9 @@ def _summary_for_file(
     return ""
 
 
-def _json_summary(text: str) -> str:
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return ""
-    if isinstance(data, dict):
-        keys = ", ".join(str(key) for key in list(data)[:8])
-        suffix = "..." if len(data) > 8 else ""
-        return f"json object keys: {keys}{suffix}"
-    if isinstance(data, list):
-        return f"json list with {len(data)} item(s)"
-    return f"json {type(data).__name__}"
-
-
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -320,7 +319,3 @@ def _truncate(text: str, max_chars: int) -> str:
     if len(normalized) <= max_chars:
         return normalized
     return normalized[: max_chars - 3].rstrip() + "..."
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")

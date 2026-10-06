@@ -1,0 +1,14 @@
+[task]
+goal = "Compare artificial same-row paired timings, preserving matching and missing-pair counts without claiming significance"
+kind = "data_analysis"
+outputs = ["data_analysis"]
+output_root = "../../runs/data-paired"
+
+[analysis]
+file = "measurements.csv"
+value_columns = ["baseline", "candidate"]
+group_column = "dataset"
+observation_unit = "one artificial matched repeat; demonstration only, not a real experiment"
+value_unit = "seconds"
+paired_baseline = "baseline"
+missing = "omit"

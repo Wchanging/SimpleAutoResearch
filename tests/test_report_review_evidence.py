@@ -14,6 +14,26 @@ from simple_ar.report.templates import load_report_template_bundle
 
 
 class ReviewEvidenceTests(unittest.TestCase):
+    def test_default_document_capacity_keeps_large_evidence_and_client_budget_ownership(self):
+        context, memory, config, draft = self.objects()
+        captured = []
+        class Client:
+            def ask_json(self, system, prompt, **ignored):
+                captured.append(json.loads(prompt))
+                return {"section_reviews": []}
+        evidence = {"rows": ["complete recorded evidence " * 5000]}
+        review_document(client=Client(), template=load_report_template_bundle(report_mode="experiment", config=config),
+            memory=memory, sections=[draft], config=config, execution_summary={}, metric_summary=evidence)
+        self.assertGreater(len(json.dumps(captured[0])), 90_000)
+        self.assertEqual(captured[0]["metric_sources"], evidence)
+        self.assertEqual(captured[0]["sections"][0]["markdown"], draft.draft_markdown)
+        class BudgetClient:
+            def ask_json(self, *args, **ignored):
+                raise LLMError("existing client/session capacity exhausted")
+        with self.assertRaisesRegex(LLMError, "capacity exhausted"):
+            review_document(client=BudgetClient(), template=load_report_template_bundle(report_mode="experiment", config=config),
+                memory=memory, sections=[draft], config=config, execution_summary={}, metric_summary=evidence)
+
     def test_source_passage_layout_whitespace_is_not_a_changed_scientific_quote(self):
         view = {"source_evidence": [{"metadata": {"evidence_passages": [
             {"text": "Observed mean\nerror = 0.653;\tcontrol = 0.020."}]}}],
@@ -151,8 +171,6 @@ class ReviewEvidenceTests(unittest.TestCase):
                 role="recorded_material")], view)
 
     def test_locator_does_not_cut_evidence_or_reject_an_existing_near_limit_request(self):
-        from unittest.mock import patch
-        import simple_ar.report.editor as editor
         context, memory, config, draft = self.objects()
         captured = []
         class Client:
@@ -166,7 +184,8 @@ class ReviewEvidenceTests(unittest.TestCase):
         original.pop("evidence_locator")
         base_size = len(json.dumps(original, ensure_ascii=False, separators=(",", ":")))
         for extra in (0, 150, 350):
-            with self.subTest(extra=extra), patch.object(editor, "MAX_DOCUMENT_REVIEW_PROMPT_CHARS", base_size + extra):
+            with self.subTest(extra=extra):
+                config.max_document_review_prompt_chars = base_size + extra
                 review_document(**kwargs)
                 prompt, view = captured[-1]
                 self.assertLessEqual(len(prompt), base_size + extra)

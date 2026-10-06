@@ -7,6 +7,94 @@ from simple_ar.report.schema import ReportContext, ReportDocumentPlan, ReportMem
 
 
 class ReportLengthAuditTests(unittest.TestCase):
+    def test_soft_target_counts_without_inventing_a_range_or_clearing_other_findings(self):
+        from simple_ar.report.document_plan import validate_length_request, check_document_length
+        from simple_ar.report.schema import ReviewerFinding
+        quote = 'Deliver approximately 1,200 words of manuscript body, excluding title, headings and references.'
+        request = dict(unit='words', scope='manuscript_body', request_quote=quote,
+                       constraint='target', target_words=1200, min_words=None, max_words=None)
+        self.assertEqual(validate_length_request(request, objective=quote), request)
+        context = ReportContext(topic='Soft extent', problem_markdown=quote, report_mode='supplied_materials')
+        old = ReviewerFinding(finding_id='unresolved-fact', type='unsupported_claim', severity='major',
+                              required_action='verify', message='Still unresolved independent factual concern')
+        memory = ReportMemory(document_plan=ReportDocumentPlan(length_budget=request), reviewer_findings=[old])
+        for count in (10, 1137, 1200, 1500):
+            observed = check_document_length(request, objective=quote, token_count=count)
+            self.assertEqual(observed['status'], 'target_only')
+            self.assertEqual(observed['target_difference'], count - 1200)
+            audit = self.check('# Title\nreport', context, memory, body='word ' * count)
+            self.assertFalse(any(f.type == 'delivery_length' for f in audit.reviewer_findings))
+            self.assertIn(old, audit.reviewer_findings)
+            self.assertEqual(audit.status, 'failed')
+        self.assertEqual(check_document_length(request, objective=quote, token_count=None)['status'], 'unavailable')
+        for change in ({'min_words': 1080}, {'max_words': 1320}, {'target_words': 1000},
+                       {'target_words': True}, {'constraint': 'approximately'}, {'constraint': []},
+                       {'scope': 'prose_only'}, {'request_quote': 'approximately 1200 words'}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                validate_length_request({**request, **change}, objective=quote)
+
+    def test_soft_target_allocates_on_the_same_plan_and_can_be_smaller_than_required_assembly(self):
+        from simple_ar.report.document_plan import reserve_document_words
+        from simple_ar.report.narrative import budget_document_plan, delivery_text_observation
+        from simple_ar.report.schema import ReportRuntimeConfig, ReportSectionPlan, ReportSectionDraft
+        quote = 'A report of about 80 words including title and references.'
+        request = dict(unit='words', scope='whole_document', request_quote=quote,
+                       constraint='target', target_words=80, min_words=None, max_words=None)
+        context = ReportContext(topic='Soft target', problem_markdown=quote, report_mode='supplied_materials')
+        section = ReportSectionPlan(section_id='answer', heading='Answer', goal='Use existing evidence')
+        memory = ReportMemory(section_plan=[section])
+        config = ReportRuntimeConfig()
+        plan = budget_document_plan(context, memory, config, ReportDocumentPlan(sections=[section]), request)
+        self.assertEqual(plan.length_budget['constraint'], 'target')
+        self.assertEqual(plan.target_words, 80)
+        memory.document_plan = ReportDocumentPlan.model_validate(plan.model_dump(mode='json'))
+        draft = ReportSectionDraft(section_id='answer', heading='Answer', draft_markdown='word ' * 70)
+        observed = delivery_text_observation(context, memory, [draft], config)
+        self.assertEqual(observed['length_check']['status'], 'target_only')
+        oversized = reserve_document_words(plan, request=request,
+            forecast={'status': 'known_assembly_forecast', 'known_fixed_markdown_tokens': 90})
+        self.assertEqual(oversized.length_budget['model_body_target_words'], 1)
+        self.assertEqual(oversized.length_budget['target_words'], 80)
+        self.assertIn('retain required evidence', oversized.length_budget['guidance'])
+
+    def test_old_frozen_equal_bounds_do_not_silently_become_a_soft_target(self):
+        from simple_ar.report.document_plan import check_document_length
+        quote = 'Deliver approximately 1200 words.'
+        old = dict(unit='words', scope='whole_document', request_quote=quote,
+                   target_words=1200, min_words=1200, max_words=1200)
+        observed = check_document_length(old, objective=quote, token_count=1137)
+        self.assertEqual(observed['status'], 'below_range')
+        self.assertNotIn('constraint', observed)
+
+    def test_body_scope_preview_planning_and_final_audit_agree(self):
+        from simple_ar.report.document_plan import validate_length_request, manuscript_body_tokens
+        from simple_ar.report.narrative import delivery_text_observation, budget_document_plan
+        from simple_ar.report.schema import ReportRuntimeConfig, ReportSectionPlan, ReportSectionDraft
+        from simple_ar.report.capability import ReportAssemblyRequest, preview_report_document
+        quote = "Deliver 8–12 words of manuscript body, excluding title, headings and references."
+        context = ReportContext(topic="A title with many words", problem_markdown=quote, report_mode="supplied_materials")
+        section = ReportSectionPlan(section_id="result", heading="A long section heading", goal="Explain the supplied result")
+        memory = ReportMemory(section_plan=[section])
+        config = ReportRuntimeConfig()
+        request = dict(unit="words", scope="manuscript_body", request_quote=quote, min_words=8, max_words=12, target_words=10)
+        self.assertEqual(validate_length_request(request, objective=quote)["scope"], "manuscript_body")
+        memory.document_plan = budget_document_plan(context, memory, config, ReportDocumentPlan(sections=[section]), request)
+        self.assertEqual(memory.document_plan.length_budget["known_fixed_markdown_tokens"], 0)
+        self.assertEqual(memory.document_plan.length_budget["model_body_target_words"], 10)
+        drafts = [ReportSectionDraft(section_id="result", heading=section.heading, draft_markdown="word " * 10)]
+        preview = preview_report_document(ReportAssemblyRequest(title=context.topic, sections=tuple(drafts), config=config, document_plan=memory.document_plan))
+        observation = delivery_text_observation(context, memory, drafts, config)
+        self.assertEqual(observation["markdown_token_count"], 10)
+        self.assertGreater(observation["full_delivery_markdown_token_count"], 12)
+        findings = self.check(preview.report_markdown + "\n## References\n" + "reference " * 20,
+            context, memory, body=preview.report_body_markdown).reviewer_findings
+        self.assertFalse(any(f.type == "delivery_length" for f in findings))
+        self.assertEqual(manuscript_body_tokens("# Title\n## Section\n| value | 4 |\nCaption explains result."), 8)
+        self.assertTrue(any(f.finding_id == "document-length-outside-budget" for f in
+            self.check(preview.report_markdown, context, memory, body="word " * 13).reviewer_findings))
+        self.assertTrue(any(f.finding_id == "document-length-unavailable" for f in
+            self.check(preview.report_markdown, context, memory, body="").reviewer_findings))
+
     def objects(self):
         quote = "Deliver 8–12 words for the whole document, including references."
         context = ReportContext(topic="Recorded report", report_mode="supplied_materials",
@@ -168,7 +256,7 @@ class ReportLengthAuditTests(unittest.TestCase):
         import json
         from simple_ar.report.agent import run_report_agent
         from simple_ar.report.tool_gateway import ReportToolGateway
-        from report_review_fixtures import draft_quotes
+        from tests.report_review_fixtures import draft_quotes
         for interrupt in (False, True):
             with self.subTest(interrupt=interrupt):
                 objects, _ = self.candidate_objects()

@@ -30,9 +30,9 @@ def references_markdown(
         )
         # A supplied file path is provenance for the run, not a reader-facing
         # URL. Keep its full location in source artifacts, not the reference list.
-        url = " (supplied local document)" if paper.source == "local_files" else (
-            f" {metadata['url']}" if metadata["url"] else ""
-        )
+        url = f" {metadata['url']}" if metadata["url"] else ""
+        if paper.source == "local_files":
+            url += " (supplied local document)"
         doi = f" DOI: {metadata['doi']}." if metadata["doi"] else ""
         missing = (" (Bibliographic details unavailable: " + ", ".join(
             "public URL or DOI" if key == "public_locator" else key for key in metadata["missing_fields"]) + ".)"
@@ -54,6 +54,8 @@ def append_references_section(
 ) -> str:
     """Append deterministic references generated from known paper metadata."""
     body = markdown.strip()
+    if not papers:
+        return body + "\n"
     return f"{body}\n\n## References\n\n{references_markdown(papers, citation_map)}\n"
 
 

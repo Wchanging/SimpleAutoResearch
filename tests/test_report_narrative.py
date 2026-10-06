@@ -1,18 +1,23 @@
 """Narrative context follows adopted prose without additional model calls or state."""
 import json
 import unittest
+from unittest.mock import patch
 
 from simple_ar.integrations.llm import LLMResponseError
-from simple_ar.report.agent import run_report_agent
-from simple_ar.report.narrative import adopted_claims, narrative_context
+from simple_ar.report.agent import _writer_prompt, _writer_recovery_prompt, _reviewer_prompt, run_report_agent
+from simple_ar.report.narrative import adopted_claims, narrative_context, report_objective, evidence_outline_context
 from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.schema import (
     ClaimEvidenceRecord, ReportContext, ReportMemory, ReportRuntimeConfig,
-    ReportSectionDraft, ReportSectionPlan,
+    ReportSectionDraft, ReportSectionPlan, ReportSectionReview, ReviewerFinding,
     SourceHandle,
 )
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
+
+
+def payload(prompt):
+    return json.JSONDecoder().raw_decode(prompt[prompt.index("{"):])[0]
 
 
 class NarrativeTests(unittest.TestCase):
@@ -115,7 +120,7 @@ class NarrativeTests(unittest.TestCase):
             _writer_recovery_prompt(**common, config=config, previous_draft=None, review=None, draft_mode='section'),
             _reviewer_prompt(**common, template=template, draft=draft),
         ]
-        for prompt in prompts:
+        for prompt in prompts[:2]:
             payload = json.loads(prompt[prompt.index('{'):])
             self.assertEqual(payload['document_plan']['sections'][0]['goal'], goal)
             view = payload['narrative_context']
@@ -126,16 +131,44 @@ class NarrativeTests(unittest.TestCase):
             self.assertNotIn('purpose', row)
             self.assertEqual(row['prose_windows'][0]['text'], adopted[0].draft_markdown)
             self.assertEqual(prompt.count(goal), 1)
+        reviewed = json.loads(prompts[2][prompts[2].index('{'):])
+        self.assertNotIn('sections', reviewed['document_plan'])
+        self.assertNotIn('goal', reviewed['section'])
+        self.assertEqual(prompts[2].count(goal), 0)
+        view = reviewed['narrative_context']
+        self.assertEqual(view['section_responsibilities'][0]['section_id'], 'setup')
+        self.assertNotIn('purpose', view['section_responsibilities'][0])
+        self.assertEqual(view['adopted_sections'][0]['prose_windows'][0]['text'], adopted[0].draft_markdown)
+        self.assertNotIn('purpose', view['adopted_sections'][0])
 
     def test_long_unicode_prose_keeps_qualification_and_explicit_coverage(self):
-        text = "观测" * 1000 + "NOT independently reproduced."
+        text = "观测" * 10000 + "NOT independently reproduced."
         plan = ReportSectionPlan(section_id="end", heading="End", goal="Summarize")
         draft = ReportSectionDraft(section_id="method", heading="Method", draft_markdown=text)
         row = narrative_context(ReportMemory(), plan, [draft])["adopted_sections"][0]
         self.assertTrue(row["prose_windows"][-1]["text"].endswith("NOT independently reproduced."))
-        self.assertEqual(row["prose_characters_omitted"], len(text) - 1000)
+        self.assertEqual(row["prose_characters_omitted"], len(text) - 12000)
         for window in row["prose_windows"]:
             self.assertEqual(window["text"], text[window["start"]:window["end"]])
+
+    def test_short_document_preserves_middle_and_shares_unused_window(self):
+        plan = ReportSectionPlan(section_id='next', heading='Discussion', goal='Interpret without repeating results')
+        drafts = [ReportSectionDraft(section_id='short', heading='Short', draft_markdown='S' * 40),
+                  ReportSectionDraft(section_id='results', heading='Results',
+                    draft_markdown='H' * 900 + 'Actual middle trade-off, not a missing observation.' + 'T' * 1400)]
+        original = [row.model_dump() for row in drafts]
+        view = narrative_context(ReportMemory(), plan, drafts)
+        self.assertEqual([row['prose_characters_omitted'] for row in view['adopted_sections']], [0, 0])
+        self.assertIn('Actual middle trade-off', view['adopted_sections'][1]['prose_windows'][0]['text'])
+        self.assertEqual([row.model_dump() for row in drafts], original)
+        # A larger manuscript keeps every section and shares a bounded total;
+        # short sections release their allowance instead of wasting it.
+        long = drafts + [ReportSectionDraft(section_id='long', heading='Long', draft_markdown='L' * 30000)]
+        projected = narrative_context(ReportMemory(), plan, long)['adopted_sections']
+        self.assertEqual(sum(len(window['text']) for row in projected for window in row['prose_windows']), 12000)
+        self.assertEqual(projected[0]['prose_characters_omitted'], 0)
+        self.assertEqual(projected[1]['prose_characters_omitted'], 0)
+        self.assertGreater(projected[2]['prose_characters_omitted'], 0)
 
     def test_current_section_is_not_its_own_evidence_and_large_plans_show_omissions(self):
         plans = [ReportSectionPlan(section_id=str(i), heading=str(i), goal="Explain") for i in range(30)]
@@ -200,6 +233,131 @@ class NarrativeTests(unittest.TestCase):
         self.assertNotIn("Obsolete superseded assertion", " ".join(prompts["report-writer-summary"]["prior_claim_notes"]))
         self.assertEqual(labels.count("report-writer-body"), 1)
 
+
+class ReportObjectiveTests(unittest.TestCase):
+    def test_section_review_policy_and_schema_use_one_read_tool_registry(self):
+        import simple_ar.report.agent as agent
+        from simple_ar.report.tools import report_tool_specs
+        context, config, template, memory, section, draft = self.objects()
+        read = report_tool_specs()[0].model_copy(update={"name": "another_registered_read"})
+        write = read.model_copy(update={"name": "not_a_read", "permissions": ["write"]})
+        with patch.object(agent, "report_tool_specs", return_value=[read, write]):
+            view = agent._reviewer_context(context=context, template=template, memory=memory,
+                section=section, draft=draft, config=config)
+        self.assertEqual(view["tool_policy"]["allowed_tools"], [read.name])
+        self.assertEqual(view["context_tools"], [{"name": read.name,
+            "description": read.description, "input_schema": read.input_schema}])
+
+    def test_normal_and_format_retry_have_one_task_context_owner(self):
+        import simple_ar.report.agent as agent
+        from simple_ar.report.schema import ReportToolResult
+        context, config, template, memory, section, draft = self.objects()
+        before = memory.model_dump(mode="json")
+        extra = [ReportToolResult(tool_name="search_source_chunks", content={"text": f"passage {i}"})
+                 for i in range(9)]
+        common = dict(context=context, memory=memory, section=section, config=config,
+            extra_context=extra, previous_draft=draft, review=None, adopted_sections=[draft])
+        normal = payload(agent._writer_prompt(**common, template=template,
+            source_batch_index=1, source_batch_count=1, include_previous_draft=True, draft_mode="section"))
+        recovery = payload(agent._writer_recovery_prompt(**common, draft_mode="section"))
+        for key in ("objective", "document_plan", "narrative_context", "section_constraints",
+                    "length_requirement", "visual_requirements", "source_handles", "metric_sources",
+                    "extra_tool_context", "extra_tool_context_omitted", "review_findings",
+                    "review_findings_status", "review_instructions", "revision_preservation_requirement"):
+            self.assertEqual(normal[key], recovery[key], key)
+        self.assertEqual(normal["extra_tool_context_omitted"], 3)
+        self.assertNotIn("template_markdown", recovery)
+        self.assertNotIn("global_research_context", recovery)
+        self.assertEqual(memory.model_dump(mode="json"), before)
+
+    def objects(self):
+        # Requirements in the middle and tail must not depend on an excerpt.
+        request = ("材料与问题。" * 300 + " Keep all conditions distinct. "
+                   + "约束和解释。" * 500 + " Deliver editable sources; do not claim significance.")
+        context = ReportContext(topic="A bounded report", report_mode="supplied_materials",
+                                problem_markdown=request, goal_markdown=request)
+        config = ReportRuntimeConfig(template="analysis_report")
+        template = load_report_template_bundle(report_mode=context.report_mode, config=config)
+        memory = initialize_report_memory(context=context, template=template)
+        section = memory.section_plan[0]
+        draft = ReportSectionDraft(section_id=section.section_id, heading=section.heading,
+                                   draft_markdown="Recorded observations only.")
+        return context, config, template, memory, section, draft
+
+    def test_original_request_not_summary_is_shared_by_planner_writer_retry_reviewer(self):
+        context, config, template, memory, section, draft = self.objects()
+        self.assertEqual(len(memory.objective), 1200)
+        review = ReportSectionReview(section_id=section.section_id, verdict="revise_required",
+            findings=[ReviewerFinding(finding_id="f1", type="missing_limitation", severity="minor",
+                required_action="revise", message="Keep the declared limits.")],
+            revision_instructions=["Do not omit the requested conditions."])
+        common = dict(context=context, memory=memory, section=section)
+        prompts = [
+            _writer_prompt(**common, template=template, config=config, extra_context=[],
+                previous_draft=draft, review=review, source_batch_index=1, source_batch_count=1,
+                include_previous_draft=True, draft_mode="section_revision"),
+            _writer_recovery_prompt(**common, config=config, previous_draft=draft,
+                review=review, draft_mode="section_revision"),
+            _reviewer_prompt(**common, template=template, draft=draft,
+                revision_review=review, previous_draft=draft),
+        ]
+        for prompt in prompts:
+            self.assertEqual(payload(prompt)["objective"], context.problem_markdown)
+            self.assertEqual(prompt.count("Deliver editable sources"), 1)
+        global_context = payload(prompts[0])["global_research_context"]
+        self.assertEqual(global_context["derived_context_status"]["independent_verification"], "not_performed")
+        outline = evidence_outline_context(context, memory, config)
+        self.assertEqual(outline["objective"]["text"], context.problem_markdown)
+        self.assertFalse(outline["objective"]["truncated"])
+        self.assertEqual(outline["synthesis_status"]["evidence_role"], "recorded_derived_context")
+        self.assertNotIn("problem", outline)  # No second truncated request owner.
+
+    def test_distinct_problem_and_goal_are_preserved_without_source_confusion(self):
+        context, _, _, memory, _, _ = self.objects()
+        context.goal_markdown = "Goal-only requirement: report the missing input instead of inventing it."
+        objective = report_objective(context, memory)
+        self.assertIn(context.goal_markdown, objective)
+        self.assertIn(context.problem_markdown, objective)
+        context.problem_markdown = ""
+        self.assertEqual(report_objective(context, memory), context.goal_markdown)
+
+    def test_legacy_context_uses_recorded_objective_without_mutation(self):
+        context = ReportContext(topic="Legacy title", report_mode="supplied_materials")
+        memory = ReportMemory(objective="Historical request." * 300)
+        before = memory.model_dump()
+        self.assertEqual(report_objective(context, memory), memory.objective)
+        self.assertEqual(memory.model_dump(), before)
+        memory.objective = ""
+        self.assertEqual(report_objective(context, memory), context.topic)
+
+    def test_whole_document_review_and_completed_restore_keep_full_request(self):
+        context, config, template, memory, section, _ = self.objects()
+        memory.section_plan = [section, ReportSectionPlan(section_id="end", heading="Limitations",
+                                                         goal="Bound the observations.")]
+        config = config.model_copy(update={"document_review": True, "max_review_iterations": 0})
+        seen, calls, checkpoints = {}, [], []
+
+        class Client:
+            def ask_json(self, system, prompt, *, label="", **kwargs):
+                calls.append(label)
+                seen[label] = payload(prompt)
+                if label == "report-document-reviewer":
+                    return {"section_reviews": []}
+                planned = seen[label]["section"]
+                if "reviewer" in label:
+                    return {"section_id": planned["section_id"], "verdict": "pass"}
+                return {"section_id": planned["section_id"], "heading": planned["heading"],
+                        "draft_markdown": "Recorded observations only."}
+
+        kwargs = dict(client=Client(), context=context, config=config, template=template,
+                      memory=memory, gateway=ReportToolGateway(context))
+        result = run_report_agent(**kwargs, checkpoint_sink=checkpoints.append)
+        self.assertEqual(seen["report-document-reviewer"]["objective"], context.problem_markdown)
+        self.assertEqual(seen["report-document-reviewer"]["length_observation"]["total_markdown_tokens"], 6)
+        count = len(calls)
+        restored = run_report_agent(**kwargs, completed_checkpoint=checkpoints[-1])
+        self.assertEqual(restored.report_body, result.report_body)
+        self.assertEqual(len(calls), count)
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,6 +94,16 @@ def manifest_section(manifest: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def read_required_json(path: Path) -> dict[str, Any]:
+    """Read an object-valued CodeTask artifact; never replace missing evidence."""
+    if not path.exists():
+        raise FileNotFoundError(f"Missing required artifact: {path}")
+    data = read_json(path)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Expected JSON object in {path}")
+    return data
+
+
 def workspace_file(workspace_dir: Path, relative_path: str) -> Path | None:
     """Resolve a workspace-relative path without allowing traversal."""
     rel = Path(relative_path)
@@ -108,11 +118,7 @@ def workspace_file(workspace_dir: Path, relative_path: str) -> Path | None:
 
 def is_relative_to(path: Path, parent: Path) -> bool:
     """Return true when ``path`` is inside ``parent``."""
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
+    return path.is_relative_to(parent)
 
 
 def utcnow_iso() -> str:

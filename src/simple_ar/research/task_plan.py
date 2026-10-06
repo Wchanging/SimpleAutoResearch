@@ -47,7 +47,7 @@ _STEP_TEXT = {
     "summarize": ("Persist the requested evidence-backed research summary.", "Summary artifact and its immutable source refs."),
     "assess_ideas": ("Compare candidate directions against evidence and constraints.", "Candidate assessment and unresolved evidence gaps."),
     "research_design": ("Turn the selected direction into the existing execution contract.", "Design contract and selection rationale."),
-    "prepare_execution": ("Create the isolated CodeTask workspace from the supplied project.", "Prepared workspace, copy report, and edit scope."),
+    "prepare_execution": ("Prepare the explicitly configured project workspace or task environment.", "Prepared execution boundary and observed preparation records."),
     "implement": ("Locate, scope, patch, review, and validate the requested code change.", "Patch diff, validation, and implementation lineage."),
     "baseline": ("Measure the explicitly configured baseline before a candidate.", "Canonical baseline measurement and diagnostics."),
     "experiment": ("Run the explicitly configured experiment or candidate measurement.", "Canonical measurement and execution status."),
@@ -77,7 +77,7 @@ _ACTION_RE = re.compile(
 )
 _PROCESS_CAPABILITIES = {"prepare_execution", "implement", "experiment"}
 _PROCESS_RESPONSIBILITIES = {
-    "prepare_execution": "Create the isolated workspace and record the copy/entry facts.",
+    "prepare_execution": "Prepare the configured isolated workspace or approved task venv, and record actual preparation results.",
     "implement": "Locate, scope, patch, and validate the authorized code change; it does not choose the research protocol.",
     "experiment": "Run one configured baseline or candidate measurement under the accepted protocol.",
     "analysis": "Interpret completed measurements and report limitations; it does not launch an unplanned process.",
@@ -319,19 +319,24 @@ def _extend_accepted_research_plan(request: TaskPlanRequest) -> TaskPlanResult:
 def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:
     """Return explicit offline defaults; these are a planning seed, not dispatch."""
     if request.task_kind == "data_analysis":
-        return [_row("data_ingest"), _row("data_analysis")]
+        actions = ["data_ingest", "data_analysis"]
+        if "report" in request.requested_outputs:
+            actions.extend(("document_ingest", "report_write", "report", "report_audit"))
+        return [_row(action) for action in actions]
 
     if request.task_kind == "bug_fix":
         return _bug_fix_steps(request.execution or {})
 
     if request.task_kind == "measurement":
-        return [_row("experiment"), _row("analysis")]
+        return ([_row("prepare_execution")] if "environment" in (request.execution or {}) else []) + [_row("experiment"), _row("analysis")]
 
     if request.task_kind == "writing":
         return [_row(action) for action in ("document_ingest", "report_write", "report", "report_audit")]
 
     if request.task_kind == "reproduction":
         steps = [_row(action) for action in ("document_ingest", "read", "synthesize", "experiment", "analysis")]
+        if "environment" in (request.execution or {}):
+            steps.insert(3, _row("prepare_execution"))
         if set(request.requested_outputs) & {"report", "paper", "full_paper"}:
             steps.extend(_row(action) for action in ("report_write", "report", "report_audit"))
         return steps
@@ -340,20 +345,18 @@ def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:
         # Supplied papers are an input boundary, not the output of a fake
         # search attempt.  The downstream reader and report contracts still
         # consume the canonical document bundle.
-        steps = [
-            _row("document_ingest"),
-            _row("read"),
-            _row("synthesize"),
-            _row("summarize"),
-        ]
+        steps = [_row("document_ingest")]
+        if not _report_from_documents(request):
+            steps.extend(_row(action) for action in ("read", "synthesize"))
     else:
         steps = [
             _row("search"),
             _row("document_ingest"),
             _row("read"),
             _row("synthesize"),
-            _row("summarize"),
         ]
+    if "summarize" in _required_output_actions(request):
+        steps.append(_row("summarize"))
     requested = {str(item).strip().lower() for item in request.requested_outputs}
     intents = {str(item).strip().lower() for item in request.intents}
     needs_execution = bool(requested & {"experiment", "experiments", "code", "code_task"})
@@ -569,7 +572,7 @@ def _planning_boundary(request: TaskPlanRequest) -> dict[str, Any]:
         checkpoint = "implementation"
         unauthorized_reason = "Bug-fix routing authorizes only its preparation and implementation actions."
     elif request.task_kind in {"measurement", "reproduction"}:
-        allowed_rows = [_row("experiment")] if configured else []
+        allowed_rows = ([_row("prepare_execution")] if configured and "environment" in execution else []) + ([_row("experiment")] if configured else [])
         checkpoint = request.task_kind
         unauthorized_reason = "Direct measurement authorizes only its supplied execution command."
     elif request.task_kind in {"survey", "writing", "data_analysis"}:
@@ -707,6 +710,33 @@ def _required_output_actions(request: TaskPlanRequest) -> tuple[str, ...]:
     return tuple(actions)
 
 
+def _report_from_documents(request: TaskPlanRequest) -> bool:
+    """A supplied-source report needs original material, not an intermediate brief."""
+    requested = {str(item).strip().lower() for item in request.requested_outputs}
+    intents = {str(item).strip().lower() for item in request.intents}
+    return (
+        request.task_kind in {"survey", "research"}
+        and _provided_materials_only(request)
+        and bool(request.config.get("research_local_documents"))
+        and bool(requested) and requested <= {"report", "paper", "full_paper"}
+        and not request.execution
+        and not intents & {"assess", "assessment", "evaluate_idea", "idea_assessment"}
+    )
+
+
+def _prerequisites(request: TaskPlanRequest, action: str, *, actions: set[str]) -> tuple[str, ...]:
+    """One input rule shared by plan compilation and order validation."""
+    if action == "document_ingest":
+        return ("search",) if "search" in actions or not request.config.get("research_local_documents") else ()
+    if action == "report_write" and _report_from_documents(request):
+        # A selected note/brief is an actual Writer input, not post-delivery work.
+        for producer in ("synthesize", "read"):
+            if producer in actions:
+                return (producer,)
+        return ("document_ingest",)
+    return _SEQUENTIAL_PREREQUISITES.get(action, ())
+
+
 def _complete_required_steps(
     request: TaskPlanRequest, proposed: tuple[TaskPlanStep, ...],
 ) -> tuple[tuple[TaskPlanStep, ...], tuple[str, ...]]:
@@ -722,13 +752,8 @@ def _complete_required_steps(
     steps = list(proposed)
     explicit = {step.action for step in steps}
 
-    def prerequisite(action: str) -> tuple[str, ...]:
-        if action == "document_ingest":
-            return () if "search" not in explicit and request.config.get("research_local_documents") else ("search",)
-        return _SEQUENTIAL_PREREQUISITES.get(action, ())
-
     def before(action: str, index: int) -> int:
-        for dependency in prerequisite(action):
+        for dependency in _prerequisites(request, action, actions={step.action for step in steps}):
             if dependency in explicit or dependency in {step.action for step in steps}:
                 continue
             # Only a real supplied document can replace search. An explicitly
@@ -762,10 +787,12 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
         raise ValueError("Implementation refinement requires recorded executor feedback; it cannot be preplanned.")
     errors = _validate_authorized_boundaries(request, steps)
     if request.task_kind == "data_analysis":
-        if actions != ["data_ingest", "data_analysis"] or any(step.condition for step in steps):
-            errors.append("Data analysis freezes supplied data then describes/plots it; no research or experiment prerequisites.")
-        if request.execution or set(request.requested_outputs) != {"data_analysis"}:
-            errors.append("Data analysis requests only its descriptive package without process execution.")
+        if actions != [row["action"] for row in default_task_steps(request)] or any(step.condition for step in steps):
+            errors.append("Data analysis freezes and analyzes supplied data, then optionally writes from that package; no research or experiment prerequisites.")
+        if request.execution or set(request.requested_outputs) not in ({"data_analysis"}, {"data_analysis", "report"}):
+            errors.append("Data analysis requests its descriptive package and optionally a report, without process execution.")
+        if request.config.get("research_local_documents") and "report" not in request.requested_outputs:
+            errors.append("Data documentation and references are consumed by the optional report, not descriptive arithmetic.")
         from simple_ar.result_analysis.table import TableSpec
         table = request.config.get("data_analysis") or {}
         TableSpec.from_config(table)
@@ -799,7 +826,7 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
             raise ValueError("\n".join(errors))
         return
     if request.task_kind == "measurement":
-        if actions != ["experiment", "analysis"]:
+        if actions != [row["action"] for row in default_task_steps(request)]:
             errors.append("Direct measurement requires exactly experiment then analysis; it does not perform research discovery or design.")
         if not isinstance(request.execution, Mapping) or not request.execution.get("command"):
             errors.append("Direct measurement requires an explicit execution command.")
@@ -827,9 +854,11 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
     provided_only = "search" not in actions
     if provided_only and not request.config.get("research_local_documents"):
         errors.append("Omitting search requires supplied local documents.")
-    required = {"document_ingest", "read", "synthesize"} if provided_only else {
-        "search", "document_ingest", "read", "synthesize"
-    }
+    required = {"document_ingest"}
+    if not _report_from_documents(request):
+        required.update(("read", "synthesize"))
+    if not provided_only:
+        required.add("search")
     if not required <= set(actions):
         boundary = "provided-materials" if provided_only else "search-to-evidence"
         errors.append(f"Research plans must preserve the {boundary} boundary.")
@@ -837,10 +866,7 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
     if (not requested or requested & {"summarize", "summary", "research_summary"}) and "summarize" not in actions:
         errors.append("The requested research summary is missing from the accepted plan.")
     for index, step in enumerate(steps):
-        dependencies = () if step.action == "document_ingest" and provided_only else (
-            ("search",) if step.action == "document_ingest" else _SEQUENTIAL_PREREQUISITES.get(step.action, ())
-        )
-        for dependency in dependencies:
+        for dependency in _prerequisites(request, step.action, actions=set(actions)):
             if not any(_action_matches(item.action, dependency) for item in steps[:index]):
                 errors.append(f"Task plan action {step.action!r} is missing prerequisite {dependency!r}.")
     if errors:
@@ -1006,6 +1032,8 @@ def _valid_condition(condition: str) -> bool:
 
 
 def _needs_preparation(execution: Mapping[str, object]) -> bool:
+    if "environment" in execution:
+        return True
     if "dataset" in execution:
         return True
     task = execution.get("code_task")
@@ -1067,6 +1095,7 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
         "material_boundary": {
             "provided_materials_only": _provided_materials_only(request),
             "search_allowed": not _provided_materials_only(request),
+            "report_from_original_documents": _report_from_documents(request),
             "supplied_asset_count": sum(
                 1 for asset in request.assets
                 if str(asset.get("role") or "").strip().lower() in {"paper", "document", "reference"}
@@ -1094,7 +1123,7 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
         "authorized code, `experiment` measures a configured condition, `analysis` interprets completed "
         "measurements, and none of these actions is a substitute for research design or report writing. "
         "For measurement, use exactly experiment then analysis; the supplied command is the accepted measurement protocol, not a research candidate. "
-        "For reproduction, use the supplied fixed-protocol suggested steps without research_design, assess_ideas or code edits; the user has already specified the reproduction scope and command. "
+        "For reproduction, use the supplied fixed-protocol suggested steps without research_design, assess_ideas or code edits; the user has already specified the reproduction scope and command. An explicitly configured task venv requires its prepare_execution step before measurement; do not omit it or add installation steps otherwise. "
         "For bug_fix, use only prepare_execution (when required) and implement; implementation "
         "already includes validation and the repair explanation, so do not append summary or report steps. "
         "Do not invent dynamic indices, repair rounds, capabilities, processes, or parallel work. "
@@ -1102,6 +1131,9 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
         "not add search. With supplied local documents you may omit search when the task calls "
         "for analysing those materials. Without supplied local documents, search is required before "
         "document_ingest, read, and synthesize. research_design requires assess_ideas after synthesis. "
+        "When report_from_original_documents is true, report_write can consume document_ingest "
+        "directly and query retained original text. Add read or synthesize only when their notes "
+        "or cross-source brief help this task; neither is a mandatory report prerequisite. "
         "For an experiment before protocol acceptance, stop at research_design; do not include "
         "execution or delivery yet. Missing required prerequisites are recorded and compiled by "
         "the application, but unauthorized actions and reversed explicit order are rejected. "

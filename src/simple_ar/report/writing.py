@@ -39,6 +39,12 @@ def run_report_writing_capability(*, context: CapabilityContext, request: Report
     identity = {**snapshot, "template": request.template.model_dump(
         mode="json", exclude={"template_path", "criteria_path"},
     )}
+    # The new default is exactly the old section-first behavior. Keep its
+    # fingerprint compatible with checkpoints created before the option
+    # existed; an explicit document-first change must still invalidate reuse.
+    for field in ("review_scope", "draft_scope"):
+        if identity["config"].get(field) == "section":
+            identity["config"] = {key: value for key, value in identity["config"].items() if key != field}
     snapshot["snapshot_id"] = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     source = context.store.write_json("report_inputs.json", snapshot, kind="report_snapshot", schema="report_snapshot.v1")
     completed = None

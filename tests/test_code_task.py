@@ -175,6 +175,9 @@ class CodeTaskTests(unittest.TestCase):
     def test_application_prepares_source_project_and_resumes_without_reinitializing(self):
         self._exercise_application_code_change(repair_failure=False, prepare_source=True)
 
+    def test_application_prepares_declared_large_data_and_resumes_without_recopied_inputs(self):
+        self._exercise_application_code_change(repair_failure=False, prepare_source=True, declared_data=True)
+
     def test_application_accepts_code_task_protocol_before_preparation_and_reload(self):
         self._exercise_application_code_change(
             repair_failure=False, prepare_source=True, protocol_gate=True,
@@ -195,7 +198,7 @@ class CodeTaskTests(unittest.TestCase):
     def test_paired_repair_limit_keeps_failure_and_missing_seed(self):
         self._exercise_application_code_change(repair_failure=True, repair_succeeds=False, prepare_source=True, paired=True)
 
-    def _exercise_application_code_change(self, *, repair_failure, repair_succeeds=True, prepare_source=False, paired=False, baseline_failure=False, late_failure=False, protocol_gate=False):
+    def _exercise_application_code_change(self, *, repair_failure, repair_succeeds=True, prepare_source=False, paired=False, baseline_failure=False, late_failure=False, protocol_gate=False, declared_data=False):
         from dataclasses import replace
         from simple_ar.app.research_application import ResearchApplicationServices, create_session, load_session
         from simple_ar.research.workflow_contracts import ResearchBrief
@@ -203,10 +206,13 @@ class CodeTaskTests(unittest.TestCase):
             root = Path(tmp)
             project, task, code_run = root / "project", root / "task.md", root / "code-task"
             _write_toy_project(project)
+            if declared_data:
+                (project / "input.bin").write_bytes(b"x" * 2_000_001)
             (project / "evaluate.py").write_text(
                 "from spam_model import predict\nimport sys\n"
                 "with open('evaluation_count.txt', 'a') as log: log.write('run\\n')\n"
                 "print('accuracy:', sum(predict(x) == 'spam' for x in ('win', 'prize')) / 2)\n"
+                + ("assert len(open('input.bin', 'rb').read()) == 2000001\n" if declared_data else "")
                 + ("raise SystemExit(3 if sys.argv[-1] == '1' else 0)\n" if baseline_failure else ""),
                 encoding="utf-8",
             )
@@ -220,7 +226,8 @@ class CodeTaskTests(unittest.TestCase):
             command = [sys.executable, "evaluate.py"]
             app = create_session(ResearchBrief(
                 request_text="Compare a keyword classifier improvement.", requested_outputs=("experiments",),
-                asset_requests=({"locator": str(paper), "role": "paper"},),
+                asset_requests=({"locator": str(paper), "role": "paper"},
+                    *(({"locator": str(project / "input.bin"), "role": "dataset"},) if declared_data else ())),
             ), root=root / "session", services=ResearchApplicationServices(max_results=1, max_attempts=24 if paired else 16, config={
                 **({"interaction": "assisted"} if protocol_gate else {}),
                 "execution": {"command": command, "baseline": {"command": command},
@@ -271,6 +278,9 @@ class CodeTaskTests(unittest.TestCase):
                 workspace = Path(prepared["execution"]["cwd"])
                 self.assertNotEqual(workspace, project)
                 self.assertEqual(prepared["source_project"], str(project))
+                if declared_data:
+                    self.assertEqual((workspace / "input.bin").read_bytes(), (project / "input.bin").read_bytes())
+                    self.assertEqual(prepared["workspace_info"]["patterns"]["data_inputs"], ["input.bin"])
             else:
                 app.advance(max_actions=9)
             if paired:
@@ -554,9 +564,7 @@ class CodeTaskTests(unittest.TestCase):
         self.assertEqual(infer_file_kind("artifacts/results.json", "output_placeholder"), "output_placeholder")
 
     def test_repair_add_file_can_populate_empty_placeholder(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             target = root / "artifacts" / "artifacts_io.py"
             target.parent.mkdir(parents=True)
             target.touch()
@@ -570,9 +578,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("def save", read_text(target))
 
     def test_repair_rejects_path_below_existing_file(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             write_text(root / "artifacts_io.py", "VALUE = 1\n")
 
             result = apply_repair_actions(
@@ -590,9 +596,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(result["rejected_actions"][0]["reason"], "parent_path_is_file")
 
     def test_greenfield_review_does_not_infer_hidden_labels_from_helper_names(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             write_text(root / "main.py", "from strategies import select_qbc\n")
             write_text(
                 root / "strategies.py",
@@ -633,9 +637,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertFalse(any(item.get("severity") == "blocking" for item in report["findings"]))
 
     def test_greenfield_review_blocks_return_contract_mismatch(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             write_text(
                 root / "producer.py",
                 (
@@ -687,9 +689,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("return_contract_mismatch", categories)
 
     def test_resource_static_reports_observations_without_model_specific_policy(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             write_text(
                 root / "model_loop.py",
                 (
@@ -714,9 +714,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertTrue(any(item.get("category") == "resource_fit_loop_risk" for item in findings))
 
     def test_repair_action_rewrite_function_preserves_method_indentation(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             module = root / "worker.py"
             write_text(
                 module,
@@ -787,9 +785,7 @@ class CodeTaskTests(unittest.TestCase):
                     "summary": "Regenerated runner with real metric path.",
                 }
 
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             project = root / "generated_project"
             runner = project / "generated_experiment" / "runner.py"
             runner.parent.mkdir(parents=True)
@@ -954,9 +950,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(artifacts["total_lines"], 4)
 
     def test_greenfield_review_repair_does_not_invent_resource_policy_without_llm(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             project = root / "generated_project"
             package = project / "generated_experiment"
             package.mkdir(parents=True)
@@ -1019,9 +1013,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual({p.name: p.read_bytes() for p in project.iterdir()}, before)
 
     def test_init_copies_workspace_and_indexes_python_ast(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -1111,9 +1103,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("## Prompt Budget", repo_summary)
 
     def test_greenfield_init_uses_empty_workspace_without_code_root(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             task_file = root / "task.md"
             write_text(task_file, "# Task\n\nCreate a small runnable Python experiment.\n")
             config = root / "greenfield.toml"
@@ -1266,9 +1256,7 @@ primary_metric = "accuracy"
                 self.assertTrue(plan["files"])
 
     def test_greenfield_execute_generates_validates_and_runs_project(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             task_file = root / "task.md"
             write_text(
                 task_file,
@@ -1360,9 +1348,7 @@ primary_metric = "accuracy"
             self.assertEqual(read_json(run_dir / "code_task/run/patched/metrics.json"), metrics)
 
     def test_greenfield_review_failure_without_model_does_not_erase_package_code(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             task_file = root / "task.md"
             write_text(
                 task_file,
@@ -1429,9 +1415,7 @@ primary_metric = "accuracy"
             self.assertFalse((run_dir / "code_task" / "run" / "patched" / "metrics.json").exists())
 
     def test_runtime_repair_does_not_invent_presets_or_ignore_parameters(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             project_dir = root / "generated_project"
             package_dir = project_dir / "generated_experiment"
             package_dir.mkdir(parents=True)
@@ -1513,9 +1497,7 @@ primary_metric = "accuracy"
                     "summary": f"Repaired {path}.",
                 }
 
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             project_dir = root / "generated_project"
             package_dir = project_dir / "generated_experiment"
             package_dir.mkdir(parents=True)
@@ -1570,9 +1552,7 @@ primary_metric = "accuracy"
             self.assertIn("generated_experiment/inputs.py", patch_set["changed_files"])
 
     def test_greenfield_benchmark_rejects_empty_zero_evidence(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             task_file = root / "task.md"
             write_text(task_file, "# Task\n\nRun a greenfield experiment with condition-level evidence.\n")
             run_dir = root / "runs" / "empty-greenfield-evidence"
@@ -1628,9 +1608,7 @@ primary_metric = "accuracy"
             self.assertEqual(manifest["status"], "benchmark_failed")
 
     def test_greenfield_benchmark_rejects_zero_exit_without_required_results(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             task_file = root / "task.md"
             write_text(
                 task_file,
@@ -1661,9 +1639,7 @@ primary_metric = "accuracy"
             self.assertEqual(report["quality_guard"]["reason"], "missing_results_artifact")
 
     def test_greenfield_benchmark_rejects_missing_required_report(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             task_file = root / "task.md"
             write_text(
                 task_file,
@@ -1703,9 +1679,7 @@ primary_metric = "accuracy"
             self.assertIn("report.md", report["quality_guard"]["message"])
 
     def test_greenfield_benchmark_reports_artifact_path_mismatch(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             task_file = root / "task.md"
             write_text(
                 task_file,
@@ -1753,9 +1727,7 @@ primary_metric = "accuracy"
             self.assertIn("artifact_path_mismatch", read_text(analysis.analysis_path))
 
     def test_greenfield_artifact_scan_ignores_downstream_submission_signals(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             task_file = root / "task.md"
             write_text(
                 task_file,
@@ -1845,9 +1817,7 @@ primary_metric = "accuracy"
                     "summary": f"Repaired {path}.",
                 }
 
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             project_dir = root / "generated_project"
             for rel_path in [
                 "app.py",
@@ -1961,9 +1931,7 @@ primary_metric = "accuracy"
                     "summary": f"Repaired {path}.",
                 }
 
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             project_dir = root / "generated_project"
             files = {
                 "app.py": "from __future__ import annotations\n",
@@ -2037,9 +2005,7 @@ primary_metric = "accuracy"
                     ],
                 }
 
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             project_dir = root / "generated_project"
             report = project_dir / "src" / "report.py"
             report.parent.mkdir(parents=True)
@@ -2095,9 +2061,7 @@ primary_metric = "accuracy"
                     ),
                 }
 
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             project_dir = root / "generated_project"
             project_dir.mkdir(parents=True)
             original = (
@@ -2122,9 +2086,7 @@ primary_metric = "accuracy"
             self.assertEqual((project_dir / "config.py").read_text(encoding="utf-8"), original)
 
     def test_greenfield_review_flags_stdlib_shadow_and_nested_artifact_path(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             project_dir = root / "generated_project"
             project_dir.mkdir(parents=True)
             write_text(project_dir / "main.py", "from __future__ import annotations\n")
@@ -2192,9 +2154,7 @@ primary_metric = "accuracy"
 
 
     def test_greenfield_execute_can_use_fake_agent_backend(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             task_file = root / "task.md"
             write_text(
                 task_file,
@@ -2234,9 +2194,7 @@ primary_metric = "accuracy"
             self.assertIn("accuracy", metrics)
 
     def test_configured_edit_scope_limits_editable_repo_map_and_apply(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             config = root / "code_task.toml"
@@ -2298,9 +2256,7 @@ protected_patterns = ["pyproject.toml"]
     def test_init_can_create_git_worktree_workspace(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git executable is not available")
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "git_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -2338,9 +2294,7 @@ protected_patterns = ["pyproject.toml"]
     def test_auto_workspace_prefers_git_worktree_for_git_project(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git executable is not available")
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "git_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -2382,9 +2336,7 @@ protected_patterns = ["pyproject.toml"]
     def test_git_worktree_supports_project_subdirectory(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git executable is not available")
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             repo = root / "repo"
             code_root = repo / "package"
             code_root.mkdir(parents=True)
@@ -2437,9 +2389,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(read_text(repo / "root_only.py"), "ROOT_VALUE = 1\n")
 
     def test_auto_workspace_falls_back_to_copy_for_non_git_project(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "plain_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -2465,9 +2415,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertTrue(manifest["workspace"]["user_next_steps"])
 
     def test_init_can_create_sparse_copy_workspace(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "sparse_project"
             task_file = root / "task.md"
             write_text(code_root / "src" / "pkg" / "model.py", "def predict():\n    return 1\n")
@@ -2486,8 +2434,8 @@ protected_patterns = ["pyproject.toml"]
                 task_file=task_file,
                 benchmark_command="python benchmark.py",
                 workspace_mode="sparse_copy",
-                workspace_include=("src/**", "tests/**", "benchmark.py", "pyproject.toml"),
-                workspace_exclude=("models/**",),
+                workspace_include=(" src\\**/ ", "tests/**", "benchmark.py", "pyproject.toml", "src/**", " "),
+                workspace_exclude=(" models\\**/ ", "models/**", " "),
             )
 
             workspace = result.workspace_dir
@@ -2510,9 +2458,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("sparse_excluded_dir", skipped_reasons)
 
     def test_code_task_init_cli_prints_summary(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             output_root = root / "runs"
@@ -2555,9 +2501,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("python files: 2", status_text)
 
     def test_code_task_map_rebuilds_repo_map_from_workspace(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -2597,9 +2541,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Index refreshed: False", output)
 
     def test_code_task_locate_writes_ranked_targets_and_evidence(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -2651,9 +2593,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Editable targets:", output)
 
     def test_code_task_context_pack_writes_prompt_and_snippets(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -2695,9 +2635,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["context_pack"]["status"], "completed")
 
     def test_context_pack_preserves_required_config_over_similar_reports(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             _write_toy_project(code_root)
             write_text(code_root / "config" / "active.toml", "seed = 0\n")
@@ -2778,9 +2716,7 @@ protected_patterns = ["pyproject.toml"]
     def test_cached_context_rebuilds_when_protocol_adds_required_evidence(self) -> None:
         from simple_ar.code_task.orchestration.execute import _ensure_context_pack_for_current_batch
 
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "project"
             _write_toy_project(code_root)
             write_text(code_root / "config" / "active.toml", "seed = 0\n")
@@ -2810,9 +2746,7 @@ protected_patterns = ["pyproject.toml"]
             ])
 
     def test_edit_proposal_can_request_bounded_dependency_evidence(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "project"
             _write_toy_project(code_root)
             write_text(code_root / "spam_model.py", "import example_embeddings\n" + read_text(code_root / "spam_model.py"))
@@ -2845,9 +2779,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(read_json(run_dir / "code_task/meta/dependency_api.json"), observed)
 
     def test_edit_proposal_can_read_source_after_dependency_evidence(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "project"
             _write_toy_project(code_root)
             original = read_text(code_root / "spam_model.py")
@@ -2907,9 +2839,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Selected files:", output)
 
     def test_work_plan_offline_writes_batchable_items_and_manifest(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -2956,9 +2886,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["work_plan"]["item_count"], 1)
 
     def test_work_plan_and_batch_cli_create_attempt_state(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             output_root = root / "runs"
@@ -3036,9 +2964,7 @@ protected_patterns = ["pyproject.toml"]
         self.assertIn("more files than the normal", items[0]["suggested_budget_override"])
 
     def test_create_code_task_batch_reuses_existing_item_batch(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3062,9 +2988,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertTrue(forced.batch_state_path.is_file())
 
     def test_execute_selects_first_implementation_work_item(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3094,9 +3018,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Implement", batch_state["work_item"]["objective"])
 
     def test_create_code_task_batch_merges_serial_dependent_items(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3126,9 +3048,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertTrue(work_item["requires_budget_override"])
 
     def test_create_code_task_batch_can_disable_serial_merge(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3158,9 +3078,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertFalse(work_item["requires_budget_override"])
 
     def test_record_plan_decision_updates_work_plan_approval(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3183,9 +3101,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["work_plan"]["approval"]["status"], "approved")
 
     def test_probe_code_task_environment_writes_report_and_manifest(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3219,9 +3135,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("pyproject.toml", summary)
 
     def test_code_task_probe_cli_prints_environment_summary(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             output_root = root / "runs"
@@ -3256,9 +3170,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Environment:", status_stdout.getvalue())
 
     def test_patch_plan_offline_writes_reviewable_plan_and_updates_manifest(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3291,9 +3203,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["layout"]["patch_plan"], "code_task/patch_plan.md")
 
     def test_plan_and_propose_use_latest_context_pack_when_available(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3347,9 +3257,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertTrue(context.context_pack_path.is_file())
 
     def test_failed_llm_edit_is_not_an_offline_proposal_and_can_retry(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "project"
             _write_toy_project(code_root)
             write_text(root / "task.md", "Improve spam prediction.")
@@ -3391,9 +3299,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertGreater(result[0]["source_offset"], 0)
 
     def test_truncated_editable_file_can_be_read_again_without_expanding_scope(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "project"
             _write_toy_project(code_root)
             source = read_text(code_root / "spam_model.py")
@@ -3434,9 +3340,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("'win'", read_text(run_dir / "code_task/workspace/spam_model.py"))
 
     def test_truncated_editable_file_gets_bounded_fallback_when_model_cannot_request_source(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "project"
             _write_toy_project(code_root)
             source = read_text(code_root / "spam_model.py")
@@ -3474,9 +3378,7 @@ protected_patterns = ["pyproject.toml"]
     def test_bounded_fallback_reads_two_unseen_windows_within_budget(self) -> None:
         from simple_ar.code_task.analysis.index import build_codebase_index
         from simple_ar.code_task.analysis.source_context import requested_source_context
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             source = ("# source padding\n" * 100) + "def target():\n    return 1\n"
             write_text(root / "model.py", source)
             index = build_codebase_index(root)
@@ -3491,9 +3393,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(read_text(root / "model.py"), source)
 
     def test_missing_context_is_read_once_without_expanding_edit_scope(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "project"
             _write_toy_project(code_root)
             write_text(code_root / "tests/lifecycle.py", "def end_task():\n    pass\n")
@@ -3546,9 +3446,7 @@ protected_patterns = ["pyproject.toml"]
             client.ask_json.assert_called_once()
 
     def test_propose_edits_restricts_llm_to_current_batch_targets(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3639,9 +3537,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(batch_proposal["editor"]["backend"], "controlled_patch")
 
     def test_propose_edits_budget_requires_large_approval(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3754,9 +3650,7 @@ protected_patterns = ["pyproject.toml"]
 
 
     def test_patch_plan_includes_baseline_and_environment_context(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "metric_project"
             task_file = root / "task.md"
             _write_metric_project(code_root, value="0.50")
@@ -3783,9 +3677,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["plan"]["context"]["baseline_metrics"]["accuracy"], 0.5)
 
     def test_code_task_plan_and_decide_cli(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             output_root = root / "runs"
@@ -3843,9 +3735,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("status: approved", status_stdout.getvalue())
 
     def test_apply_edits_requires_approved_plan_and_then_patches_workspace(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3894,9 +3784,7 @@ protected_patterns = ["pyproject.toml"]
     def test_apply_large_edits_records_apply_time_approval(self) -> None:
         from simple_ar.code_task.editing.patching import EditBudgetApprovalRequired
         from simple_ar.code_task.orchestration.execute import implement_code_task
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3935,9 +3823,7 @@ protected_patterns = ["pyproject.toml"]
             )
 
     def test_apply_repair_proposal_records_latest_applied_proposal(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -3970,9 +3856,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(applied["proposal"], "code_task/repairs/repair-001/proposed_edits.json")
 
     def test_apply_edits_allows_multiple_ordered_edits_in_one_file(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4022,9 +3906,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(diff_text.count("--- a/spam_model.py"), 1)
 
     def test_apply_edits_rejects_path_traversal_without_modifying_workspace(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4057,9 +3939,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertFalse((run_dir / "code_task" / "patch.diff").exists())
 
     def test_apply_edits_rejects_protected_test_and_benchmark_files(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4107,9 +3987,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertFalse((run_dir / "code_task" / "patch.diff").exists())
 
     def test_propose_edits_drops_protected_llm_paths(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4160,9 +4038,7 @@ protected_patterns = ["pyproject.toml"]
             )
 
     def test_code_task_propose_and_apply_cli_with_manual_edits_file(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             output_root = root / "runs"
@@ -4205,9 +4081,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("status: applied", status_stdout.getvalue())
 
     def test_code_task_apply_cli_reports_validation_errors_without_traceback(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             output_root = root / "runs"
@@ -4258,9 +4132,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("old text was not found", output)
 
     def test_validate_code_task_reports_warnings_and_strict_errors(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4310,9 +4182,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual([row["code"] for row in report["issues"]], ["dependency_check_unavailable"])
 
     def test_run_code_task_benchmark_captures_outputs_and_updates_status(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4361,9 +4231,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(latest_report["history_attempt"], "attempt-002")
 
     def test_run_code_task_benchmark_stops_warning_flood_with_watchdog(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4393,9 +4261,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Runtime output watchdog", read_text(result.stderr_path))
 
     def test_run_code_task_baseline_records_pre_patch_result(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4422,9 +4288,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Environment mode: `current`", summary)
 
     def test_patched_run_writes_comparison_when_baseline_exists(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "metric_project"
             task_file = root / "task.md"
             _write_metric_project(code_root, value="0.50")
@@ -4460,9 +4324,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("+0.3", summary)
 
     def test_patched_regression_sets_objective_status(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "metric_project"
             task_file = root / "task.md"
             _write_metric_project(code_root, value="0.80")
@@ -4508,9 +4370,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertNotIn("## Repair", summary)
 
     def test_manual_validate_and_run_sync_latest_batch_state(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4548,9 +4408,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["work_plan"]["status"], "completed")
 
     def test_comparison_uses_configured_direction_for_custom_metric(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "metric_project"
             task_file = root / "task.md"
             _write_metric_project(
@@ -4600,9 +4458,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("custom_reward=+2.5", status)
 
     def test_unknown_metric_is_recorded_but_not_overinterpreted(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "metric_project"
             task_file = root / "task.md"
             _write_metric_project(code_root, value="10.0", metric_name="custom_reward")
@@ -4629,9 +4485,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(comparison["metrics"][0]["interpretation"], "changed")
 
     def test_code_task_init_cli_records_metric_config(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "metric_project"
             task_file = root / "task.md"
             output_root = root / "runs"
@@ -4678,9 +4532,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Metric directions:", output)
 
     def test_code_task_init_cli_reads_toml_config(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "metric_project"
             task_file = root / "task.md"
             output_root = root / "configured_runs"
@@ -4732,9 +4584,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Config:", stdout.getvalue())
 
     def test_code_task_config_rejects_wrong_section_types(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             config_file = root / "code_task.toml"
             write_text(
                 config_file,
@@ -4752,9 +4602,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("task_file", str(raised.exception))
 
     def test_external_env_mode_records_python_policy_and_uses_it(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4788,9 +4636,7 @@ protected_patterns = ["pyproject.toml"]
             )
 
     def test_code_task_cli_can_override_env_mode_for_baseline(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             output_root = root / "runs"
@@ -4834,9 +4680,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["environment"]["policy"]["mode"], "external")
 
     def test_analyze_failure_and_offline_repair_proposal(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4880,9 +4724,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("## Repair", read_text(run_dir / "code_task" / "summary.md"))
 
     def test_failure_analysis_prefers_runtime_stderr_over_validation_warning(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4913,9 +4755,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertNotIn("strongest error signal is: `warning", analysis_text)
 
     def test_greenfield_run_repair_analyzes_failure_when_budget_exhausted(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4950,9 +4790,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("final budget exhausted signal", analysis_text)
 
     def test_execute_runs_to_approval_gate(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -4985,9 +4823,7 @@ protected_patterns = ["pyproject.toml"]
             )
 
     def test_execute_blocks_on_llm_work_plan_failure_without_fallback(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5019,9 +4855,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertFalse((run_dir / "code_task" / "work_plan.md").exists())
 
     def test_execute_uses_planning_fallback_only_when_explicitly_allowed(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5053,9 +4887,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(work_plan["mode"], "offline")
 
     def test_execute_blocks_on_llm_patch_plan_failure_without_fallback(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5088,9 +4920,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertFalse((run_dir / "code_task" / "patch_plan.md").exists())
 
     def test_execute_can_skip_expensive_baseline(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5120,9 +4950,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("skip", summary)
 
     def test_execute_can_record_provided_baseline_metrics(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             metrics_file = root / "baseline_metrics.json"
@@ -5155,9 +4983,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["benchmark"]["baseline_policy"]["policy"], "provided")
 
     def test_execute_dry_run_has_no_side_effects(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5187,9 +5013,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("would_run", output)
 
     def test_execute_cli_reads_runtime_config(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             config_file = root / "execute.toml"
@@ -5242,9 +5066,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertFalse((run_dir / "code_task" / "work_plan.json").exists())
 
     def test_execute_interactive_skips_completed_steps_without_prompting(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5277,9 +5099,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertFalse((run_dir / "code_task/work_plan.json").exists())
 
     def test_execute_inline_review_can_approve_plan_and_continue(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5317,9 +5137,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["plan"]["status"], "approved")
 
     def test_execute_applies_reviewed_proposal_after_approval(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5397,9 +5215,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(post_run.read_bytes(), before)
 
     def test_execute_generates_repair_proposal_after_failed_run(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5452,9 +5268,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn(("repair", "done"), step_status)
 
     def test_execute_reports_patch_apply_failure_without_traceback(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5502,9 +5316,7 @@ protected_patterns = ["pyproject.toml"]
                     execute_code_task(run_dir, use_llm=False, timeout_sec=10, apply_proposed_edits=True)
 
     def test_execute_regenerates_one_invalid_proposal_with_failure_context(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5578,9 +5390,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertTrue((run_dir / "code_task" / "meta" / "applied_edits.json").is_file())
 
     def test_analyze_validation_failure_without_benchmark_run(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5612,9 +5422,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("spam_model.py", proposal["selected_files"])
 
     def test_repair_proposal_drops_edits_outside_selected_context(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5660,9 +5468,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("Dropped edit outside repair context: extra.py", proposal["warnings"])
 
     def test_repair_proposal_drops_diff_marker_edits(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
@@ -5716,9 +5522,7 @@ protected_patterns = ["pyproject.toml"]
             )
 
     def test_code_task_validate_run_and_failure_cli(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
+        with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"
             output_root = root / "runs"
@@ -5757,6 +5561,14 @@ protected_patterns = ["pyproject.toml"]
                 main(["status", str(run_dir)])
             self.assertIn("Validation:", status_stdout.getvalue())
             self.assertIn("last status: passed", status_stdout.getvalue())
+
+
+@contextlib.contextmanager
+def _temporary_root():
+    """One isolated root per scenario, cleaned even when an assertion fails."""
+    TEST_ROOT.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+        yield Path(tmp)
 
 
 def _write_toy_project(code_root: Path) -> None:

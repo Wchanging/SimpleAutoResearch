@@ -23,6 +23,6 @@ jobs:
       - name: Check CLI entrypoint
         run: uv run --no-sync simple-ar --help
       - name: Run offline contract and application checks
-        run: uv run --no-sync simple-ar-checks quick core application research code-task report llm
+        run: uv run --no-sync simple-ar-checks quick core intake data application research code-task report llm
       - name: Build distribution
         run: uv build --wheel

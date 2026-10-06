@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from simple_ar.code_task.analysis.index import project_python_files
 from simple_ar.code_task.runtime.state import is_relative_to
 
 
@@ -196,11 +197,7 @@ def _source_signal_files(workspace_dir: Path, signal_text: str) -> list[str]:
         return []
     ranked: list[tuple[int, str]] = []
     workspace = workspace_dir.resolve()
-    for path in workspace.rglob("*.py"):
-        if not path.is_file():
-            continue
-        if any(part.startswith(".") or part in {"__pycache__", ".venv", "venv"} for part in path.parts):
-            continue
+    for path in project_python_files(workspace):
         try:
             source = path.read_text(encoding="utf-8", errors="ignore").lower()
         except OSError:

@@ -12,7 +12,7 @@ from simple_ar.core import ArtifactStore
 from pathlib import Path
 import tempfile
 from simple_ar.report.audit import build_report_audit
-from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory, ReportSectionDraft, ReviewerFinding
+from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory, ReviewerFinding
 
 
 class ReportMeasurementAuditTests(unittest.TestCase):

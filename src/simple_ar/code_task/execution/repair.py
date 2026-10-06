@@ -13,15 +13,18 @@ from simple_ar.code_task.editing.scope import (
     is_edit_allowed_path,
     protected_patterns_from_manifest,
 )
-from simple_ar.code_task.execution.failure import analyze_code_task_failure
+from simple_ar.code_task.analysis.interfaces import render_source_snippets
+from simple_ar.code_task.analysis.source_context import diff_source_anchors, source_context_for_files
+from simple_ar.code_task.execution.failure import FILE_LINE_RE, analyze_code_task_failure
 from simple_ar.code_task.editing.planning import select_relevant_files
+from simple_ar.code_task.editing.actions import looks_like_diff_fragment as _looks_like_diff_fragment
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     load_code_task_manifest,
     manifest_section,
+    read_required_json as _read_required_json,
     save_code_task_manifest,
     utcnow_iso,
-    workspace_file,
 )
 from simple_ar.code_task.execution.summary import write_code_task_summary
 from simple_ar.code_task.memory import task_memory_context
@@ -33,7 +36,9 @@ CODE_TASK_REPAIR_SYSTEM = (
     "You are a careful senior engineer proposing a minimal repair patch for "
     "an isolated code-task workspace. Use the failure analysis, execution "
     "report, patch plan, and supplied source snippets. Return only JSON. Do "
-    "not broaden the change unless the traceback requires it."
+    "not broaden the change unless the observed failure requires it. The "
+    "previous plan is a hypothesis, not proof: correct its diagnosis when "
+    "source and runtime evidence contradict it."
 )
 
 MessageCallback = Callable[[str], None]
@@ -161,10 +166,12 @@ def propose_repair_edits(
             protected_patterns=protected_patterns,
         )
     ]
-    snippets = _source_snippets(
+    snippets = source_context_for_files(
         paths.workspace_dir,
-        selected,
+        selected + read_only_context[:max(0, max_files - len(selected))],
         max_chars_per_file=max_source_chars_per_file,
+        anchors=_repair_source_anchors(failure_analysis, patch_diff, validation_report),
+        editable_files=selected,
     )
 
     repair_dir = _next_repair_dir(paths.repairs_dir)
@@ -248,13 +255,10 @@ def _repair_prompt(
     failure_analysis: str,
     execution_report: dict[str, Any],
     validation_report: dict[str, Any],
-    snippets: list[dict[str, str]],
+    snippets: list[dict[str, Any]],
     read_only_context: list[str],
 ) -> str:
-    snippet_text = "\n\n".join(
-        f"### {item['path']}\n```text\n{item['text']}\n```"
-        for item in snippets
-    )
+    snippet_text = render_source_snippets(snippets)
     return (
         "Return JSON with fields: `summary` string, `edits` list, "
         "`validation` list of strings, and `risks` list of strings.\n\n"
@@ -263,11 +267,13 @@ def _repair_prompt(
         "- Use exact old/new text replacements only.\n"
         "- Do not include diff markers such as `+`, `-`, `@@`, `---`, or "
         "`+++` inside `old` or `new`; they must contain only file text.\n"
-        "- Use only workspace-relative paths from the supplied snippets.\n"
+        "- Edit only workspace-relative paths marked editable in the supplied snippets.\n"
         "- Prefer repairing implicated or recently changed files.\n"
         "- Treat validation errors as first-class evidence even when the benchmark was not launched.\n"
         "- Do not change read-only files such as tests, benchmarks, or validation targets.\n"
         "- Keep the repair minimal and runnable.\n"
+        "- Distinguish measured symptoms from suspected causes; do not preserve a disproven plan.\n"
+        "- Partial source is not a full implementation; do not invent unseen code.\n"
         "- Do not return markdown or a unified diff.\n\n"
         f"Task:\n{task_text or 'No task text found.'}\n\n"
         f"Patch plan:\n{patch_plan or 'No patch plan found.'}\n\n"
@@ -276,7 +282,7 @@ def _repair_prompt(
         f"Execution report JSON:\n{json.dumps(execution_report or {'status': 'not_available'}, indent=2, ensure_ascii=False)}\n\n"
         f"Validation report JSON:\n{json.dumps(validation_report or {'status': 'not_available'}, indent=2, ensure_ascii=False)}\n\n"
         f"Failure analysis:\n{failure_analysis}\n\n"
-        "Read-only context files omitted from editable snippets:\n"
+        "Read-only context paths (never editable; source shown within the same file budget):\n"
         f"{json.dumps(read_only_context, indent=2, ensure_ascii=False)}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
     )
@@ -308,25 +314,16 @@ def _repair_context_files(
     return selected[: max(1, max_files)]
 
 
-def _source_snippets(
-    workspace_dir: Path,
-    selected_files: list[str],
-    *,
-    max_chars_per_file: int,
-) -> list[dict[str, str]]:
-    snippets: list[dict[str, str]] = []
-    for rel_path in selected_files:
-        path = workspace_file(workspace_dir, rel_path)
-        if path is None or not path.is_file():
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        snippets.append(
-            {
-                "path": rel_path,
-                "text": _clip(text, max_chars=max(200, max_chars_per_file)),
-            }
-        )
-    return snippets
+def _repair_source_anchors(
+    failure_analysis: str, patch_diff: str, validation_report: dict[str, Any],
+) -> list[tuple[str, int]]:
+    """Prioritize observed traceback/static lines, then current unified-diff hunks."""
+    anchors = [(path.replace("\\", "/"), int(line))
+               for path, line, _ in FILE_LINE_RE.findall(failure_analysis)]
+    anchors.extend((str(issue.get("path", "")).replace("\\", "/"), issue["line"])
+        for issue in validation_report.get("issues", []) if isinstance(issue, dict)
+        and type(issue.get("line")) is int and issue["line"] > 0)
+    return anchors + diff_source_anchors(patch_diff)
 
 
 def _offline_repair(selected_files: list[str]) -> dict[str, Any]:
@@ -435,16 +432,6 @@ def _next_repair_dir(repairs_dir: Path) -> Path:
     return repairs_dir / f"repair-{(max(numbers) + 1 if numbers else 1):03d}"
 
 
-def _looks_like_diff_fragment(text: str) -> bool:
-    """Return true when a model put unified-diff markers inside an edit field."""
-    lines = [line for line in text.splitlines() if line.strip()]
-    if any(line.startswith(("@@", "--- ", "+++ ")) for line in lines):
-        return True
-    removed = any(line.startswith("-") for line in lines)
-    added = any(line.startswith("+") for line in lines)
-    return removed and added
-
-
 def _update_manifest_after_repair(
     run_dir: Path,
     manifest: dict[str, Any],
@@ -476,15 +463,6 @@ def _update_manifest_after_repair(
     save_code_task_manifest(run_dir, manifest)
 
 
-
-
-def _read_required_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing required artifact: {path}")
-    value = read_json(path)
-    if not isinstance(value, dict):
-        raise RuntimeError(f"Expected JSON object in {path}")
-    return value
 
 
 def _read_optional_json(path: object) -> dict[str, Any]:
@@ -545,12 +523,6 @@ def _int_value(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _clip(text: str, *, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars].rstrip() + "\n... [truncated]"
 
 
 def _emit(callback: MessageCallback | None, message: str) -> None:

@@ -22,6 +22,22 @@ from simple_ar.research.sources.base import build_source_plan
 
 
 class SuppliedPdfIngestTest(unittest.TestCase):
+    def test_fixed_supplied_pool_goes_directly_to_model_reading_unless_screening_is_explicit(self) -> None:
+        records = [DocumentRecord(name, name, "local_files") for name in ("a", "b")]
+        bundle = DocumentBundle(records, {}, {}, [], [TextChunk(name, name, "Source body.") for name in ("a", "b")])
+        for mode in ("auto", "llm"):
+            with self.subTest(mode=mode), patch(
+                "simple_ar.research.evidence.reader.screen_papers_with_llm", return_value=[],
+            ) as screen, patch(
+                "simple_ar.research.evidence.reader.read_paper_notes_with_llm", return_value=[],
+            ) as reader:
+                result = read_documents(ReadRequest(bundle=bundle, required_document_ids=("a", "b"),
+                    use_llm=True, llm_client=object(), config={"read_screening": mode}))
+                self.assertEqual([row.document_id for row in result.bundle.records], ["a", "b"])
+                self.assertEqual([row["paper_id"] for row in result.screening_decisions], ["a", "b"])
+                self.assertEqual([row["document_id"] for row in reader.call_args.kwargs["papers"]], ["a", "b"])
+                self.assertEqual(screen.call_count, int(mode == "llm"))
+
     def test_llm_screening_keeps_supplied_paper_within_shortlist_limit(self) -> None:
         records = [
             DocumentRecord(

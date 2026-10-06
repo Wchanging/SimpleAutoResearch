@@ -36,12 +36,19 @@ def _heading_title(title: str) -> str:
 
 def strip_report_references(markdown: str) -> str:
     """Remove only a document-level References heading outside fenced code."""
+    return split_report_references(markdown)[0]
+
+
+def split_report_references(markdown: str) -> tuple[str, str]:
+    """Use the same boundary for citation preparation and rendered preview."""
     kept = []
-    for line, match, _ in _markdown_lines(markdown):
+    lines = list(_markdown_lines(markdown))
+    for index, (line, match, _) in enumerate(lines):
         if match and len(match[1]) <= 2 and _heading_title(match[2]).casefold() == 'references':
-            break
+            return (normalize_report_markdown("\n".join(kept)),
+                    normalize_report_markdown("\n".join(row[0] for row in lines[index:])))
         kept.append(line)
-    return normalize_report_markdown("\n".join(kept))
+    return normalize_report_markdown("\n".join(kept)), ""
 
 
 def apply_section_numbering(

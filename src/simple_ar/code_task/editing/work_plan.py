@@ -9,24 +9,27 @@ from typing import Any, Callable
 from simple_ar.core.artifacts import read_json, read_text, write_json, write_text
 from simple_ar.code_task.editing.budget import budget_profiles_json
 from simple_ar.code_task.analysis.context import (
-    LoadedCodeTaskContextPack,
+    ensure_code_task_context_pack,
     load_latest_code_task_context_pack,
+    read_source_snippets,
 )
 from simple_ar.code_task.editing.scope import (
     allowed_patterns_from_manifest,
     is_edit_allowed_path,
     protected_patterns_from_manifest,
+    prompt_file_inventory,
 )
-from simple_ar.code_task.editing.planning import _collect_run_context, select_relevant_files
+from simple_ar.code_task.editing.planning import (
+    _collect_run_context, select_relevant_files, _context_pack_snippets,
+)
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     load_code_task_manifest,
     save_code_task_manifest,
     utcnow_iso,
-    workspace_file,
 )
 from simple_ar.code_task.memory import task_memory_context
-from simple_ar.code_task.analysis.interfaces import snippet_api_contract
+from simple_ar.code_task.analysis.interfaces import render_source_snippets, snippet_api_contract
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.integrations.usage import record_usage
 
@@ -137,15 +140,20 @@ def generate_code_task_work_plan(
     memory_context = task_memory_context(root)
     context_pack_ref: dict[str, Any] | None = None
 
-    loaded_context = load_latest_code_task_context_pack(root)
+    if use_llm:
+        loaded_context = ensure_code_task_context_pack(root, query=task_text, max_files=max_files,
+            max_source_chars_per_file=max_source_chars_per_file)
+        manifest = load_code_task_manifest(root)  # Retain pack-owner references when saving the work plan.
+    else:
+        loaded_context = load_latest_code_task_context_pack(root)
     if loaded_context is not None and loaded_context.selected_files:
-        selected = _context_pack_selected_files(loaded_context, max_files=max_files)
+        selected = loaded_context.selected_paths(max_files=max_files)
         snippets = _context_pack_snippets(
             loaded_context,
             max_files=max_files,
             max_chars_per_file=max_source_chars_per_file,
         )
-        context_pack_ref = _context_pack_ref(root, loaded_context)
+        context_pack_ref = loaded_context.manifest_reference(root)
         _emit(message_callback, f"Using code-task context pack: {context_pack_ref['path']}")
     else:
         selected = []
@@ -153,12 +161,12 @@ def generate_code_task_work_plan(
 
     if not selected or not snippets:
         selected = select_relevant_files(index, task_text, max_files=max_files)
-        snippets = _source_snippets(
+        snippets = read_source_snippets(
             paths.workspace_dir,
             selected,
             max_chars_per_file=max_source_chars_per_file,
-            allowed_patterns=allowed_patterns,
-            protected_patterns=protected_patterns,
+            editable_files=[path for path in selected if is_edit_allowed_path(
+                path, allowed_patterns=allowed_patterns, protected_patterns=protected_patterns)],
         )
         context_pack_ref = None
 
@@ -328,16 +336,13 @@ def _work_plan_user_prompt(
     allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> str:
-    compact_index = _compact_codebase_index(
+    compact_index = prompt_file_inventory(
         index,
         allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
+        selected_paths=(str(item.get("path", "")) for item in snippets),
     )
-    snippet_text = "\n\n".join(
-        f"### {item.get('path', '')} ({item.get('access_role', 'editable')})\n"
-        f"```text\n{item.get('text', '')}\n```"
-        for item in snippets
-    )
+    snippet_text = render_source_snippets(snippets)
     return (
         "Create a staged work plan for implementing this code task. "
         "Return JSON only. Do not include Markdown fences. Do not write code, "
@@ -377,7 +382,7 @@ def _work_plan_user_prompt(
         "- Use `task.md` as requirements, not as a patch. This work plan is the execution plan.\n"
         "- Use only workspace-relative paths from the supplied index in `target_files` and "
         "`read_only_evidence`.\n"
-        "- Files with `edit_role` = `read_only` are evidence only. Never put them in `target_files`.\n"
+        "- Inventory `read_only_files` are evidence only. Never put them in `target_files`.\n"
         "- Prefer `budget_profile` = `normal`: roughly 1-2 files, compact old/new edits, and concise output.\n"
         "- Use `large` only when a single function or closely coupled change genuinely needs it.\n"
         "- Use `absolute` only for rare cases that should require explicit human approval.\n"
@@ -388,7 +393,7 @@ def _work_plan_user_prompt(
         f"Benchmark command:\n{benchmark_command or 'None'}\n\n"
         f"Run context JSON:\n{json.dumps(run_context, indent=2, ensure_ascii=False)}\n\n"
         f"Task memory:\n{memory_context}\n\n"
-        f"Codebase index summary JSON:\n{json.dumps(compact_index, indent=2, ensure_ascii=False)}\n\n"
+        f"Codebase index summary JSON:\n{json.dumps(compact_index, separators=(',', ':'), ensure_ascii=False)}\n\n"
         "Selected Python API contract (derived from the exact snippets below):\n"
         f"{json.dumps(snippet_api_contract(snippets), indent=2, ensure_ascii=False)}\n\n"
         f"Selected source/evidence snippets:\n{snippet_text or 'No snippets selected.'}"
@@ -665,128 +670,6 @@ def _update_manifest_after_work_plan(
     save_code_task_manifest(run_dir, manifest)
 
 
-def _source_snippets(
-    workspace_dir: Path,
-    selected_files: list[str],
-    *,
-    max_chars_per_file: int,
-    allowed_patterns: tuple[str, ...],
-    protected_patterns: tuple[str, ...],
-) -> list[dict[str, Any]]:
-    snippets: list[dict[str, Any]] = []
-    for rel_path in selected_files:
-        path = workspace_file(workspace_dir, rel_path)
-        if path is None or not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        snippets.append(
-            {
-                "path": rel_path,
-                "access_role": (
-                    "editable"
-                    if is_edit_allowed_path(
-                        rel_path,
-                        allowed_patterns=allowed_patterns,
-                        protected_patterns=protected_patterns,
-                    )
-                    else "read_only"
-                ),
-                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
-            }
-        )
-    return snippets
-
-
-def _context_pack_selected_files(
-    loaded: LoadedCodeTaskContextPack,
-    *,
-    max_files: int,
-) -> list[str]:
-    selected: list[str] = []
-    for path in loaded.selected_files:
-        if path not in selected:
-            selected.append(path)
-        if len(selected) >= max(1, max_files):
-            break
-    return selected
-
-
-def _context_pack_snippets(
-    loaded: LoadedCodeTaskContextPack,
-    *,
-    max_files: int,
-    max_chars_per_file: int,
-) -> list[dict[str, Any]]:
-    snippets: list[dict[str, Any]] = []
-    for row in loaded.snippets:
-        path = _string(row.get("path"))
-        text = row.get("text")
-        if not path or not isinstance(text, str):
-            continue
-        snippets.append(
-            {
-                "path": path,
-                "access_role": _string(row.get("access_role")) or "editable",
-                "score": row.get("score", 0),
-                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
-            }
-        )
-        if len(snippets) >= max(1, max_files):
-            break
-    return snippets
-
-
-def _context_pack_ref(run_dir: Path, loaded: LoadedCodeTaskContextPack) -> dict[str, Any]:
-    budget = loaded.context_pack.get("budget")
-    budget = budget if isinstance(budget, dict) else {}
-    return {
-        "path": _relative_to_run(run_dir, loaded.context_pack_path),
-        "prompt_context": _relative_to_run(run_dir, loaded.prompt_context_path),
-        "snippets": _relative_to_run(run_dir, loaded.snippets_path),
-        "selected_files": list(loaded.selected_files),
-        "budget": budget,
-    }
-
-
-def _compact_codebase_index(
-    index: dict[str, Any],
-    *,
-    allowed_patterns: tuple[str, ...],
-    protected_patterns: tuple[str, ...],
-) -> dict[str, Any]:
-    files: list[dict[str, Any]] = []
-    for item in _index_files(index):
-        path = str(item.get("path", ""))
-        python = item.get("python")
-        row: dict[str, Any] = {
-            "path": path,
-            "kind": item.get("kind"),
-            "role_tags": item.get("role_tags", []),
-            "edit_role": (
-                "editable"
-                if is_edit_allowed_path(
-                    path,
-                    allowed_patterns=allowed_patterns,
-                    protected_patterns=protected_patterns,
-                )
-                else "read_only"
-            ),
-            "summary": item.get("summary", ""),
-        }
-        if isinstance(python, dict):
-            row["python"] = {
-                "imports": python.get("imports", []),
-                "functions": _signature_names(python.get("functions")),
-                "classes": _signature_names(python.get("classes")),
-                "has_main_guard": python.get("has_main_guard", False),
-            }
-        files.append(row)
-    return {"project": index.get("project", {}), "files": files}
-
-
 def _work_items_markdown(items: list[dict[str, Any]]) -> str:
     if not items:
         return "- No work items generated."
@@ -987,15 +870,6 @@ def _index_files(index: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in files if isinstance(item, dict)]
 
 
-def _signature_names(value: object) -> list[str]:
-    rows = value if isinstance(value, list) else []
-    names: list[str] = []
-    for item in rows:
-        if isinstance(item, dict) and isinstance(item.get("name"), str):
-            names.append(str(item["name"]))
-    return names[:20]
-
-
 def _read_required_text(path: Path) -> str:
     if not path.exists():
         raise FileNotFoundError(f"Missing required code-task artifact: {path}")
@@ -1009,13 +883,6 @@ def _read_required_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise RuntimeError(f"Expected JSON object in {path}")
     return data
-
-
-def _relative_to_run(run_dir: Path, path: Path) -> str:
-    try:
-        return path.resolve().relative_to(run_dir.resolve()).as_posix()
-    except ValueError:
-        return str(path)
 
 
 def _inline_paths(paths: list[str]) -> str:
@@ -1051,12 +918,6 @@ def _first_sentence(text: str) -> str:
     if not normalized:
         return ""
     return re.split(r"(?<=[.!?])\s+", normalized, maxsplit=1)[0]
-
-
-def _clip_text(text: str, *, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars].rstrip() + "\n... [truncated]"
 
 
 def _emit(callback: MessageCallback | None, message: str) -> None:

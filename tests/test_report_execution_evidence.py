@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from report_review_fixtures import draft_quotes
+from tests.report_review_fixtures import draft_quotes
 
 from simple_ar.report.agent import (
     _writer_prompt, _writer_recovery_prompt, _reviewer_prompt, run_report_agent,
@@ -87,6 +87,19 @@ class ReportExecutionEvidenceTests(unittest.TestCase):
         self.assertNotIn("executed project", " ".join(recovery["style_rules"]))
         self.assertIn("declarations", WRITER_SYSTEM)
         self.assertIn("declaration/executor/producer", REVIEWER_SYSTEM)
+
+    def test_reproduction_template_and_writer_agree_on_body_and_attachment_responsibility(self):
+        config = ReportRuntimeConfig(template='reproduction')
+        template = load_report_template_bundle(report_mode='experiment', config=config)
+        self.assertIn('attachments', template.template_markdown)
+        self.assertIn('do not require their duplication in the body', template.criteria_markdown)
+        self.assertIn('truncated output preview does not establish', template.criteria_markdown)
+        section = ReportSectionPlan(section_id='setup', heading='Local Setup', goal='Explain')
+        prompt = _writer_prompt(context=self.context, template=template,
+            memory=ReportMemory(section_plan=[section]), section=section, config=config,
+            extra_context=[], previous_draft=None, review=None, source_batch_index=1,
+            source_batch_count=1, include_previous_draft=True, draft_mode='section')
+        self.assertIn('duplicate these in the body only when the user requests it', prompt)
 
     def test_rejected_document_candidate_survives_verifier_failure_and_checkpoint(self):
         memory = ReportMemory(section_plan=[

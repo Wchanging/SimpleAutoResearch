@@ -1,4 +1,4 @@
-﻿# Usage And Configuration
+# Usage And Configuration
 
 [中文版本](USAGE_zh.md)
 
@@ -16,15 +16,54 @@ After installation, `uv run simple-ar start` offers five structured choices:
 | --- | --- | --- |
 | `survey` | Question/scope; optional papers | Search or supplied-material reading, then report; model needed |
 | `bug_fix` | Project, allowed paths, validation command | Bounded edits and actual validation; prepared dependencies |
-| `reproduction` | Paper, ready environment, fixed protocol/command | Specified conclusion only; no automatic environment/data preparation |
+| `reproduction` | Paper, existing project/data, fixed protocol/command | Specified conclusion; current environment or explicitly selected task venv, no automatic data retrieval |
 | `writing` | Notes/draft or completed analysis package; optional papers | Existing material to report/draft; no implied search or experiment |
-| `data_analysis` | Table, selected fields, row/value meanings and units | Descriptive statistics or supplied bar/line/scatter values; no API |
+| `data_analysis` | Table, selected fields, row/value meanings and units | Descriptive statistics, observation boxes or supplied bar/line/scatter/heatmap values; no API |
 
-`--prepare-only` saves task configuration without execution. This is not a
-free-form chat. For a first no-API run, use
+`--prepare-only` saves task configuration without execution or API calls.
+For code repair in an already prepared project environment, add
+`--project-python /path/to/project-venv/bin/python` (Windows:
+`C:\path\project-venv\Scripts\python.exe`). This saves the existing CodeTask
+external-interpreter setting; no manual TOML edit, environment creation or
+installation is needed. Omission keeps the current environment. This option is
+only for `bug_fix`, not the assistant's own Python requirement.
+
+For natural-language clarification instead, use `start --chat`: it asks about
+meaningful choices, then proposes settings for the same configuration path. This
+opt-in setup uses your configured model, sends replies and supplied asset previews,
+and requires confirmation. `--resume-setup PATH` resumes its draft without resetting
+setup usage. It is not a general coding Agent; prepared reproduction/code execution
+still requires explicit commands and scope. It cannot be combined with `--prepare-only`.
+Unresolved optional settings stay out of the draft configuration until clarified;
+the complete confirmed configuration is still validated before task execution.
+For a first no-API run, use
 `uv run simple-ar research-session --config examples/data-curves/research.toml`.
 Saved analysis packages can then become writing material. Export is a separate
 `report-export` command; see [CLI](CLI_REFERENCE.md).
+
+Data column selection in a terminal shows column names and sample values. For
+explicitly matched runs, try [paired observations](../examples/data-paired/README.md),
+which computes differences and their standard error without model calls.
+Before preparing a reproduction command, `project-info --project PATH --output
+runs/preparation-NEW` reads project instructions, dependency declarations and entry
+candidates into reusable notes. It does not install, download or run the project.
+Static `[project.scripts]` declarations also prioritize indexed root/src module
+sources within the existing entry-reading allowance, even without a main guard.
+Unresolved or ambiguous source locations stay visible; an entry declaration is
+not proof that its executable is installed or its callable works.
+Static pyproject/requirements declarations are checked against this Python's distribution metadata,
+not imported; a matching version is not a successful import or reproduction run.
+Requirements installer directives, included files and partial lines remain unresolved.
+For source-assisted preparation, add `--chat --kind reproduction --project PATH
+--document PAPER --goal "..."`. The model can follow indexed source reads and propose
+argv/metrics/protocol; inspect and confirm these before the separate execution step.
+This does not locate an arbitrary implementation. A single Python command may
+explicitly select `--environment venv` and project-relative `--requirements PATH`
+before `--command`; execution creates the task venv, installs selected files and
+runs `pip check`. Add `--install-project` to also install the project package in the
+same resolver call (default off, not editable; build code/network/source metadata writes
+are possible). Default remains current environment. Setup only saves the choice;
+see [scope, budgets and recovery](CONFIG_REFERENCE.md#guided-setup).
 
 The task TOML is the effective configuration for each project. `.env` only holds
 global credentials/model/transport settings. Ordinary use need not set every
@@ -59,7 +98,7 @@ uv run simple-ar --help
 
 ## Environment Configuration
 
-Create a local `.env` file:
+Create a local `.env` file only if one does not already exist. Do not overwrite your current connection settings:
 
 ```bash
 cp .env.example .env
@@ -474,6 +513,11 @@ When `workspace.mode = "auto"` is omitted or selected explicitly, existing
 projects first try a detached git worktree. If Git cannot be used safely, the
 run falls back to a guarded copy and records `requested_mode`, `selected_mode`,
 `fallback_reason`, and `user_next_steps` under `manifest.json.workspace`.
+The guided `start --kind bug_fix` entry uses this same strategy: a clean Git
+project retains committed files regardless of the copy-size limit, while an
+uncommitted or non-Git project uses a guarded copy of its current state. Copy
+omissions are listed in the manifest; the copy limit is not a source-reading
+window and the resulting subset must not be mistaken for a complete repository.
 
 When `workspace.mode = "git_worktree"` or `--workspace-mode git_worktree` is
 used explicitly, `init` creates a detached git worktree at

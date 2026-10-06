@@ -24,7 +24,7 @@ class FakeClient:
         response = next(self.responses)
         if isinstance(response, Exception):
             raise response
-        return [response for request in requests]
+        return response if isinstance(response, list) else [response for request in requests]
 
 
 class ReadingFollowupTests(unittest.TestCase):
@@ -154,6 +154,36 @@ class ReadingFollowupTests(unittest.TestCase):
         self.assertEqual(result.paper_notes[0]["followup_queries"], [])
         self.assertNotIn("reading_followup", result.paper_notes[0])
 
+    def test_explicit_source_question_can_read_reference_identity_without_changing_overview(self):
+        body = TextChunk("body", "p", "The comparison uses a previously published predictor.",
+                         metadata={"section": "results", "section_id": "results"})
+        reference = TextChunk("citation", "p", "Ada Example. Prior predictor. Conference 2023.",
+            metadata={"section": "references", "section_id": "references-1", "heading": "References"})
+        foreign = TextChunk("other-citation", "q", "Prior predictor 2025, different source.",
+                            metadata={"section": "references"})
+        bundle = DocumentBundle([DocumentRecord("p", "Source", "local_files"),
+                                 DocumentRecord("q", "Source", "local_files")], {}, {}, [],
+                                [body, reference, foreign])
+        self.assertEqual(select_reading_chunks([body, reference], max_chunks=12), (body,))
+        result, client = self.read(bundle, [
+            [{"paper_id": "p", "followup_queries": ["Prior predictor Conference"]},
+             {"paper_id": "q", "followup_queries": []}],
+            {"paper_id": "p", "evidence_refs": ["citation"], "followup_queries": []},
+        ])
+        self.assertEqual(len(client.requests), 3)  # Two initial notes, one source-scoped follow-up.
+        self.assertNotIn(reference.text, client.requests[0].user)
+        self.assertIn(reference.text, client.requests[2].user)
+        self.assertNotIn(foreign.text, client.requests[2].user)
+        passage = next(row for row in result.paper_notes[0]["reading_followup"]["passages"]
+                       if row["chunk_id"] == reference.chunk_id)
+        self.assertEqual(passage["text"], reference.text[passage["character_start"]:passage["character_end"]])
+        for key in ("section", "section_id", "heading"):
+            self.assertEqual(passage[key], reference.metadata[key])
+        restored = ReadResult.from_handoff_dict(json.loads(json.dumps(result.to_handoff_dict())), bundle=bundle)
+        self.assertEqual(restored.paper_notes, result.paper_notes)
+        kept = self.project(bundle, restored.paper_notes[0]).metadata["evidence_passages"]
+        self.assertIn(passage, kept)
+
     def test_abstract_only_and_foreign_same_title_do_not_supply_source_evidence(self):
         bundle, _ = self.bundle()
         for chunks in ([], [TextChunk(chunk_id="foreign", document_id="q", text="Heldout comparison")]):
@@ -266,14 +296,15 @@ class ReadingFollowupTests(unittest.TestCase):
         self.assertTrue(all(row["new_window_count"] > 0 for row in trace["lookups"]))
         self.assertTrue(all(row["omitted_window_count"] >= 0 for row in trace["lookups"]))
 
-    def test_explicit_labels_locate_caption_not_quoted_cross_reference(self):
-        for label in ("Table 7", "Figure S3", "Fig. 2.1", "TABLE IV"):
+    def test_explicit_labels_locate_numbered_object_not_quoted_cross_reference(self):
+        for label in ("Table 7", "Figure S3", "Fig. 2.1", "TABLE IV", "Theorem 4",
+                      "Proposition A.2", "Lemma III", "Corollary 2", "Assumption H1", "Algorithm 1"):
             with self.subTest(label=label):
                 query = f"{label} summarizes our results and compares alternatives"
                 mention = TextChunk(chunk_id="mention", document_id="p", text=query)
                 caption = TextChunk(chunk_id="caption", document_id="p",
                                     text="Prior unrelated paragraphs. " * 100 + f"\n{label}: Measured conditions\nA 0.81 B 0.76")
-                wrong = TextChunk(chunk_id="wrong", document_id="p", text="Table 70: unrelated values")
+                wrong = TextChunk(chunk_id="wrong", document_id="p", text=f"{label}.1: unrelated values")
                 chunks = [mention, wrong, caption]
                 self.assertEqual(rank_source_chunks(chunks, query, limit=1), [caption])
                 view = source_chunk_views([caption], query=query, max_chars=400)[0]

@@ -11,6 +11,8 @@ import ast
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from simple_ar.code_task.analysis.index import project_python_files
+
 
 ENTRYPOINT_NAMES = {"main.py", "__main__.py", "cli.py", "app.py"}
 TRACEBACK_HELPERS = {
@@ -36,9 +38,7 @@ def analyze_entrypoint_debuggability(project_dir: Path) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     if not project_dir.is_dir():
         return {"schema_version": "code_task_entrypoint_debuggability.v1", "findings": findings}
-    for path in sorted(project_dir.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    for path in project_python_files(project_dir):
         rel = path.relative_to(project_dir).as_posix()
         if not is_entrypoint_path(rel):
             continue

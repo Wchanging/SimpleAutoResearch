@@ -46,8 +46,8 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
         ),
     ),
     "code-task": CheckGroup(
-        description="Core code-task workflow tests, including workspace, mapping, patching, validation, run, and repair.",
-        targets=("tests.test_code_task",),
+        description="Code-task workflow and source-context behavior; select other affected modules for focused changes.",
+        targets=("tests.test_code_task", "tests.test_code_source_views"),
     ),
     "code-task-examples": CheckGroup(
         description="Realistic bundled code-task example tests. Run after changing examples or benchmark behavior.",
@@ -95,7 +95,7 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
     ),
     "all": CheckGroup(
         description="Full discovery for shared-interface/architecture checkpoints and release candidates.",
-        targets=("discover", "-s", "tests"),
+        targets=("discover", "-s", "tests", "-t", "."),
     ),
     "application": CheckGroup(
         description="Research intake, application advancement, candidate assessment and recovery.",
@@ -106,8 +106,19 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
         targets=("tests.test_llm", "tests.test_budget"),
     ),
     "report": CheckGroup(
-        description="Report generation, ports, audit and application integration.",
-        targets=("tests.test_report", "tests.test_report_checkpoints", "tests.test_report_measurement_audit", "tests.test_report_ports", "tests.test_report_capability", "tests.test_research_report_application"),
+        description="Report assembly, writing/revision, audit, recovery and application smoke tests.",
+        targets=("tests.test_report", "tests.test_report_checkpoints", "tests.test_report_measurement_audit", "tests.test_report_ports", "tests.test_report_capability", "tests.test_research_report_application",
+                 "tests.test_report_document_first", "tests.test_report_narrative"),
+    ),
+    "intake": CheckGroup(
+        description="Guided/chat setup and the shared CLI/TOML configuration, without live model calls.",
+        targets=("tests.test_cli_start", "tests.test_intake_dialogue", "tests.test_research_config"),
+    ),
+    "data": CheckGroup(
+        description="Table ingest, descriptive/paired/coordinate analysis, figures and writing handoff smoke tests.",
+        targets=("tests.test_table_analysis", "tests.test_table_paired",
+                 "tests.test_coordinate_figures", "tests.test_table_figures",
+                 "tests.test_analysis_writing", "tests.test_report_data_delivery"),
     ),
     "execution": CheckGroup(
         description="Short real processes, experiment result boundaries and CodeTask progress relay.",

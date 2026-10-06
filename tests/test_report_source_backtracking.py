@@ -16,10 +16,23 @@ from simple_ar.report.audit import build_report_audit
 from simple_ar.integrations.llm import LLMError
 from simple_ar.research.contracts import DocumentRecord, TextChunk
 from simple_ar.research.documents.ingest import DocumentBundle
-from report_review_fixtures import draft_quotes
+from tests.report_review_fixtures import draft_quotes
 
 
 class SourceBacktrackingTests(unittest.TestCase):
+    def test_handle_navigation_shares_source_word_number_and_unicode_matching(self):
+        from simple_ar.report.retrieval import ReportSourceResolver
+        distractor = SourceHandle(handle='paper:background', kind='paper', title='Brisk history in 2014')
+        relevant = SourceHandle(handle='paper:measurement', kind='paper', title='Risk at 14 units',
+            metadata={'excerpt': '风险控制具有保证'})
+        before = relevant.model_dump(mode='json')
+        resolver = ReportSourceResolver(ReportContext(topic='Navigation', report_mode='supplied_materials',
+                                                     source_handles=[distractor, relevant]))
+        self.assertEqual(resolver.search('risk 14'), [relevant])
+        self.assertEqual(resolver.search('风险控制保证'), [relevant])
+        self.assertEqual(resolver.search('absentword'), [])
+        self.assertEqual(relevant.model_dump(mode='json'), before)
+
     def test_new_and_saved_synthesis_briefs_are_not_primary_verification(self):
         from simple_ar.report.narrative import report_tool_context
         context = ReportContext(topic="Unconfirmed comparison", report_mode="survey",

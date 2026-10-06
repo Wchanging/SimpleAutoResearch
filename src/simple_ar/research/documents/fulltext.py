@@ -11,11 +11,10 @@ import urllib.request
 
 from simple_ar.literature.models import Paper
 from simple_ar.research.contracts import DocumentRecord, FulltextHint, SourcePlan
+from simple_ar.research.documents.ports import TEXT_SUFFIXES, MATERIAL_TEXT_SUFFIXES, HTML_SUFFIXES
 
 
 PDF_SUFFIX = ".pdf"
-TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
-HTML_SUFFIXES = {".html", ".htm"}
 _FETCH_TIMEOUT_SEC = 20
 
 
@@ -136,7 +135,7 @@ def build_fulltext_manifest(
     return {
         "schema_version": "research_fulltext_manifest.v1",
         "enabled": source_plan.require_fulltext or any(
-            hint.get("status") == "cached" and hint.get("kind") == "pdf" and hint.get("local_path")
+            hint.get("status") == "cached" and hint.get("kind") in {"pdf", "html"} and hint.get("local_path")
             for row in rows for hint in row["hints"]
         ),
         "allow_pdf_download": source_plan.allow_pdf_download,
@@ -194,7 +193,7 @@ def _plan_hint(
     max_pdf_bytes: int,
 ) -> FulltextHint:
     if hint.local_path:
-        if not require_fulltext and hint.kind != "pdf":
+        if not require_fulltext and hint.kind not in {"pdf", "html"}:
             return _replace_hint(hint, status="hint_only", reason="fulltext_disabled")
         if hint.kind == "pdf" and max_pdf_bytes and hint.size_bytes and hint.size_bytes > max_pdf_bytes:
             return _replace_hint(hint, status="skipped", reason="local_pdf_exceeds_max_pdf_mb")
@@ -404,7 +403,7 @@ def _hint_from_local_path(record: DocumentRecord) -> FulltextHint | None:
     suffix = path.suffix.lower()
     if suffix == PDF_SUFFIX:
         kind = "pdf"
-    elif suffix in TEXT_SUFFIXES:
+    elif suffix in MATERIAL_TEXT_SUFFIXES:
         kind = "text"
     elif suffix in HTML_SUFFIXES:
         kind = "html"

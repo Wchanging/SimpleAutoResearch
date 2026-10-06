@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from simple_ar.research.contracts import CLAIM_SCOPE_RULES
+from simple_ar.research.evidence.bibliography import CITATION_FIELD_VALUE_RULE
 
 PLAN_SYSTEM = (
     "You help scope small, reproducible research projects. "
@@ -120,7 +121,7 @@ def research_planner_user_prompt(
     )
 
 
-def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topic: str = "", problem_markdown: str = "", revision_context_json: str = "") -> str:
+def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topic: str = "", problem_markdown: str = "", revision_context_json: str = "", front_matter_json: str = "") -> str:
     """Build the reading prompt for a single paper metadata record.
 
     Args:
@@ -147,7 +148,9 @@ def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topi
         "list instead of inventing details.\n\n"
         "Required fields:\n"
         "- `paper_id`: stable id from the input.\n"
-        "- `title`: paper title.\n"
+        "- `title`: paper title. If title_role is filename_placeholder_not_publication_title, obtain the actual title from the supplied front matter and include its exact quote in bibliographic_fields; a filename is not known publication metadata. Preserve already supplied publication titles.\n"
+        "- `bibliographic_fields`: optional list (at most five) of missing local citation fields visible in the supplied front_matter, each with `field` (title, authors, published, doi or url), `value` (string, or list of author names), exact `section_id` and verbatim `quote`. "
+        + CITATION_FIELD_VALUE_RULE + " Never infer publication year from the filename, DOI digits, cited references or PDF creation time. For authors, set `complete` true only when the entire byline is visible and copied; otherwise false. Prefer a short exact byline subset over an unreliable full-list transcription. Do not use a cited work's metadata or invent a URL from an identifier. Return [] when unavailable or already supplied.\n"
         "- `evidence_role`: one of overview, method, benchmark, dataset, code, "
         "limitation, comparison, or other.\n"
         "- `one_sentence_summary`: concise factual summary.\n"
@@ -184,6 +187,7 @@ def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "", *, topi
         "- Compare repeated statements of important results or assumptions. If values or claims differ, first check whether their conditions differ. Preserve an unresolved source disagreement with both locators in limitations/open_questions; do not silently choose one value or average them. Correcting a mistaken model note is different from resolving disagreement within the source.\n\n"
         f"Paper JSON:\n{paper_json}"
         f"{evidence_block}"
+        + (f"\n\nSaved front_matter for citation extraction (not another source):\n{front_matter_json}" if front_matter_json else "")
         + (f"\n\nPrior note and bounded source lookup (model interpretation and original passages remain distinct):\n{revision_context_json}" if revision_context_json else "")
     )
 
@@ -391,8 +395,8 @@ def synthesize_user_prompt(
         "for optional list fields for compatibility. Every motivation ref must be copied exactly from an "
         "evidence/card/chunk identifier in the supplied context. Do not invent "
         "paper ids, claims, datasets, metrics, commands, or results.\n\n"
-        f"Notes Markdown:\n{notes_markdown}\n\n"
-        f"Structured Notes JSON:\n{paper_notes_json}"
+        + (f"Notes Markdown:\n{notes_markdown}\n\n" if notes_markdown.strip() else "")
+        + f"Structured Notes JSON:\n{paper_notes_json}"
         f"{structured_block}"
         f"{evidence_block}"
     )

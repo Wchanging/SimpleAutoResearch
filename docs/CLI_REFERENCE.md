@@ -1,93 +1,71 @@
-﻿# CLI Reference
+# CLI Reference
 
 [中文版本](CLI_REFERENCE_zh.md)
 
-Writing outline options: `research-session --report-outline-strategy auto|template|adaptive`
-and `research-report --outline-strategy auto|template|adaptive`. Non-survey adaptive
-planning is explicit; custom templates and saved checkpoint plans are retained.
-The TOML equivalent is `[report].outline_strategy`.
-New guided `start --kind writing` tasks select `adaptive` for built-in templates;
-custom templates and existing saved tasks retain their structure.
-
-Data presentation: `research-session --report-data-tables linked|full` or
-`research-report --data-tables linked|full` maps to `[report].data_tables`.
-Default `linked` preserves the complete copied analysis package and links its
-numerical records; `full` additionally repeats row tables in the body. Figures use
-the unique frozen source owner when available, otherwise a separate data section.
-
-Coordinate data plots can explicitly use `--series-layout shared` (TOML:
-`[analysis].series_layout = "shared"`) for common-axis line/scatter comparisons.
-Default `separate` remains; shared units are user-declared, values are not normalized,
-and `--data-max-points` applies to all series' positions in the shared panel.
-
-Use `start` for the five supported structured task choices; `research-session`
-executes and resumes the saved task. `report-export` exports existing reporting
-artifacts. Low-level commands below are expert interfaces, not mandatory steps
-for every function. See [usage](USAGE.md) for the shortest path and
-[workflow boundaries](WORKFLOWS.md) for what completed/audited results mean.
+Use this page to look up command syntax and effects. For a first task, follow [Usage](USAGE.md); for TOML fields, use [Configuration](CONFIG_REFERENCE.md). `simple-ar --help` and each command's `--help` show the installed version's options.
 
 ## Guided entry
 
-`simple-ar start` asks for an implemented function (`survey` / `bug_fix` / prepared `reproduction` / `writing` / `data_analysis`) and
-task inputs, saves normal TOML, and delegates to `research-session`.
-Options: `--kind`, `--goal`, `--document` (repeatable), `--sources materials|search`, `--fulltext`, `--max-cited-sources N` (optional report source bound),
-`--project`, `--validate`, `--allow` (repeatable), `--model`, `--interaction`,
-`--output-root`, `--prepare-only`, `--yes`. See [configuration](CONFIG_REFERENCE.md#guided-setup)
-for defaults, scope and continuation. It does not call external Agents.
+```bash
+uv run simple-ar start
+uv run simple-ar start --chat
+uv run simple-ar start --kind writing --material notes.md --model env
+```
 
-Prepared reproduction additionally accepts `--hypothesis`, `--dataset`, `--expected-outcome`,
-repeatable `--metric`, `--cwd`, `--timeout-sec` and `--command ARGV...` (last).
-Local documents and an already prepared execution environment are required; it does not
-discover implementations or install dependencies. Other kinds reject these execution options.
+`start` prepares an ordinary task and delegates execution to `research-session`.
 
-Material-based writing accepts repeatable `--material` for drafts, notes or result descriptions,
-optional `--document` for bibliographic sources, and `--template` (default `material_report`;
-`experiment` requests a paper-style draft). Inputs can be local Markdown/text/PDF,
-or a completed `table_analysis.v1` `analysis.json` with its adjacent copied data.
-The latter is rechecked and its SVGs attached; raw table JSON is not accepted here.
-It extracts these inputs then writes, reviews, assembles and audits; it does not search,
-synthesize a research direction or execute an experiment. Supplied results are not independently
-verified measurements. Use `research-session --task-kind writing --topic "Explain my results" --material PATH --model env`
-for the same path without the setup wizard; its template option is `--report-template`.
-`analysis_report` remains the explicit failed/uncertain-experiment report. The material
-default does not require a baseline, failed objective or experiment continuation decision.
-New setup saves no model for `data_analysis`; its printed resume command omits `--model`.
-Model-backed setup preserves the chosen model in the resume hint rather than always using `env`.
+| Options | Applies to | Purpose |
+| --- | --- | --- |
+| `--kind`, `--goal`, `--output-root` | All | Select function, task and output location |
+| `--model`, `--interaction` | Model-backed tasks | Model connection and participation policy |
+| `--prepare-only`, `--yes` | Structured setup | Save without execution/API, or confirm supplied choices |
+| `--chat`, `--resume-setup PATH` | Model-assisted setup | Clarify a task or resume its saved setup draft |
+| `--sources materials\|search`, `--document PATH`, `--fulltext`, `--max-cited-sources N` | Survey | Source access, repeatable bibliographic papers, retrieval and citation limits |
+| `--material PATH`, `--template` | Writing | Repeatable notes/results and requested report format |
+| `--project`, `--validate`, `--allow PATTERN`, `--project-python PATH` | Code repair | Project, validator, repeatable edit scope and existing interpreter |
+| `--data-path PATH` | Code/reproduction | Repeatable input file/directory, not the table-analysis source |
+| `--hypothesis`, `--dataset`, `--expected-outcome`, `--metric` | Reproduction | Accepted conclusion, conditions and emitted metrics |
+| `--cwd`, `--timeout-sec`, `--output-files JSON` | Reproduction | Execution location, timeout and registered producer files |
+| `--environment current\|venv`, `--requirements PATH`, `--install-project` | Reproduction | Explicit dependency preparation |
+| `--command ARGV...` | Reproduction | Actual command; place it last |
+| `--with-report` | Data analysis | Also write from the analysis; requires a model |
 
-This page is a command lookup for SimpleAutoResearch. It intentionally focuses
-on command syntax, options, outputs, and short operational notes.
+Supported kinds: `survey`, `bug_fix`, `reproduction`, `writing`, `data_analysis`. Structured setup is model-free until execution; chat setup itself uses the model and needs a terminal. Do not combine `--chat` with `--prepare-only`.
 
-For ordinary use, `simple-ar research-session` is the formal task-driven
-entrypoint for bounded research, code repair, and explicit experiments. `research-report` can
-continue a canonical session created with `--no-report`; the current
-`research-session-continue` uses the canonical retry boundary for v2 sessions
-only. Legacy v1 sessions remain read-only; use `research-session-migrate` to
-import evidence into a new canonical successor rather than execute the old workflow.
-`research-brief` is a segmented development or diagnostic interface.
-The old `research-experiment`, `research-code-task` and `run/resume` execution commands are retired;
-`status` and artifact tools still read historical outputs. Old stage options are
-not silently translated to the canonical application.
-
-- Installation and walkthroughs: [Usage And Configuration](USAGE.md)
-- Workflow concepts and artifacts: [Workflows And Artifacts](WORKFLOWS.md)
-- TOML schema and examples: [Configuration Reference](CONFIG_REFERENCE.md)
+Code repair's interpreter defaults to current. `--project-python` preserves an existing virtualenv entry path; it does not create or install an environment. Reproduction dependency preparation is a separate explicit option.
 
 ### Existing data (no API)
 
-`start --kind data_analysis --goal "Describe results" --data-file results.csv --value-column score --observation-unit "one run" --yes`
-selects values explicitly. Optional `--group-column method` groups observations; repeat `--value-column`
-for separate metrics. For bars, `--data-mode values` keeps precomputed summaries unchanged and requires unique labels.
-`--data-plot line|scatter --data-mode values --x-column step` instead plots numeric
-coordinates without a group column. `--x-unit` records the x unit. Lines require
-unique x and break at missing y; scatter retains duplicate x. No fitted trend or
-aggregation is inferred. `--data-max-points 10000` limits rows per coordinate figure
-and can be adjusted explicitly; no sampling. See the [workflow](WORKFLOWS.md).
-`--data-missing reject|omit` defaults to reject; `--value-unit` records declared units;
-`--figure-width column|wide` defaults wide. Physical caps: `--data-max-mb 20`, `--data-max-figures 100`;
-overflow fails rather than silently dropping data. These options also work in `research-session`
-with `--task-kind data_analysis` and output `data_analysis`. UTF-8 CSV/TSV and homogeneous JSON records are supported.
-No model is used, including when global model settings exist. Resume with the printed session-root;
-to change frozen column/aggregation settings, create a new task. See [workflow](WORKFLOWS.md#describe-and-plot-existing-data-no-model-required).
+Use `start --kind data_analysis`; add `--with-report --model env` only for writing. The data options are shared with `research-session`:
+
+| Option group | Purpose |
+| --- | --- |
+| `--data-file` | Input table |
+| `--group-column`, `--value-column` | Row grouping and repeatable values |
+| `--observation-unit`, `--value-unit`, `--data-attribution` | Declared semantics |
+| `--data-mode observations\|values` | Aggregate observations (default) or preserve supplied values |
+| `--data-plot bar\|box\|heatmap\|line\|scatter` | Figure type; default `bar` |
+| `--data-missing reject\|omit` | Reject missing values (default) or explicitly omit them |
+| `--paired-baseline COLUMN` | Same-row paired differences against the named baseline column |
+| `--x-column`, `--x-unit`, `--data-association none\|pearson` | Numeric coordinates and optional descriptive correlation; default `none` |
+| `--series-layout separate\|shared`, `--figure-width column\|wide` | Coordinate axes default `separate`; figure width defaults `wide` |
+| `--data-max-mb`, `--data-max-points`, `--data-max-figures` | Input/figure bounds; defaults `20` MiB, `10000` points and `100` figures |
+
+For an accompanying report, `start` accepts `--material` and `--document`;
+`research-session` uses `--material` and `--local-document`. These provide context,
+not a different numeric transformation. Analysis-only ignores model settings.
+See [data fields](CONFIG_REFERENCE.md#existing-data-descriptive-analysis) for compatible option combinations.
+
+## Project preparation
+
+```bash
+uv run simple-ar project-info --project ./project --data-path ./data \
+  --output runs/project-preparation-NEW
+```
+
+Writes `preparation.json` and `preparation.md` containing indexed entry candidates, dependency declarations, excerpts and named data locations. It does not execute, install or download project code/data. Static dependency observations refer to the inspecting interpreter, not a solved target environment.
+
+Use an unused output directory. Relative data paths resolve from the project root. Notes may be reused as writing material or reproduction setup input.
 
 ## Command Overview
 
@@ -108,6 +86,26 @@ to change frozen column/aggregation settings, create a new task. See [workflow](
 | `simple-ar code-task ...` | Work with an existing codebase or a greenfield code task in an isolated editable workspace. |
 
 ## Research Commands
+
+### Report controls
+
+The two report entrypoints use the same settings, with different option prefixes:
+
+| `research-session` | `research-report` | Purpose |
+| --- | --- | --- |
+| `--report-document-review` / `--no-report-document-review` | `--document-review` / `--no-document-review` | Enable or disable whole-document review |
+| `--report-review-scope section\|document` | `--review-scope section\|document` | Review sections individually or after drafting the body |
+| `--report-draft-scope section\|document` | `--draft-scope section\|document` | Draft sections individually or jointly |
+| `--report-outline-strategy auto\|template\|adaptive` | `--outline-strategy auto\|template\|adaptive` | Select template-based or evidence-led planning |
+| `--report-data-tables linked\|full` | `--data-tables linked\|full` | Link data records or also include summary tables |
+| `--max-document-review-prompt-chars N` | `--max-document-review-prompt-chars N` | Optional complete review-request character ceiling |
+
+Omitted options retain configuration or saved settings. Base defaults are section
+drafting/review, document review off, `auto` planning, `linked` data tables and no
+additional review-request ceiling (`0`); guided setup may save different choices.
+Joint drafting requires document review, document review scope and the full source
+strategy. See [configuration reference](CONFIG_REFERENCE.md) for these dependencies
+and persisted correction limits.
 
 ### Prepared reproduction
 

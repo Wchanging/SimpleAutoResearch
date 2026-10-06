@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
 
 ResolutionStatus = Literal["available", "missing", "unavailable", "failed"]
+TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
+HTML_SUFFIXES = {".html", ".htm"}
+SUPPORTED_DOCUMENT_SUFFIXES = TEXT_SUFFIXES | HTML_SUFFIXES | {".pdf"}
+MATERIAL_TEXT_SUFFIXES = TEXT_SUFFIXES | {".json"}
+SUPPORTED_MATERIAL_SUFFIXES = MATERIAL_TEXT_SUFFIXES | HTML_SUFFIXES | {".pdf"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +82,9 @@ class ParsedDocument:
 
     text: str
     parser: str
+    # Optional observed parser coverage; an absent value means unknown, not
+    # complete. This travels with the existing document provenance.
+    coverage: dict[str, object] = field(default_factory=dict)
 
 
 class DocumentParser(Protocol):

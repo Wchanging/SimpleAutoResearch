@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
 import math
-import re
 from typing import Any, Callable, Literal, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
@@ -24,6 +23,7 @@ from simple_ar.research.contracts import (
     TextChunk,
 )
 from simple_ar.research.documents.ingest import DocumentBundle
+from simple_ar.research.evidence.bibliography import front_matter_view
 from simple_ar.research.store.chunking import DEFAULT_CHUNK_CHARS
 from simple_ar.research.store.retrieval import order_source_chunks, rank_source_chunks, source_chunk_views, source_query_terms
 from simple_ar.research.evidence.cards import (
@@ -281,8 +281,12 @@ def read_documents(request: ReadRequest) -> ReadResult:
         client = request.llm_client
         if client is None:
             raise ValueError("ReadRequest.llm_client is required when use_llm is true.")
-        if _read_screening_mode(request.config) != "deterministic":
-            decisions = screen_papers_with_llm(
+        screening_mode = _read_screening_mode(request.config)
+        fixed_sources = screening_mode == "auto" and {
+            record.document_id for record in bundle.records
+        } <= set(request.required_document_ids)
+        if screening_mode != "deterministic":
+            decisions = [] if fixed_sources else screen_papers_with_llm(
                 client,
                 topic=request.topic or "research topic",
                 problem_markdown=request.problem_markdown,
@@ -305,6 +309,8 @@ def read_documents(request: ReadRequest) -> ReadResult:
                 client,
                 papers=[record.to_row() for record in bundle.records],
                 evidence_snippets_by_document=snippets,
+                front_matter_by_document={section.document_id: front_matter_view(section)
+                    for section in bundle.sections if section.section == "front_matter"},
                 topic=request.topic,
                 problem_markdown=request.problem_markdown,
                 emit=request.emit,
@@ -544,7 +550,7 @@ def _preserve_required_screening(
     """Keep explicitly supplied documents without silently widening the shortlist."""
 
     required = tuple(dict.fromkeys(required_document_ids))
-    if not required or not decisions:
+    if not required:
         return decisions
     records = {record.document_id: record for record in bundle.records}
     missing = set(required) - records.keys()
@@ -604,8 +610,9 @@ def _refine_reading_gaps(
         if not queries:
             output.append(note)
             continue
-        chunks = order_source_chunks([chunk for chunk in bundle.chunks if chunk.document_id == note["paper_id"]
-                                      and chunk.metadata.get("section") != "references"])
+        # Overview sampling prioritizes the body; an explicit source question
+        # may instead need a cited method's identity or an appendix condition.
+        chunks = order_source_chunks([chunk for chunk in bundle.chunks if chunk.document_id == note["paper_id"]])
         shown_ids = set(note["reading_coverage"]["shown_chunk_ids"])
         initial_text = {chunk.chunk_id: " ".join(chunk.text.split()) for chunk in chunks}
         initial_text = {key: text[:DEFAULT_CHUNK_CHARS - 3] if len(text) > DEFAULT_CHUNK_CHARS else text
@@ -651,6 +658,8 @@ def _refine_reading_gaps(
                 _emit(f"Rereading source gaps for {note['paper_id']} (one bounded round).")
             revised = read_paper_notes_with_llm(request.llm_client,
                 papers=[records[note["paper_id"]].to_row()], evidence_snippets_by_document=snippets,
+                front_matter_by_document={section.document_id: front_matter_view(section)
+                    for section in bundle.sections if section.section == "front_matter"},
                 revision_context_by_document={note["paper_id"]: {"previous_note": note, "source_lookup": trace}},
                 topic=request.topic, problem_markdown=request.problem_markdown,
                 config=request.config, emit=request.emit)[0]
@@ -658,10 +667,25 @@ def _refine_reading_gaps(
                          prior_note=note)
             revised["reading_coverage"] = {**note["reading_coverage"],
                 "followup_shown_chunk_ids": list(dict.fromkeys(view["chunk_id"] for view in trace["passages"]))}
+            if not revised.get("bibliographic_fields"):
+                revised["bibliographic_fields"] = note.get("bibliographic_fields", [])
             note = revised
         note["reading_followup"] = trace
         output.append(note)
     return output
+
+
+def reading_followup_context(value: Any, *, include_passages: bool = False) -> dict[str, Any]:
+    """Current lookup evidence, not superseded notes from the saved trace.
+
+    The full trace remains in the Read artifact. Downstream synthesis/writing
+    must consume the adopted note, not implicitly adopt its historical drafts.
+    Preserve unresolved queries and, when requested, the original passages.
+    """
+    keys = ("lookups", "pending_queries", "revision_performed", "scope")
+    if include_passages:
+        keys += ("passages",)
+    return {key: value[key] for key in keys if key in value} if isinstance(value, Mapping) else {}
 
 
 def _optional_int(value: object) -> int | None:
@@ -944,7 +968,8 @@ def validate_read_evidence(result: ReadResult) -> tuple[str, ...]:
 
 
 def _with_evidence_validation(result: ReadResult) -> ReadResult:
-    diagnostics = validate_read_evidence(result)
+    from simple_ar.research.documents.extractors import document_extraction_limitations
+    diagnostics = (*validate_read_evidence(result), *document_extraction_limitations(result.bundle.records))
     if not diagnostics:
         return result
     status = "partial" if result.status == "completed" else result.status
@@ -971,6 +996,7 @@ __all__ = [
     "ReadResult",
     "ReadStatus",
     "format_bundle_evidence_snippets",
+    "reading_followup_context",
     "select_representative_chunks",
     "read_documents",
     "run_read_capability",

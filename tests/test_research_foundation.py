@@ -229,7 +229,12 @@ class ResearchFoundationTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].extraction_status, "parsed")
             self.assertEqual(records[0].parser, "plain_text")
-            self.assertIn("Multi-agent coding", records[0].abstract)
+            # Unheaded notes are source body, not an inferred paper abstract.
+            self.assertEqual(records[0].abstract, "")
+            sections = build_document_sections(records)
+            self.assertTrue(any("Multi-agent coding" in section.text for section in sections))
+            self.assertTrue(any("Multi-agent coding" in chunk.text for chunk in
+                                build_text_chunks(records, sections=sections)))
             self.assertEqual(manifest["status_counts"], {"parsed": 1})
             self.assertEqual(manifest["document_count"], 1)
 
@@ -663,7 +668,10 @@ class ResearchFoundationTests(unittest.TestCase):
             sections = build_document_sections([record])
             chunks = build_text_chunks([record], sections=sections, max_chunks=10, chunk_chars=120)
 
-            self.assertEqual([section.section for section in sections], ["abstract", "method", "experiments", "limitations"])
+            self.assertEqual([section.section for section in sections],
+                             ["front_matter", "abstract", "method", "experiments", "limitations"])
+            self.assertEqual(sections[0].text, "# Paper")
+            self.assertIn("multi-agent coding systems", sections[1].text)
             self.assertTrue(any(chunk.metadata.get("section") == "method" for chunk in chunks))
             self.assertTrue(any("#section-" in chunk.chunk_id for chunk in chunks))
 

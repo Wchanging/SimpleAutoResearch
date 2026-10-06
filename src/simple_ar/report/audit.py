@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
 from simple_ar.literature.models import Paper, bibliographic_details
-from simple_ar.report.document_plan import check_document_length
+from simple_ar.report.document_plan import check_document_length, manuscript_body_tokens
 from simple_ar.report.narrative import report_objective
 from simple_ar.report.projection import _declared_report_metrics, _verified_experiment_evidence
 from simple_ar.report.schema import (
@@ -79,7 +79,7 @@ def build_report_audit(
         + _reader_facing_handle_findings(report_body)
         + _source_scope_findings(report_body, context)
         + _bibliographic_findings(report_body, context)
-        + _document_length_findings(report, context, memory)
+        + _document_length_findings(report, context, memory, report_body=report_body)
     )
     status = _overall_status([citation.status, metric.status, claim.status])
     if any(
@@ -103,16 +103,20 @@ def build_report_audit(
             "V2.4 audit combines local rule gates with Writer/Reviewer findings when agent mode is enabled.",
             "Mechanical checks remain conservative and provenance-focused.",
             "Semantic support of final prose is unchecked; metric visibility and section review do not prove final conclusions.",
-            "Length checking uses only an explicit task-anchored whole-document word budget in the frozen plan. Its whitespace-separated Markdown token count is not language-independent word counting or semantic validation of that interpretation; absent contracts are not inferred.",
+            "Length checking uses only an explicit task-anchored word budget and its frozen count scope. Its whitespace-separated Markdown token count is not language-independent word counting or semantic validation of that interpretation; absent contracts are not inferred.",
         ],
     )
 
 
-def _document_length_findings(report: str, context: ReportContext, memory: ReportMemory) -> list[ReviewerFinding]:
+def _document_length_findings(report: str, context: ReportContext, memory: ReportMemory, *, report_body: str) -> list[ReviewerFinding]:
     """Check final text against the existing frozen interpretation, not a new policy."""
     budget = memory.document_plan.length_budget if memory.document_plan else {}
+    if budget.get("scope") == "manuscript_body":
+        count = manuscript_body_tokens(report_body) if report_body.strip() else None
+    else:
+        count = len(report.split()) if report.strip() else None
     request = check_document_length(budget, objective=report_objective(context, memory),
-                                    token_count=len(report.split()) if report.strip() else None)
+        token_count=count)
     if request["status"] == "no_contract":
         return []  # Legacy prose requirements remain for review, not silent migration.
     if request["status"] == "invalid_contract":
@@ -121,14 +125,14 @@ def _document_length_findings(report: str, context: ReportContext, memory: Repor
             suggested_action="Inspect the original task and frozen plan; do not infer replacement bounds or rewrite completed history.")]
     if request["status"] == "unavailable":
         return [ReviewerFinding(finding_id="document-length-unavailable", type="delivery_length", severity="major",
-            required_action="verify", message="Final document text is unavailable for its recorded whole-document length check.",
-            suggested_action="Supply the actual final report, not the model body or forecast alone.")]
+            required_action="verify", message="Final text is unavailable for its recorded length count scope.",
+            suggested_action="Supply the actual final text in the recorded scope, not a planning forecast.")]
     actual = request["markdown_token_count"]
-    if request["status"] == "within_range":
+    if request["status"] in {"within_range", "target_only"}:
         return []
     return [ReviewerFinding(finding_id="document-length-outside-budget", type="delivery_length", severity="major",
         required_action="revise",
-        message=f"Final report has {actual} whitespace-separated Markdown tokens, outside its recorded whole-document range {request['min_words']}–{request['max_words']}. Task quotation: {request['request_quote']}",
+        message=f"Final report has {actual} whitespace-separated Markdown tokens in {request['scope']}, outside its recorded range {request['min_words']}–{request['max_words']}. Task quotation: {request['request_quote']}",
         suggested_action="Check the original requirement and counting convention, then revise the document within its existing allowance. Preserve necessary evidence; do not remove registered attachments or expand the budget to pass.")]
 
 

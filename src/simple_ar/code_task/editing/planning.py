@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,14 +11,20 @@ from simple_ar.code_task.editing.scope import (
     allowed_patterns_from_manifest,
     is_edit_allowed_path,
     protected_patterns_from_manifest,
+    prompt_file_inventory,
 )
-from simple_ar.code_task.runtime.state import code_task_paths
+from simple_ar.code_task.runtime.state import (
+    code_task_paths, read_required_json as _read_required_json, utcnow_iso as _utcnow_iso,
+)
 from simple_ar.code_task.analysis.context import (
     LoadedCodeTaskContextPack,
+    ensure_code_task_context_pack,
+    clip_source_snippet,
     load_latest_code_task_context_pack,
+    read_source_snippets,
 )
 from simple_ar.code_task.memory import task_memory_context
-from simple_ar.code_task.analysis.interfaces import snippet_api_contract
+from simple_ar.code_task.analysis.interfaces import render_source_snippets, snippet_api_contract
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.integrations.usage import record_usage
 
@@ -113,17 +118,24 @@ def generate_patch_plan(
     protected_patterns = protected_patterns_from_manifest(manifest)
     run_context = _collect_run_context(root, manifest)
     memory_context = task_memory_context(root)
-    loaded_context = load_latest_code_task_context_pack(root)
+    if use_llm:
+        loaded_context = ensure_code_task_context_pack(root, query=task_text, max_files=max_files,
+            max_source_chars_per_file=max_source_chars_per_file)
+        # The context builder owns its manifest references; don't overwrite
+        # them later with the pre-build planning snapshot.
+        manifest = _load_code_task_manifest(manifest_path)
+    else:
+        loaded_context = load_latest_code_task_context_pack(root)
     context_pack_ref: dict[str, Any] | None = None
     if loaded_context is not None and loaded_context.selected_files:
-        selected = _context_pack_selected_files(loaded_context, max_files=max_files)
+        selected = loaded_context.selected_paths(max_files=max_files)
         snippets = _context_pack_snippets(
             loaded_context,
             max_files=max_files,
             max_chars_per_file=max_source_chars_per_file,
             include_read_only=True,
         )
-        context_pack_ref = _context_pack_manifest_ref(root, loaded_context)
+        context_pack_ref = loaded_context.manifest_reference(root)
         _emit(message_callback, f"Using code-task context pack: {context_pack_ref['path']}")
         if not snippets:
             _emit(message_callback, "Context pack has no readable snippets; falling back to index selection.")
@@ -135,7 +147,7 @@ def generate_patch_plan(
 
     if not selected:
         selected = select_relevant_files(index, task_text, max_files=max_files)
-        snippets = _source_snippets(
+        snippets = read_source_snippets(
             workspace_dir,
             selected,
             max_chars_per_file=max_source_chars_per_file,
@@ -385,17 +397,13 @@ def _plan_user_prompt(
     allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> str:
-    compact_index = _compact_codebase_index(
+    compact_index = prompt_file_inventory(
         index,
         allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
+        selected_paths=(str(item.get("path", "")) for item in snippets),
     )
-    snippet_text = "\n\n".join(
-        f"### {item.get('path', '')} "
-        f"({item.get('access_role', 'editable')})\n"
-        f"```text\n{item.get('text', '')}\n```"
-        for item in snippets
-    )
+    snippet_text = render_source_snippets(snippets)
     return (
         "Create a code modification plan for this existing workspace. "
         "Return JSON with these fields exactly: "
@@ -410,7 +418,7 @@ def _plan_user_prompt(
         "- Prefer modifying existing code over generating unrelated new modules.\n"
         "- Mention only workspace-relative paths from the index in "
         "`files_to_modify`. Put truly new files in `new_files`.\n"
-        "- Treat files with `edit_role` = `read_only` as evidence only. Do "
+        "- Treat inventory `read_only_files` as evidence only. Do "
         "not include them in `files_to_modify` or propose changing them.\n"
         "- Keep the plan small enough for one reviewable patch.\n"
         "- Include the benchmark or validation command when available.\n"
@@ -842,52 +850,12 @@ def _update_manifest_after_plan(
 
 
 
-def _source_snippets(
-    workspace_dir: Path,
-    selected_files: list[str],
-    *,
-    max_chars_per_file: int,
-) -> list[dict[str, Any]]:
-    snippets: list[dict[str, Any]] = []
-    workspace = workspace_dir.resolve()
-    for rel_path in selected_files:
-        path = (workspace / rel_path).resolve()
-        if not _is_relative_to(path, workspace) or not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        snippets.append(
-            {
-                "path": rel_path,
-                "access_role": "editable",
-                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
-            }
-        )
-    return snippets
-
-
-def _context_pack_selected_files(
-    loaded: LoadedCodeTaskContextPack,
-    *,
-    max_files: int,
-) -> list[str]:
-    selected: list[str] = []
-    for path in loaded.selected_files:
-        if path not in selected:
-            selected.append(path)
-        if len(selected) >= max(1, max_files):
-            break
-    return selected
-
-
 def _context_pack_snippets(
     loaded: LoadedCodeTaskContextPack,
     *,
     max_files: int,
     max_chars_per_file: int,
-    include_read_only: bool,
+    include_read_only: bool = True,
 ) -> list[dict[str, Any]]:
     snippets: list[dict[str, Any]] = []
     for row in loaded.snippets:
@@ -898,127 +866,16 @@ def _context_pack_snippets(
         text = row.get("text")
         if not path or not isinstance(text, str):
             continue
-        snippets.append(
-            {
-                "path": path,
-                "access_role": role,
-                "score": row.get("score", 0),
-                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
-            }
-        )
+        snippets.append(clip_source_snippet(row, max_chars=max(200, max_chars_per_file)))
         if len(snippets) >= max(1, max_files):
             break
     return snippets
-
-
-def _context_pack_manifest_ref(
-    run_dir: Path,
-    loaded: LoadedCodeTaskContextPack,
-) -> dict[str, Any]:
-    budget = loaded.context_pack.get("budget")
-    if not isinstance(budget, dict):
-        budget = {}
-    return {
-        "path": _relative_to_run(run_dir, loaded.context_pack_path),
-        "prompt_context": _relative_to_run(run_dir, loaded.prompt_context_path),
-        "snippets": _relative_to_run(run_dir, loaded.snippets_path),
-        "selected_files": list(loaded.selected_files),
-        "budget": budget,
-    }
-
-
-def _relative_to_run(run_dir: Path, path: Path) -> str:
-    try:
-        return path.resolve().relative_to(run_dir.resolve()).as_posix()
-    except ValueError:
-        return str(path)
-
-
-def _compact_codebase_index(
-    index: dict[str, Any],
-    *,
-    allowed_patterns: tuple[str, ...],
-    protected_patterns: tuple[str, ...],
-) -> dict[str, Any]:
-    files: list[dict[str, Any]] = []
-    for item in _index_files(index):
-        path = str(item.get("path", ""))
-        row: dict[str, Any] = {
-            "path": path,
-            "kind": item.get("kind"),
-            "role_tags": item.get("role_tags", []),
-            "edit_role": (
-                "editable"
-                if is_edit_allowed_path(
-                    path,
-                    allowed_patterns=allowed_patterns,
-                    protected_patterns=protected_patterns,
-                )
-                else "read_only"
-            ),
-            "summary": item.get("summary", ""),
-        }
-        python = item.get("python")
-        if isinstance(python, dict):
-            row["python"] = {
-                "syntax_ok": python.get("syntax_ok"),
-                "imports": python.get("imports", []),
-                "functions": _signature_rows(python.get("functions", [])),
-                "classes": _class_signature_rows(python.get("classes", [])),
-                "has_main_guard": python.get("has_main_guard", False),
-            }
-        files.append(row)
-    return {
-        "project": index.get("project", {}),
-        "files": files,
-    }
-
-
-def _signature_rows(value: object) -> list[dict[str, Any]]:
-    rows = value if isinstance(value, list) else []
-    result: list[dict[str, Any]] = []
-    for item in rows:
-        if isinstance(item, dict):
-            result.append(
-                {
-                    "name": item.get("name"),
-                    "line_start": item.get("line_start"),
-                    "line_end": item.get("line_end"),
-                    "args": item.get("args", []),
-                }
-            )
-    return result
-
-
-def _class_signature_rows(value: object) -> list[dict[str, Any]]:
-    rows = value if isinstance(value, list) else []
-    result: list[dict[str, Any]] = []
-    for item in rows:
-        if isinstance(item, dict):
-            result.append(
-                {
-                    "name": item.get("name"),
-                    "line_start": item.get("line_start"),
-                    "line_end": item.get("line_end"),
-                    "methods": _signature_rows(item.get("methods", [])),
-                }
-            )
-    return result
 
 
 def _load_code_task_manifest(path: Path) -> dict[str, Any]:
     data = _read_required_json(path)
     if data.get("workflow") != "code_task":
         raise RuntimeError(f"Run is not a code-task workflow: {path.parent}")
-    return data
-
-
-def _read_required_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing required artifact: {path}")
-    data = read_json(path)
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Expected JSON object in {path}")
     return data
 
 
@@ -1153,24 +1010,6 @@ def _first_sentence(text: str) -> str:
     return re.split(r"(?<=[.!?])\s+", normalized, maxsplit=1)[0]
 
 
-def _clip_text(text: str, *, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars].rstrip() + "\n... [truncated]"
-
-
 def _emit(callback: MessageCallback | None, message: str) -> None:
     if callback is not None:
         callback(message)
-
-
-def _is_relative_to(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")

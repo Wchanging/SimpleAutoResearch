@@ -3,7 +3,7 @@ import copy
 import json
 import unittest
 
-import test_report_finding_checks as fixtures
+from tests.report_review_fixtures import finding_check_objects
 from simple_ar.integrations.llm import LLMError, LLMResponseError
 from simple_ar.report.agent import run_report_agent
 from simple_ar.report.editor import _validate_document_reviews, _validated_document_review_subset
@@ -12,7 +12,7 @@ from simple_ar.report.tool_gateway import ReportToolGateway
 
 class PartialReviewTests(unittest.TestCase):
     def objects(self, *, historical=False):
-        kwargs, checkpoint, old, drafts = fixtures.FindingCheckTests().objects()
+        kwargs, checkpoint, old, drafts = finding_check_objects()
         if not historical:
             kwargs["memory"].reviewer_findings = []
             checkpoint["memory"]["reviewer_findings"] = []

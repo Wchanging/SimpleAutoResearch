@@ -1,4 +1,4 @@
-﻿# 使用与配置
+# 使用与配置
 
 [English version](USAGE.md)
 
@@ -12,13 +12,39 @@
 | --- | --- | --- |
 | `survey` | 问题/范围，可选论文 | 在线或供材阅读，再写报告；需要模型 |
 | `bug_fix` | 项目、允许路径、验证命令 | 受限修改与实际验证；需准备依赖 |
-| `reproduction` | 论文、已准备环境、固定协议/命令 | 指定结论复现，不自动准备环境/数据 |
+| `reproduction` | 论文、已有项目/数据、固定协议/命令 | 指定结论，当前环境或明确选择任务虚拟环境，不自动获取数据 |
 | `writing` | 笔记/草稿或完成的分析包，可选论文 | 材料到报告/草稿，不默认检索或实验 |
-| `data_analysis` | 表格、字段、行/值含义和单位 | 描述统计或已有柱状/折线/散点值；无需 API |
+| `data_analysis` | 表格、字段、行/值含义和单位 | 描述统计、观测箱线图或已有柱状/折线/散点/矩阵热图值；无需 API |
 
-`--prepare-only` 只保存配置，不执行。这不是自由聊天入口。无 API 首次体验可执行
+`--prepare-only` 只保存配置，不执行或调用模型。也可以选择 `start --chat`，用自然语言
+澄清影响结果的选择，确认后进入同一配置路径。它需要模型，会发送回复与指定材料预览，
+并保存澄清用量；`--resume-setup PATH` 恢复草稿，不重开计费记录。这不是通用编程 Agent，
+代码/复现的执行命令和范围仍需明确。不能与承诺不调用 API 的 `--prepare-only` 同用。
+尚未确定的可选项不写成实际赋值；先回答影响结果的选择，完整确认配置仍在执行前校验。
+
+改码可用 `--project-python /path/to/project-venv/bin/python`（Windows 用
+`C:\path\project-venv\Scripts\python.exe`）指定已有项目环境，无须手改 TOML。
+省略仍使用当前环境；不创建环境或安装依赖。此选项仅适用于 `bug_fix`，不改变助手本身的 Python 要求。
+
+无 API 首次体验可执行
 `uv run simple-ar research-session --config examples/data-curves/research.toml`。
 已保存分析包可以用于后续写作；排版导出是单独的 `report-export`，见 [CLI](CLI_REFERENCE_zh.md)。
+
+终端选择数据列前会显示列名和示例值。[配对观察案例](../examples/data-paired/README_zh.md)
+无需模型即可计算同一行差值和标准误。准备复现命令前，可先用
+`project-info --project PATH --output runs/preparation-NEW` 取得可复用的只读笔记：
+使用说明、依赖声明、入口候选及指定数据位置；不安装、不下载、不执行项目。
+静态 `[project.scripts]` 声明会在原入口读取额度内优先提供索引内 root/src 模块源码，
+不要求 main guard；未知或歧义路径保留，不把入口声明当命令已安装或函数可用的证明。
+静态 pyproject/requirements 声明还与当前 Python 的发行包元数据比较，不导入项目；
+requirements 的安装指令、包含文件或截断行仍未解析，版本匹配不当导入或复现已成功。
+也可用 `--chat --kind reproduction --project PATH --document PAPER --goal "..."`，
+补读索引内源码后建议 argv/指标/协议，显示确认后才进入单独的执行确认。
+这不等于自主寻找任意实现。单条 Python 命令可在 `--command` 前明确选择
+`--environment venv` 和项目内相对的 `--requirements PATH`；执行时创建任务虚拟环境、
+安装所选文件并 `pip check`。可显式加 `--install-project` 同次安装项目包，默认关闭，
+非 editable；构建可能执行代码、联网、写源目录构建文件。默认仍用当前环境。设置本身只保存选择，
+范围、用量及恢复见[配置参考](CONFIG_REFERENCE_zh.md#引导设置)。
 
 任务 TOML 保存项目实际配置，`.env` 仅放全局凭据/模型/传输设置；普通用户不必填写下面
 所有高级选项。详见[引导设置](CONFIG_REFERENCE_zh.md#引导设置)。
@@ -52,7 +78,7 @@ uv run simple-ar --help
 
 ## 环境变量配置
 
-创建本地 `.env`：
+仅在尚无 `.env` 时创建；不要覆盖已有连接设置：
 
 ```bash
 cp .env.example .env
@@ -379,6 +405,8 @@ uv run simple-ar code-task execute runs/<run-id> --to-step run
 然后重跑 execute。
 
 如果省略或显式使用 `workspace.mode = "auto"`，已有项目会先尝试 detached git worktree。如果 Git 不可用、不在仓库内、仓库还没有 commit，或 worktree 无法安全创建，本次 run 会降级为受保护的 copy，并在 `manifest.json.workspace` 写入 `requested_mode`、`selected_mode`、`fallback_reason` 和 `user_next_steps`。
+
+引导入口 `start --kind bug_fix` 也使用这一策略：干净 Git 项目保留已提交文件，不受复制大小限额影响；有未提交修改或非 Git 的项目复制当前状态。复制遗漏见清单，复制限额不等于源码阅读窗口，不能把复制出的子集视为完整仓库。
 
 如果使用 `workspace.mode = "git_worktree"` 或 `--workspace-mode git_worktree`，`init` 会在 `code_task/workspace/` 创建 detached git worktree，而不是完整复制文件。这个模式要求 `code_root` 位于本地 Git 仓库中，并且仓库至少有一次 commit；`code_root` 可以是仓库根目录，也可以是 monorepo 中的项目子目录。子目录场景下，系统会在仓库根创建 worktree，并把 worktree 中对应子目录作为实际可编辑 project root，用于索引、修改和 benchmark 执行。如果目录不满足要求，CLI 会给出可操作提示，比如初始化 git、提交初始 baseline、传入正确项目路径，或者改用 `copy` 模式包含当前未提交文件状态。
 

@@ -384,6 +384,9 @@ def execution_request(
     if not isinstance(config, Mapping):
         raise ValueError("Provide execution with command (argv), absolute cwd and timeout_sec.")
     config = normalize_execution_config(config, task_text=task_text)
+    if "environment" in config:
+        from simple_ar.research.project_environment import environment_profile
+        environment_profile(config.pop("environment"), project=Path(str(config.get("cwd", ""))))
     pairs = tuple(config.get("pairs", ()))
     config.pop("pairs", None)
     code_task = config.pop("code_task", None)  # Consumed by the separate implementation action.

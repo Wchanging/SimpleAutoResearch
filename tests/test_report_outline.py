@@ -6,13 +6,19 @@ import json
 from unittest.mock import Mock
 
 from simple_ar.integrations.llm import LLMError
-from simple_ar.report.agent import _evidence_outline_sections, _maybe_adapt_outline, run_report_agent
-from simple_ar.report.narrative import evidence_outline_context
+from simple_ar.report.agent import (
+    _evidence_outline_sections, _maybe_adapt_outline, _resolve_document_plan,
+    _validated_outline_delivery, _writer_prompt, run_report_agent,
+)
+from simple_ar.report.document_plan import outline_section_keys, resolve_argument_plan
+from simple_ar.report.editor import document_revision_limit
+from simple_ar.report.narrative import evidence_outline_context, narrative_context
 from simple_ar.report.schema import (
     MetricSource, ReportContext, ReportMemory, ReportRuntimeConfig, ReportSectionPlan, SourceHandle,
 )
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
+from simple_ar.research.synthesis import SynthesisResult, _parse_evidence_comparisons
 
 
 class EvidenceOutlineTests(unittest.TestCase):
@@ -49,6 +55,29 @@ class EvidenceOutlineTests(unittest.TestCase):
             result = self.adapt(client, ReportRuntimeConfig(template="reproduction", outline_strategy=strategy))
             self.assertIs(result, self.memory)
             client.ask_json.assert_not_called()
+
+    def test_source_survey_auto_plans_without_a_legacy_survey_contract(self):
+        from simple_ar.report.agent import _resolve_document_plan
+        task = "Compare the two supplied sources in 350-500 words."
+        context = self.context.model_copy(update={"report_mode": "research_only", "problem_markdown": task})
+        memory = self.memory.model_copy(update={"template": "survey", "survey_contract": {},
+            "section_plan": [ReportSectionPlan(section_id=str(i), heading=f"Fallback {i}", goal="Compare sources.")
+                             for i in range(3)]})
+        client = Mock()
+        client.ask_json.return_value = {**self.response, "title": "Contrasting reliability objectives",
+            "length_request": {"unit": "words", "scope": "whole_document", "request_quote": task,
+                "constraint": "bounds", "min_words": 350, "max_words": 500, "target_words": 425}}
+        config = ReportRuntimeConfig(template="survey")
+        template = load_report_template_bundle(report_mode=context.report_mode, config=config)
+        planned = _maybe_adapt_outline(client=client, context=context, memory=memory,
+                                       template=template, config=config, emit=None)
+        frozen = _resolve_document_plan(planned, config=config, context=context)
+        self.assertEqual(frozen.document_plan.title, "Contrasting reliability objectives")
+        self.assertEqual(frozen.document_plan.target_words, 425)
+        self.assertEqual(len(frozen.section_plan), 2)
+        self.assertIs(_maybe_adapt_outline(client=client, context=context, memory=frozen,
+            template=template, config=config, emit=None), frozen)
+        client.ask_json.assert_called_once()
 
     def test_frozen_evidence_plan_does_not_reintroduce_template_topology(self):
         from simple_ar.report.agent import _resolve_document_plan
@@ -291,11 +320,14 @@ class EvidenceOutlineTests(unittest.TestCase):
         prompts = [_writer_prompt(**common, previous_draft=None, review=None, extra_context=[], source_batch_index=1,
             source_batch_count=1, include_previous_draft=False, draft_mode="initial"),
             _writer_recovery_prompt(context=self.context, memory=frozen, section=section, config=config,
-                previous_draft=None, review=None, extra_context=[], draft_mode="initial"),
-            _reviewer_prompt(**common, draft=draft)]
+                previous_draft=None, review=None, extra_context=[], draft_mode="initial")]
         for prompt in prompts:
             view = json.JSONDecoder().raw_decode(prompt[prompt.index("{"):])[0]
             self.assertEqual(view["document_plan"]["length_budget"], budget)
+        prompt = _reviewer_prompt(**common, draft=draft)
+        view = json.JSONDecoder().raw_decode(prompt[prompt.index("{"):])[0]
+        self.assertIn(self.context.problem_markdown, view["objective"])
+        self.assertNotIn("argument_plan", view["document_plan"])
         reviewer = Mock()
         reviewer.ask_json.return_value = {"section_reviews": []}
         review_document(client=reviewer, template=template, memory=frozen, sections=[draft], config=config,
@@ -317,6 +349,24 @@ class EvidenceOutlineTests(unittest.TestCase):
         self.assertEqual(validate_length_request(upper, objective="At most 500 words"), upper)
         exact = {**valid, "min_words": 350, "max_words": 350, "target_words": 350, "request_quote": "350 words"}
         self.assertEqual(validate_length_request(exact, objective="Write 350 words"), exact)
+
+    def test_adaptive_soft_target_survives_outline_projection_freezing_and_recovery(self):
+        from simple_ar.report.agent import _resolve_document_plan
+        self.context.problem_markdown = 'Deliver a comparative report of about 800 words.'
+        request = dict(unit='words', scope='whole_document', request_quote=self.context.problem_markdown,
+                       constraint='target', target_words=800, min_words=None, max_words=None)
+        client = Mock()
+        client.ask_json.return_value = {**self.response, 'length_request': request}
+        config = ReportRuntimeConfig(template='reproduction', outline_strategy='adaptive')
+        frozen = _resolve_document_plan(self.adapt(client, config), config=config, context=self.context)
+        self.assertEqual(frozen.document_plan.length_budget['constraint'], 'target')
+        self.assertIsNone(frozen.document_plan.length_budget['max_words'])
+        restored = ReportMemory.model_validate(frozen.model_dump(mode='json'))
+        self.assertEqual(restored.document_plan.length_budget, frozen.document_plan.length_budget)
+        client.ask_json.assert_called_once()
+        prompt = client.ask_json.call_args.args[1]
+        payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+        self.assertIn('constraint', payload['output_schema']['length_request'])
 
     def test_invalid_length_budget_gets_only_the_existing_outline_correction(self):
         self.context.problem_markdown = "Write 5 words."
@@ -364,6 +414,57 @@ class EvidenceOutlineTests(unittest.TestCase):
         self.assertIs(_maybe_adapt_outline(client=client, context=changed, memory=restored, template=template, config=config, emit=None), restored)
         self.assertEqual(client.ask_json.call_count, 1)
 
+    def test_survey_keeps_proposed_structure_without_keyword_rewrites(self):
+        context = self.context.model_copy(update={"report_mode": "survey"})
+        memory = self.memory.model_copy(update={"template": "survey", "report_mode": "survey",
+            "survey_contract": {"enabled": True, "expected_coverage": {"target_words": 12000}},
+            "section_plan": [ReportSectionPlan(section_id=str(i), heading=f"Fallback {i}",
+                goal="Compare sources.") for i in range(3)]})
+        config = ReportRuntimeConfig(template="survey", outline_strategy="adaptive")
+        template = load_report_template_bundle(report_mode=context.report_mode, config=config)
+        proposals = [
+            [{"heading": "Observed conditions", "goal": "Explain the measured setting."},
+             {"heading": "Decision", "goal": "Explain what follows from these observations."}],
+            [{"heading": heading, "goal": f"Explain supplied evidence for {heading}."}
+             for heading in ("Conceptual Foundations and Taxonomy", "Methods and System Construction",
+                 "Applications and Use Cases", "Evaluation Benchmarks and Evidence Quality",
+                 "Related Surveys and Positioning", "Challenges and Future Directions")],
+            [{"heading": "Introduction", "goal": "Define the question.",
+              "subsections": ["Assumptions", "Inputs"]},
+             {"heading": "Conclusion", "goal": "Answer within the observed conditions.",
+              "subsections": ["Recommendation", "Unresolved checks"]}],
+        ]
+        for proposal in proposals:
+            with self.subTest(headings=[row["heading"] for row in proposal]):
+                before = json.loads(json.dumps(proposal))
+                client = Mock()
+                client.ask_json.return_value = {"sections": proposal}
+                adapted = _maybe_adapt_outline(client=client, context=context, memory=memory,
+                    template=template, config=config, emit=None)
+                frozen = _resolve_document_plan(adapted, config=config, context=context)
+                self.assertEqual([row.heading for row in frozen.section_plan],
+                                 [row["heading"] for row in proposal])
+                self.assertEqual([row.goal for row in frozen.section_plan],
+                                 [row["goal"] for row in proposal])
+                self.assertEqual([row.subsections for row in frozen.section_plan],
+                                 [row.get("subsections", []) for row in proposal])
+                self.assertEqual(proposal, before)
+                client.ask_json.assert_called_once()
+                restored = ReportMemory.model_validate(frozen.model_dump(mode="json"))
+                self.assertIs(_maybe_adapt_outline(client=client, context=context, memory=restored,
+                    template=template, config=config, emit=None), restored)
+                client.ask_json.assert_called_once()
+        for count in (1, 13):
+            with self.subTest(invalid_section_count=count):
+                client = Mock()
+                client.ask_json.return_value = {"sections": [
+                    {"heading": f"Section {i}", "goal": "Explain the evidence."}
+                    for i in range(count)]}
+                with self.assertRaises(LLMError):
+                    _maybe_adapt_outline(client=client, context=context, memory=memory,
+                        template=template, config=config, emit=None)
+                self.assertEqual(client.ask_json.call_count, 2)
+
     def test_invalid_survey_length_uses_existing_correction_not_a_new_loop(self):
         task = "Write 350-500 words."
         context = self.context.model_copy(update={"report_mode": "survey", "problem_markdown": task})
@@ -391,6 +492,221 @@ class EvidenceOutlineTests(unittest.TestCase):
         self.assertEqual(frozen.document_plan.target_words, 0)
         self.assertEqual(frozen.document_plan.sections[1].target_words, 300)
         self.assertNotIn("length_budget", frozen.document_plan.model_dump(mode="json"))
+
+
+class ArgumentPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.config = ReportRuntimeConfig(template="reproduction", outline_strategy="adaptive")
+        self.context = ReportContext(topic="Measured trade-off", report_mode="experiment")
+        self.memory = ReportMemory(template="reproduction", section_plan=[
+            ReportSectionPlan(section_id="old", heading="Findings", goal="Explain results")],
+            source_handles=[SourceHandle(handle="source:a", title="Method A", kind="paper"),
+                            SourceHandle(handle="source:b", title="Method B", kind="paper")])
+        self.response = {"title": "Measured coverage and cost", "sections": [
+            {"heading": "Comparison", "goal": "Explain the measured trade-off", "evidence_handles": ["source:a", "source:b"]},
+            {"heading": "Interpretation", "goal": "Explain what the trade-off means", "evidence_handles": ["source:a"]},
+            {"heading": "Scope", "goal": "Conditions and unresolved issues", "evidence_handles": []}],
+            "argument_plan": {"question": "What improved and at what cost?",
+                "answer": "Coverage improved with larger regions under the observed protocol.",
+                "document_kind": "finite reproduction report",
+                "points": [{"claim": "There is a coverage-size trade-off", "section_heading": "Comparison",
+                    "evidence_handles": ["source:a"], "reasoning": "Neither coverage nor size alone captures the trade-off.",
+                    "qualifications": ["Only the supplied dataset was measured"], "counterevidence_handles": ["source:b"]}],
+                "scope_section_heading": "Scope", "technical_details_placement": "appendix"}}
+
+    def adapt(self, response=None):
+        client = Mock()
+        client.ask_json.return_value = response or self.response
+        template = load_report_template_bundle(report_mode="experiment", config=self.config)
+        proposed = _maybe_adapt_outline(client=client, context=self.context, template=template,
+            memory=self.memory, config=self.config, emit=None)
+        return _resolve_document_plan(proposed, config=self.config, context=self.context), client, template
+
+    def test_same_planner_call_freezes_argument_for_writer_and_recovery(self):
+        memory, client, template = self.adapt()
+        self.assertEqual(client.ask_json.call_count, 1)
+        self.assertEqual(memory.document_plan.argument_plan.points[0].section_id, "comparison")
+        restored = ReportMemory.model_validate(memory.model_dump(mode="json"))
+        self.assertEqual(restored.document_plan, memory.document_plan)
+        self.assertIs(_resolve_document_plan(restored, config=self.config, context=self.context), restored)
+        prompt = _writer_prompt(context=self.context, template=template, memory=restored,
+            section=restored.section_plan[0], config=self.config, extra_context=[], previous_draft=None,
+            review=None, source_batch_index=1, source_batch_count=1, include_previous_draft=False, draft_mode="initial")
+        self.assertIn("What improved and at what cost?", prompt)
+        self.assertIn("Neither coverage nor size alone", prompt)
+        view = narrative_context(restored, restored.section_plan[1], [])
+        self.assertNotIn("argument_task", view)
+        self.assertEqual(view["argument_plan_source"], "document_plan.argument_plan")
+        self.assertEqual(view["argument_section_id"], "interpretation")
+        self.assertEqual(prompt.count("What improved and at what cost?"), 1)
+        self.assertEqual(prompt.count("Neither coverage nor size alone"), 1)
+        self.assertEqual(restored.document_plan.argument_plan.scope_section_id, "scope")
+
+    def test_new_plan_supports_cross_section_corrections_legacy_scope_unchanged(self):
+        memory, _, _ = self.adapt()
+        self.assertEqual(document_revision_limit(memory), 3)
+        restored = ReportMemory.model_validate(memory.model_dump(mode="json"))
+        self.assertEqual(document_revision_limit(restored), 3)
+        restored.document_plan.argument_plan = None
+        self.assertEqual(document_revision_limit(restored), 2)
+
+    def test_missing_argument_is_not_invented_for_legacy_response(self):
+        response = dict(self.response)
+        response.pop("argument_plan")
+        memory, client, _ = self.adapt(response)
+        self.assertIsNone(memory.document_plan.argument_plan)
+        self.assertEqual(client.ask_json.call_count, 1)
+
+    def test_source_and_owner_binding_never_repairs_into_different_evidence(self):
+        memory, _, _ = self.adapt()
+        for changes in ({"section_heading": "Unknown section"}, {"evidence_handles": ["unknown"]}, {"metric_ids": ["invented"]}):
+            value = json.loads(json.dumps(self.response["argument_plan"]))
+            value["points"][0].update(changes)
+            with self.assertRaises(ValueError):
+                resolve_argument_plan(value, sections=memory.section_plan,
+                    evidence_handles=["source:a", "source:b"], metric_ids=[])
+
+    def test_heading_presentation_normalizes_without_semantic_guessing(self):
+        response = json.loads(json.dumps(self.response))
+        response['sections'][0]['heading'] = '## 2 Comparison'
+        response['argument_plan']['points'][0]['section_heading'] = '## 2   Comparison'
+        memory, client, _ = self.adapt(response)
+        self.assertEqual(client.ask_json.call_count, 1)
+        self.assertEqual(memory.document_plan.argument_plan.points[0].section_id, 'comparison')
+
+    def keyed_response(self):
+        response = json.loads(json.dumps(self.response))
+        for row, key in zip(response['sections'], ('comparison-key', 'interpretation-key', 'scope-key')):
+            row['section_key'] = key
+        point = response['argument_plan']['points'][0]
+        point.pop('section_heading')
+        point['section_key'] = 'comparison-key'
+        response['argument_plan'].pop('scope_section_heading')
+        response['argument_plan']['scope_section_key'] = 'scope-key'
+        return response
+
+    def test_literal_keys_separate_display_titles_from_argument_ownership(self):
+        response = self.keyed_response()
+        response['sections'][0]['heading'] = 'Evidence and its interpretation'
+        memory, client, _ = self.adapt(response)
+        self.assertEqual(client.ask_json.call_count, 1)
+        self.assertEqual(memory.document_plan.argument_plan.points[0].section_id, 'evidence_and_its_interpretation')
+        self.assertEqual(memory.document_plan.argument_plan.scope_section_id, 'scope')
+        self.assertNotIn('section_key', memory.document_plan.argument_plan.model_dump_json())
+        self.assertEqual(ReportMemory.model_validate(memory.model_dump()).document_plan, memory.document_plan)
+
+    def test_unknown_duplicate_bad_keys_or_conflicting_heading_never_guess_an_owner(self):
+        baseline = self.keyed_response()
+        for defect in ('unknown', 'duplicate', 'bad-type', 'space', 'heading-conflict', 'scope-conflict'):
+            with self.subTest(defect=defect):
+                response = json.loads(json.dumps(baseline))
+                if defect == 'unknown':
+                    response['argument_plan']['points'][0]['section_key'] = 'absent'
+                elif defect == 'duplicate':
+                    response['sections'][1]['section_key'] = 'comparison-key'
+                elif defect == 'bad-type':
+                    response['sections'][0]['section_key'] = []
+                elif defect == 'space':
+                    response['sections'][0]['section_key'] = 'comparison key'
+                elif defect == 'heading-conflict':
+                    response['argument_plan']['points'][0]['section_heading'] = 'Interpretation'
+                else:
+                    response['argument_plan']['scope_section_heading'] = 'Comparison'
+                memory, _, _ = self.adapt()
+                with self.assertRaises(ValueError):
+                    keys = outline_section_keys(response['sections'], memory.section_plan)
+                    resolve_argument_plan(response['argument_plan'], sections=memory.section_plan,
+                        evidence_handles=['source:a', 'source:b'], metric_ids=[], section_keys=keys)
+
+    def test_visual_keys_bind_to_the_same_canonical_section_and_keep_input_immutable(self):
+        response = self.keyed_response()
+        response['visual_intents'] = [{'kind': 'table', 'section_key': 'comparison-key',
+            'title': 'Measured trade-off', 'purpose': 'Compare outcomes', 'columns': ['A', 'B']}]
+        memory, _, template = self.adapt()
+        original = json.loads(json.dumps(response))
+        result = _validated_outline_delivery(response, sections=memory.section_plan, context=self.context,
+            memory=self.memory, config=self.config)
+        self.assertEqual(result[1]['visual_candidates'][0]['section_id'], 'comparison')
+        self.assertNotIn('section_key', result[1]['visual_candidates'][0])
+        self.assertEqual(response, original)
+        for owner in ('absent', ['bad']):
+            response['visual_intents'][0]['section_key'] = owner
+            with self.assertRaises(ValueError):
+                _validated_outline_delivery(response, sections=memory.section_plan, context=self.context,
+                    memory=self.memory, config=self.config)
+
+    def test_planning_correction_receives_the_actual_error_and_valid_owners(self):
+        response = json.loads(json.dumps(self.response))
+        response['argument_plan']['points'][0]['section_heading'] = 'No such heading'
+        client = Mock()
+        client.ask_json.side_effect = [response, self.response]
+        template = load_report_template_bundle(report_mode='experiment', config=self.config)
+        memory = _maybe_adapt_outline(client=client, context=self.context, template=template,
+            memory=self.memory, config=self.config, emit=None)
+        correction = client.ask_json.call_args_list[1].args[1]
+        self.assertIn('"validation_error"', correction)
+        self.assertIn('No such heading', correction)
+        self.assertIn('Comparison', correction)
+        parsed = json.loads(correction[correction.index('{'):])
+        self.assertEqual(parsed['rejected_response'], response)
+        self.assertIn('metric_id', parsed['retry_instruction'])
+        self.assertEqual(len(memory.section_plan), 3)
+
+    def test_unknown_metric_correction_identifies_bad_ids_without_guessing_replacements(self):
+        response = json.loads(json.dumps(self.response))
+        response['argument_plan']['points'][0]['metric_ids'] = ['coverage_display_name']
+        client = Mock()
+        client.ask_json.side_effect = [response, self.response]
+        template = load_report_template_bundle(report_mode='experiment', config=self.config)
+        _maybe_adapt_outline(client=client, context=self.context, template=template,
+            memory=self.memory, config=self.config, emit=None)
+        prompt = client.ask_json.call_args_list[1].args[1]
+        correction = json.loads(prompt[prompt.index('{'):])
+        self.assertIn('coverage_display_name', correction['validation_error'])
+        self.assertEqual(correction['rejected_response'], response)
+        self.assertEqual(client.ask_json.call_count, 2)
+
+    def test_comparisons_are_consumed_as_interpretations_not_proof(self):
+        memory, _, _ = self.adapt()
+        self.context.source_comparisons = [{"dimension": "coverage", "relation": "not_comparable"}]
+        view = narrative_context(memory, memory.section_plan[0], [], context=self.context, config=self.config)
+        self.assertEqual(view["source_comparisons"], self.context.source_comparisons)
+        self.assertEqual(view["comparison_status"]["independent_verification"], "not_performed")
+
+
+class EvidenceComparisonTests(unittest.TestCase):
+    def setUp(self):
+        self.pack = {"paper_cards": [{"paper_id": "p:a"}, {"paper_id": "p:b"}]}
+        self.row = {"dimension": "evaluation setting", "relation": "conditional_difference",
+            "evidence_refs": ["p:a", "p:b"], "observations": ["Different populations were measured"],
+            "conditions": ["Dataset shift"], "interpretation": "Not a direct performance comparison",
+            "unresolved_question": "No common-condition evaluation is available"}
+
+    def test_comparison_survives_shared_synthesis_handoff(self):
+        rows = _parse_evidence_comparisons([self.row], self.pack)
+        result = SynthesisResult(status="ready", gap_summary="", ideas=(), novelty_checks=(), comparisons=rows)
+        restored = SynthesisResult.from_handoff_dict(result.to_handoff_dict())
+        self.assertEqual(restored.comparisons, rows)
+        self.assertEqual(restored.to_dict()["comparison_count"], 1)
+        self.assertEqual(_parse_evidence_comparisons(None, self.pack), ())
+
+    def test_unknown_sources_are_not_accepted_as_a_conflict(self):
+        with self.assertRaises(LLMError):
+            _parse_evidence_comparisons([{**self.row, "evidence_refs": ["invented"]}], self.pack)
+        with self.assertRaises(LLMError):
+            _parse_evidence_comparisons([{**self.row, "relation": "verified"}], self.pack)
+
+    def test_comparison_prose_normalizes_without_changing_claim_and_error_names_the_actual_field(self):
+        result = _parse_evidence_comparisons([{**self.row, 'observations': 'One supported observation',
+            'conditions': 'One explicit condition'}], self.pack)
+        self.assertEqual(result[0]['observations'], ['One supported observation'])
+        self.assertEqual(result[0]['conditions'], ['One explicit condition'])
+        with self.assertRaisesRegex(LLMError, r'comparisons\[0\].conditions'):
+            _parse_evidence_comparisons([{**self.row, 'conditions': {'invented': 'field'}}], self.pack)
+        with self.assertRaisesRegex(LLMError, r'unknown IDs.*invented-section'):
+            _parse_evidence_comparisons([{**self.row, 'evidence_refs': ['invented-section']}], self.pack)
+        with self.assertRaisesRegex(LLMError, 'relation must be ONE string'):
+            _parse_evidence_comparisons([{**self.row, 'relation': ['agreement', 'conditional_difference']}], self.pack)
 
 
 if __name__ == "__main__":

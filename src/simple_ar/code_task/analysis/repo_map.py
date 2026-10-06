@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Iterable
@@ -20,6 +19,7 @@ from simple_ar.code_task.runtime.state import (
     code_task_paths,
     load_code_task_manifest,
     save_code_task_manifest,
+    utcnow_iso as _utcnow_iso,
 )
 
 
@@ -88,6 +88,7 @@ def build_repo_map(
         allowed_patterns=allowed,
         protected_patterns=protected,
     )
+    _attach_local_import_paths(index_files, files)
     symbols = _symbol_rows(index_files, files)
     repo_map = {
         "schema_version": 1,
@@ -322,6 +323,57 @@ def _file_rows(
         rows.append(row)
     rows.sort(key=lambda row: str(row["path"]))
     return rows
+
+
+def _attach_local_import_paths(index_files: list[dict[str, Any]], files: list[dict[str, Any]]) -> None:
+    """Resolve exact static references in root/src layouts, without importing.
+
+    Ambiguous modules are not guessed. These are reading candidates, not an
+    assertion about sys.path, dynamic imports, import success or edit authority.
+    Old indexes without precise references simply keep their old behavior.
+    """
+    modules: dict[str, set[str]] = defaultdict(set)
+    packages: dict[str, list[str]] = {}
+    for row in files:
+        path = PurePosixPath(row["path"])
+        if path.suffix != ".py":
+            continue
+        parts = list(path.with_suffix("").parts)
+        if len(parts) > 1 and parts[0] == "src":
+            parts = parts[1:]
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+            packages[row["path"]] = parts
+        else:
+            packages[row["path"]] = parts[:-1]
+        if parts and all(part.isidentifier() for part in parts):
+            modules[".".join(parts)].add(row["path"])
+    references = {row["path"]: row.get("python", {}).get("import_references", [])
+                  for row in index_files if isinstance(row.get("python"), dict)}
+    for row in files:
+        paths = []
+        for reference in references.get(row["path"], []):
+            level, module = reference["level"], reference["module"]
+            package = packages.get(row["path"], [])
+            if level:
+                if level > len(package):
+                    continue
+                prefix = package[:len(package) - level + 1]
+                module = ".".join([*prefix, *module.split(".")]) if module else ".".join(prefix)
+            choices = [module, *[f"{module}.{name}" for name in reference["names"]]]
+            for name in choices:
+                candidates = modules.get(name, set())
+                if level:
+                    # Relative imports have an anchored source layout even
+                    # when root and src contain competing absolute modules.
+                    candidates = {path for path in candidates
+                        if path.startswith("src/") == row["path"].startswith("src/")}
+                if len(candidates) == 1:
+                    target = next(iter(candidates))
+                    if target != row["path"] and target not in paths:
+                        paths.append(target)
+        if paths:
+            row["local_import_paths"] = paths
 
 
 def _symbol_rows(
@@ -699,7 +751,3 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if isinstance(item, str) and item]
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")

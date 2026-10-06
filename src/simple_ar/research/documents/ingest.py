@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
+from simple_ar.core.artifacts import read_json
 from simple_ar.literature.models import Paper
 from simple_ar.research.contracts import DocumentRecord, DocumentSection, SourcePlan, TextChunk
 from simple_ar.research.documents.extractors import apply_fulltext_extraction
@@ -91,6 +92,25 @@ class DocumentBundle:
                 else {}
             ),
         )
+
+
+def analysis_material_paths(paths: Iterable[Path]) -> tuple[Path, ...]:
+    """Recognize declared analysis packages, not every JSON writing material.
+
+    Ordinary JSON remains unverified source text. A declared table-analysis
+    family must still pass its existing loader; corrupt packages never fall
+    through into supposedly usable prose evidence.
+    """
+    from simple_ar.result_analysis.table import load_analysis_package
+    packages = []
+    for path in paths:
+        if path.suffix.lower() != ".json":
+            continue
+        payload = read_json(path)
+        if isinstance(payload, dict) and str(payload.get("schema_version", "")).startswith("table_analysis."):
+            load_analysis_package(path)
+            packages.append(path)
+    return tuple(packages)
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +217,8 @@ def run_document_ingest_capability(
     stable status mapping for downstream Read capabilities.
     """
 
-    analysis_paths = {str(path.resolve()) for path in request.analysis_paths}
+    packages = analysis_material_paths(request.analysis_paths)
+    analysis_paths = {str(path.resolve()) for path in packages}
     source_plan = replace(request.source_plan, local_documents=[path for path in request.source_plan.local_documents
                          if str(Path(path).resolve()) not in analysis_paths])
     bundle = build_document_bundle(
@@ -210,7 +231,7 @@ def run_document_ingest_capability(
         parser=request.parser,
     )
     imported = []
-    for index, path in enumerate(request.analysis_paths, start=1):
+    for index, path in enumerate(packages, start=1):
         from simple_ar.result_analysis.table import copy_analysis_package, table_markdown
         prefix = f"analyses/analysis-{index:03d}"
         result = copy_analysis_package(path, context.store.root / prefix)
@@ -223,14 +244,17 @@ def run_document_ingest_capability(
         bundle.records.append(DocumentRecord(document_id=document_id, title=f"Descriptive analysis: {result['source_name']}",
             source="local_analysis", source_id=str(path.resolve()), extraction_status="parsed", parser="table_analysis.v1",
             metadata={"table_analysis": {"artifact": artifact, "records": result["records"], "spec": result["spec"],
-                                        "row_count": result["row_count"], "figures": result["figures"]},
+                                        "row_count": result["row_count"], "figures": result["figures"],
+                                        "coordinate_summaries": result.get("coordinate_summaries", []),
+                                        "observation_summaries": result.get("observation_summaries", []),
+                                        "paired_comparisons": result.get("paired_comparisons", [])},
                       "evidence_role": "recomputed_from_user_supplied_data"}))
         bundle.sections.append(DocumentSection(section_id=f"{document_id}:results", document_id=document_id,
             section="results", heading="Rechecked descriptive data", text=text, source_path=f"{prefix}/analysis.md"))
         imported.extend(context.store.ref(item.relative_to(context.store.root), kind="table_analysis" if item.name == "analysis.json" else "analysis_attachment",
             schema="table_analysis.v1" if item.name == "analysis.json" else None)
             for item in (context.store.root / prefix).rglob("*") if item.is_file())
-    if request.analysis_paths:
+    if packages:
         bundle.chunks[:] = build_text_chunks(bundle.records, sections=bundle.sections, max_chunks=request.max_chunks)
     output = context.store.write_json(
         "document_bundle.json",
@@ -245,7 +269,7 @@ def run_document_ingest_capability(
         status = "blocked"
         diagnostics.append("No documents were available for ingest.")
     elif not bundle.chunks:
-        status = "partial"
+        status = "blocked"
         diagnostics.append("Ingest produced no text chunks.")
     elif failed_count:
         status = "partial"

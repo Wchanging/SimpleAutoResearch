@@ -24,6 +24,51 @@ from simple_ar.report.writing import ReportWritingRequest, run_report_writing_ca
 
 
 class ExperimentOutputTests(unittest.TestCase):
+    def test_small_json_object_overview_preserves_all_fields_including_late_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory))
+            payload = {'metrics': {f'metric_{i}': i / 100 for i in range(55)},
+                       'runtime': {'python': '3.12', 'device': 'cpu'}, 'nullable': None}
+            path = store.root / 'summary.json'
+            path.write_text(json.dumps(payload, indent=6), encoding='utf-8')
+            self.assertGreater(path.stat().st_size, 1200)
+            rows, _ = capture_outputs(store, store.root, {'summary': path.name})
+            view = rows[0]['preview']
+            self.assertEqual(json.loads(view['text']), payload)
+            self.assertFalse(view['truncated'])
+            self.assertEqual(view['next_offset'], len(path.read_text()))
+            self.assertEqual(view['view_kind'], 'complete_json_object_whitespace_compacted')
+            self.assertEqual(read_output_window(store.root, path)['text'], path.read_text()[:2400])
+
+    def test_overview_does_not_select_array_rows_or_collapse_duplicate_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory))
+            path = store.root / 'raw.json'
+            for text in (json.dumps([{'row': i} for i in range(200)], indent=2),
+                         '{"metric":1,"metric":2}', '{"metric":NaN}'):
+                path.write_text(text)
+                rows, _ = capture_outputs(store, store.root, {'raw': path.name})
+                self.assertEqual(rows[0]['preview']['text'], text[:1200])
+                self.assertNotIn('view_kind', rows[0]['preview'])
+
+    def test_large_object_overview_lists_late_fields_without_pretending_they_were_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory))
+            path = store.root / 'large.json'
+            payload = {'long_text': 'x' * 12000, 'runtime': {'python': '3.12'},
+                       **{f'field_{i}': i for i in range(80)}}
+            path.write_text(json.dumps(payload))
+            rows, _ = capture_outputs(store, store.root, {'large': path.name})
+            view = rows[0]['preview']
+            self.assertTrue(view['truncated'])
+            self.assertIn('runtime', view['object_fields'])
+            self.assertNotIn('3.12', view['text'])
+            self.assertEqual(view['object_fields_omitted'], 18)
+            self.assertEqual(view['structure_scope'], 'top_level_keys_only_not_field_contents')
+            runtime = read_output_window(store.root, path, query='"runtime"')
+            self.assertTrue(runtime['query_matched'])
+            self.assertIn('3.12', runtime['text'])
+
     def test_contract_rejects_escape_and_unbounded_file_lists(self):
         for value in ({"x": "../x"}, {"x": "/etc/passwd"}, {"x": "C:/x"},
                       {"x": "a\\x"}, {"x": "./x"}, {"x": "a//b"},
@@ -190,6 +235,26 @@ class ExperimentOutputTests(unittest.TestCase):
         self.assertEqual(view["output_evidence"][0]["artifact"], "attempts/experiment-2/outputs/raw.json")
         self.assertEqual(json.dumps(result), before)
         self.assertTrue(all(handle.kind == "experiment_output" for handle in _output_handles(qualified)))
+
+    def test_saved_measurement_preview_is_refreshed_read_only_for_current_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory))
+            ref = ArtifactRef('attempts/run/results.json')
+            output = store.resolve('attempts/run/outputs/summary.json')
+            output.parent.mkdir(parents=True)
+            output.write_text(json.dumps({'metrics': [0.1] * 100, 'runtime': {'python': '3.12'}}, indent=4))
+            result = {'output_evidence': [{'name': 'summary', 'status': 'available',
+                'artifact': 'outputs/summary.json', 'preview': {'text': 'old truncated', 'truncated': True}}]}
+            original = json.dumps(result)
+            context = ReportContext(topic='Reproduction', report_mode='experiment',
+                results={'output_evidence': _qualified_outputs(result, ref)})
+            context, _ = attach_experiment_history(context, ReportMemory(), [('current', ref, result)],
+                current_ref=ref, output_store=store)
+            evidence = report_execution_evidence(context)['output_evidence']
+            self.assertEqual(len(evidence), 1)
+            self.assertIn('3.12', evidence[0]['preview']['text'])
+            self.assertFalse(evidence[0]['preview']['truncated'])
+            self.assertEqual(json.dumps(result), original)
 
     def test_gateway_does_not_guess_paths_or_read_without_registration(self):
         context = ReportContext(topic="Measurements", report_mode="experiment", source_handles=_output_handles([{"handle": "output:registered", "status": "available", "artifact": "raw.json"}]))

@@ -1,0 +1,8 @@
+dataset,repeat,baseline,candidate
+A,1,10,8
+A,2,9,8
+A,3,11,9
+B,1,20,21
+B,2,18,21
+B,3,19,
+B,4,,20

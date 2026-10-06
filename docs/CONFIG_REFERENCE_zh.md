@@ -1,79 +1,95 @@
-﻿# 配置参考
+# 配置参考
 
 [English version](CONFIG_REFERENCE.md)
 
-首次使用从[引导设置](#引导设置)开始；完整字段表是可选专家参考。`.env` 保存全局连接，
-任务 TOML 保存案例输入和执行限制。阅读/修订范围及证据限制见[工作流](WORKFLOWS_zh.md)，
-不另增配置层；启用审阅不代表科学结论已核实。
+本文是任务配置字段参考。不需要专家设置时先看[使用指南](USAGE_zh.md)；命令见 [CLI](CLI_REFERENCE_zh.md)。
+
+## 引导设置
+
+`start` 保存普通研究 TOML，改码另引用 CodeTask TOML。对话和结构化入口共用序列化；设置草稿不是执行会话。
+
+| 设置 | 位置 |
+| --- | --- |
+| 服务连接、密钥 | 全局 `.env` |
+| 目标、输入、交付、资源限制 | 研究 TOML |
+| 编辑项目、保护、项目解释器 | 引用的 CodeTask TOML |
+
+优先级为默认值 → TOML → 明确 CLI；CLI 列表替换文件列表。路径按对应字段从配置位置解析，命令 argv 保持字面含义；对话不能暗改用户明确选择。
+
+改码 `--project-python PATH` 在 CodeTask 写入 `[environment] mode="external"` 和 `python="..."`，省略仍 current；只选择已有解释器，不安装依赖。
+
+复现 `--project` 用于只读准备和默认 cwd；`--data-path` 登记数据，`--output-files JSON` 写入 `execution.output_files`。不授权改码，也不从任意路径猜结果。
+
+单 Python 命令的可选依赖准备：
+
+```toml
+[execution.environment]
+mode = "venv"
+requirements = ["requirements.txt"] # 相对 execution.cwd
+install_project = false
+timeout_sec = 300
+# python_executable = "/path/to/base/python"
+```
+
+默认仍当前环境、不安装。准备共用进程额度与日志，失败不进入测量；构建可能执行代码和联网，不是 OS 沙箱或通用环境准备。见[工作流](WORKFLOWS_zh.md#明确选择的任务依赖准备)。
+
+来源访问中，`materials_only` 禁止在线检索；`--fulltext` 允许在线调研尽力获取远程全文。不可得或截断材料仍需说明。
 
 ## 已有材料写作
+
+字数和文体要求写在任务目标中，不放入额外环境变量。新自适应文章规划区分
+“约 1200 词”（软目标）与“1000–1200 词”（硬范围），不臆造容差、不把页数
+换算为词数，也不静默修改保存计划。目标用于指导组织，不意味着过短或内容不全
+也能交付；审阅仍检查原要求、证据和完整规范装配稿，不需要新增 TOML 字段。
 
 `start --kind writing --goal "说明已有结果和局限" --material notes.md --prepare-only`
 自动保存普通配置，不必先写 TOML。高级配置使用 `task.kind = "writing"`、
 `task.outputs = ["report"]`、`assets.materials = ["notes.md"]`、`model.name = "env"`。
 `assets.papers` 可另提供论文；不要把同一文件重复标成论文和笔记。
 材料路径相对配置文件解析，支持 Markdown、文本和 PDF。
-`assets.materials` 还可接受已完成的 `table_analysis.v1` `analysis.json`，同目录保留数据副本。
-沿用同一配置字段，不新增运行时：重新计算核对数值、生成原生 SVG，报告附可搬迁数据表与分析包。
-写作导入的 JSON/数据文件各限 20 MiB；缺项或数值不一致会在写作前失败。
+`assets.materials` 也接受普通 JSON 对象/数组，作为未独立验证的用户文本，不自动复算。
+JSON 语法错误会在引导保存前失败；声明 `table_analysis.*` 的文件必须通过既有加载器，
+不能因损坏而悄悄降为普通材料。已完成的 `table_analysis.v1` `analysis.json` 同目录保留数据副本。
+沿用同一配置字段，不新增运行时：重新计算核对数值、生成同源 SVG/PDF/PNG，报告附可搬迁数据表与分析包。
+分析包导入的 JSON/数据文件各限 20 MiB；缺项或数值不一致会在写作前失败。
 复算不证明采集或科学主张；原始表格应先使用 `data_analysis`，不能直接冒充分析包。
 
 默认 `report.template = "material_report"`，整理已有材料，不要求不存在的实验或失败目标；
 `"analysis_report"` 保留为目标未达成/不确定的实验分析，`"experiment"` 请求论文体草稿，而不授权实验。
 已保存的显式模板继续有效；已经开始写作的自动模板沿用原输入快照的解析结果，不因升级重选。
 引导写作默认开启 `report.document_review = true`。执行配置、在线搜索及研究创新不属于此任务。
+专家可加 `review_scope = "document"`，先完成多节正文，再沿原整稿审阅/修订执行，
+不强制先逐节重复审阅；必须同时开启 `document_review = true`。默认 `section` 保持旧顺序，
+单节稿仍审阅该节。检查点、证据工具和每节修订上限共用原机制，草稿不认证为已逐节审阅；
+已有任务通过明确的报告配置/刷新入口更改，不直接改检查点。
+联合起草独立于审阅时机。新引导的数据报告（`start --kind data_analysis --with-report`，
+也可由对话确认）明确生成下列两个范围；其他引导类型和已有配置保留默认值，专家可自行选择：
+
+```toml
+[report]
+document_review = true
+review_scope = "document"
+draft_scope = "document"
+```
+
+待写章节在一次请求中按冻结计划与共同证据组织，再沿原独立整稿审阅。
+要求默认的 `full` 来源策略，不兼容 `batch_refine`；默认 `draft_scope = "section"`
+仍分次起草，并保持旧默认检查点身份。原 `max_section_tokens` 是单次调用上限，
+正数会限制整次联合回答。完整章节集验证后保存在同一检查点，恢复已保存正文不重写。
+此显式模式的跨节修订也形成完整候选；先核验旧意见、再独立检查整稿，全部合格才一起采用，
+否则保留原各节。原 `max_review_iterations` 限制联合候选轮数；恢复保留已消耗的旧逐节轮数
+  与待完成的旧修订，不因升级获得新额度。候选及原修订请求保存在原迭代/检查点中。
+  `allow_source_backtracking = true` 时，联合 Writer 可在初次组织或每轮共同修订前请求
+  一批只读补证，受 `max_backtracking_calls` 与原六结果提示窗口约束，并与审阅共享
+  工具级总额度。请求/结果在读取前后保存，恢复不重放已分配读取；设为 false 也关闭
+  Writer 补读。不会新增在线检索、任意路径读取或执行权限。
+不自动选择长文策略，也不认证科学质量。
 提取后的文本随会话保存，恢复不重新读取修改过的原文件；更换材料应明确修订或新建任务。
 提供的结果仍是外部陈述，不能称为本次独立测量；缺证据和缺书目信息必须保留，审阅通过不保证论文正确。
 
 引导入口在线调研默认读取摘要和已提供的本地材料。加入 `--fulltext --sources search`
 才允许远程全文抓取/PDF 下载；仍沿用现有材料流水线，获取失败会记录，不能当成读过全文。
 本地材料模式不通过此选项开启网络。
-
-## 引导设置
-
-`simple-ar start` 支持 `survey`、`bug_fix`、准备好的 `reproduction` 和已有材料 `writing`，生成普通研究 TOML；代码任务额外生成
-CodeTask TOML 和任务说明。沿用默认值、TOML、显式 CLI 的覆盖关系，不新增配置体系。
-
-```bash
-simple-ar start --kind survey --goal "比较不确定性估计方法" --sources search --prepare-only
-```
-
-`--sources materials` 需要可重复的 `--document PATH`，禁止在线搜索。
-`bug_fix` 需要 `--project`、`--validate` 和可重复的 `--allow` 编辑范围；默认复制工作区、
-当前 Python、300 秒验证超时、一次修复，保护测试和 `.env`。复制不是 OS 沙箱，执行
-验证命令仍需授权；自定义环境、范围和时限可修改生成的 CodeTask TOML。
-
-固定协议复现需提供本地论文、要检查的结论、数据/条件偏离、判断标准及指标。
-环境、数据和命令必须已准备好；引导不会自动安装、发明方法或训练 baseline。例如：
-
-```bash
-simple-ar start --kind reproduction --goal "检查论文的覆盖率结论" \
-  --document paper.pdf --hypothesis "已知权重在协变量偏移下保持覆盖率" \
-  --dataset "已准备的合成适配数据" --expected-outcome "比较覆盖率与标称 0.9" \
-  --metric coverage --cwd ./prepared-project --timeout-sec 300 --prepare-only \
-  --command python run.py --seed 7
-```
-
-`--command` 必须放最后，其后全是进程参数，不是引导选项，也不经过 shell 解释。
-交互时用 JSON 参数列表输入命令。默认当前目录/环境、一次执行、300 秒时限，生成复现报告并
-进行全文审阅；API 累计额度仍不设限。`--metric` 可重复，第一项为主指标；命令必须按现有执行器
-支持的方式输出指标（例如 `coverage: 0.91`）。更复杂的结果格式、协议条件或明确增加资源额度，
-可在执行前编辑生成的 TOML。这是论文结论检查，不是自动准备环境或完整论文复现。
-
-输入保存到 `--output-root`（默认 `runs/assistant`）；资产路径为绝对路径，产物目录
-`sessions` 相对生成的研究 TOML 解析。设置过程不改原项目，不把凭据写进配置。
-API 总额仍默认无限制。
-
-`--prepare-only` 不调用模型/进程。`--yes` 只确认启动，执行期仍遵循 `--interaction`
-（默认 `checkpoints`）。非交互缺输入就报错，不挂住等待；最后拒绝执行会保留配置。
-开始执行后按打印的路径使用 `research-session --session-root PATH --model MODEL` 续跑，
-保留设置时选定的模型（默认 `env`），不要再次 `start` 创建新任务。
-数据分析引导保存 `model.name = ""`，其续跑命令省略 `--model`。
-
-研究任务使用 `simple-ar research-session --config PATH`。可直接从
-[综述案例](../examples/survey/README.md)开始；更多配置项在下文说明，不再作为额外案例混放。
-CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
-旧八阶段外层配置解析器及别名转换已经退出，历史快照仍可读取，但不是可执行工作流。
 
 ## 已有材料写作的章节规划
 
@@ -116,21 +132,59 @@ value_unit = "秒"
 ```
 
 `file` 相对 TOML 解析；`value_columns` 与非空 `observation_unit` 必填。
+可选 `attribution = "数据名称、版本、署名或公开URL"` 随固化分析包及后续写作保存。
+这是用户声明，不下载URL、不核验采集，也不虚构文献元数据；未知时直接省略，不是必填项。
 `group_column`、`value_unit` 默认空（不分组、单位未知）。可选：`mode = "observations"`
-计算 count/mean/sample std，或 `"values"` 保留汇总值并要求唯一标签；`missing = "reject"`
+将行聚合为组内 count/mean/sample std 与经验四分位数；`"values"` 保留输入值，柱图要求唯一标签，
+折线/散点则保留每个完整坐标对，包括原始个体观测。模式名表示转换操作，不表示数据是否
+属于观测研究。`missing = "reject"`
 或明确 `"omit"`；`width = "wide"` 或 `"column"`；物理限制 `max_mb = 20`、`max_figures = 100`
 为可调整正整数。缺失不填零，非有限/非数值报错；不自动造误差条，不作显著性/因果结论。
-任务只接受 `data_analysis` 输出，不接受执行或文献选项，不需要或使用模型配置。
-`plot` 默认 `"bar"`；`"line"`/`"scatter"` 要求 `mode = "values"` 和数值 `x_column`，
-不设置 `group_column`，`x_unit` 默认空（单位未知）；多个数值列分别绘图。
+任务必须输出 `data_analysis`，可加 `report`，不接受执行或联网调研。
+配置 `outputs = ["data_analysis", "report"]` 和 `[model].name = "env"` 可在同会话
+分析、绘图并写作，完成包进入已有材料写作和审计。报告可附带
+`[assets].materials = ["README.md"]` 数据说明/笔记及
+`[assets].papers = ["reference.pdf"]` 参考来源，仅接受本地文本/Markdown/HTML/PDF，
+不是第二份原始表格或分析 JSON。保存的原文和复算结果分开，说明不覆盖
+`[analysis]` 设置、不授权搜索。默认仅分析只读表格并忽略模型设置；
+加入报告需要模型，继续使用原会话预算，不另建写作任务。
+`plot` 默认 `"bar"`（均值）；`"box"` 要求逐行 observations，展示 Q1–Q3、中位数与
+实际 min–max 须线，不是置信区间或 Tukey 异常值界。四分位数按 `(n−1)p` 插值，
+全部有效观测参与，标签保留计数/遗漏，同一列各分页共用尺度。已有汇总值不能恢复
+四分位数；箱线图不接受坐标或 Pearson 选项。
+`"heatmap"` 要求 `mode = "values"` 和唯一行标签 `group_column`，所选列应表达用户
+声明的兼容量/单位。原值共用全局色标，行/列分页也相同；不隐式归一化、排序、聚类或
+计算相关。明确 `missing = "omit"` 时，缺失格保留灰色/NA，包括全缺失列；全缺失矩阵
+无法着色。`max_points` 计每页单元格（含缺失格），`max_figures` 计页数，不抽样。
+完整标签和原值进入分析包及后续写作；不接受坐标、Pearson、配对或共享坐标布局选项。
+
+`"line"`/`"scatter"` 要求 `mode = "values"` 和数值 `x_column`，
+可选 `group_column` 标识不同系列，不表示配对或重复测量聚合；`x_unit` 默认空（单位未知），多个数值列默认分别绘图。
 显式 `series_layout = "shared"` 可让折线/散点的所选系列共用坐标轴与图例，
 使用共同声明的 `value_unit`，不自动归一化，也不独立认证单位兼容。
 共享图将所有系列的位置计入 `max_points`，超出不丢系列；默认 `"separate"` 保持独立轴。
-折线要求 x 唯一并按 x 排序，缺失 y 断线；散点保留重复 x，不聚合、不拟合。
-即便 `missing = "omit"`，x 也必须完整。坐标图物理上限 `max_points = 10000` 为可调整正整数，
+折线要求每组内 x 唯一并按 x 排序，缺失 y 断线；散点保留重复 x，不聚合、不拟合。
+散点明确选择 `missing = "omit"` 时保留缺失坐标行，但不绘制对应位置；折线仍要求 x 完整。类别图例分页，不丢组，同一图的各组分页使用相同坐标尺度。坐标图物理上限 `max_points = 10000` 为可调整正整数，
 超出报错而非抽样。见[完整案例](../examples/data-curves/README.md)。
 新任务保存前按 `max_mb` 预检表格结构与所选列；正式摄入仍校验数值，续跑不重读原文件。
 摄入时固化原始字节与设置，续跑复用；更改列/聚合设置需新任务。产物与重建见[工作流](WORKFLOWS_zh.md)。
+
+需要同一行的配对比较时，设置 `paired_baseline = "baseline"`，在 `value_columns`
+同时选择基线与候选列。仅用于 `mode = "observations"`、`plot = "bar"` 或 `"box"`；用户需确认
+各列表示同一种量、共同单位，每行是一个匹配对，可另按类别分组。结果保留候选减基线
+的逐对差值、有效对数/缺失对数、平均差、样本标准差与标准误。`missing = "omit"`
+按两个值联合筛选，不对分别过滤后的均值相减。至少两对时差值图显示 ±1 标准误，
+假定各对独立；不是置信区间、显著性检验或“改进”判断。写作导入分析包会复算这些值。
+`plot = "box"` 将各方法的边际分布画在共同坐标范围内，配对均值差与标准误仍单独画图。
+边际分布使用各列自己的非缺失值，差值只使用完整匹配对。图形记录其实际表达的统计量；
+计算过标准差，不等于图上已经展示标准差或误差棒。
+
+若问题是两个数值的线性关联，而不是“候选减基线”，在显式 x/y 坐标的折线/散点任务中
+设 `association = "pearson"`；默认 `"none"` 不计算相关。各组/数值列只使用同一行共同
+非缺失坐标，不混池、不改变原点或图形。分析包和写作提供 r、完整/缺失对数及未定义原因；
+少于两对或常量坐标不造系数，两对非恒定数值的 r 必为 ±1。这不是回归、显著性、置信
+区间、因果或总体推断，小 r 也不排除非线性关系。坐标 `mode = "values"` 表示保留输入值，
+不认证每行是独立实验。不增加模型调用或依赖。
 
 ## 全局 `.env`
 
@@ -154,20 +208,26 @@ value_unit = "秒"
 
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
-| `[task]` | `goal`、`kind`、`outputs`、`output_root`、`selected_idea_id` | 新 session 必须有 `goal`。kind：默认 `auto`，或 `survey`、`bug_fix`、`measurement`、`reproduction`、`writing`、`data_analysis`。`measurement` 只输出 experiments；`reproduction` 含 experiments，可加 report；`writing` 只接受 report；`data_analysis` 只接受同名输出。其他输出：summary/report/experiments/bug_fix。`output_root` 默认 runs/research-session；可选 `selected_idea_id` 必须选已有、具有依据的候选。 |
+| `[task]` | `goal`、`kind`、`outputs`、`output_root`、`selected_idea_id` | 新 session 必须有 `goal`。kind：默认 `auto`，或 `survey`、`bug_fix`、`measurement`、`reproduction`、`writing`、`data_analysis`。`measurement` 只输出 experiments；`reproduction` 含 experiments，可加 report；`writing` 只接受 report；`data_analysis` 必须有同名输出，可加 report。其他输出：summary/report/experiments/bug_fix。`output_root` 默认 runs/research-session；可选 `selected_idea_id` 必须选已有、具有依据的候选。 |
 | `[model]` | `name`、`feasibility_review_model`、`max_output_tokens` | 文件配置默认 `name = "env"`，读取 `.env` 的 `SIMPLE_AR_MODEL`；`name = ""` 选择不调用 LLM 的确定性处理。可选 `feasibility_review_model` 仅让另一模型审核源码支持的实现可行性，仍使用同一服务商与会话预算；选择会随会话保存，恢复时不可更改。`max_output_tokens` 可省略；凭据始终留在环境中。 |
+| `[budget]` | `total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds` | 新 session 的 token/request 上限可省略（该维度不设框架上限）；进程值按任务形态在入口推导，要求执行时应显式设置。恢复沿用已存账本，不清零用量。 |
 
 独立可行性审查可在 CodeTask 或训练前质疑方案机制；它仍是模型判断，不能替代可执行的机制验证或改进证据。省略时由主模型审查；续接时可省略该字段以沿用存档选择。
-| `[budget]` | `total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds` | 新 session 的 token/request 上限可省略（该维度不设框架上限）；进程值按任务形态在入口推导，要求执行时应显式设置。恢复沿用已存账本，不清零用量。 |
 
 ### 研究输入与行为
 
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
-| `[research]` | `providers`、`queries`、`max_results`、`max_chunks`、`max_pdf_pages`、`read_max_shortlist`、`idea_limit`、`cache_dir` | 列表可省略；CLI 默认 `max_results = 10`、`max_chunks = 300`、`idea_limit = 3`。`max_pdf_pages` 是正整数，限制本地 PDF 最多提取页数（默认 `20`）；更改后应创建新会话，不能把已冻结的阅读证据当成新版本。`read_max_shortlist` 可选，显式提供的论文优先保留；若数量超过上限则显式报错。`cache_dir` 可选，未持久化，不能作为安全的恢复变更。 |
+| `[research]` | `providers`、`queries`、`max_results`、`max_chunks`、`max_pdf_pages`、`read_max_shortlist`、`idea_limit`、`cache_dir` | 列表可省略；CLI 默认 `max_results = 10`、`max_chunks = 300`、`idea_limit = 3`。不设置 `max_pdf_pages` 默认提取全部 PDF 页面；显式正整数限制提取页数并记录截断。更改后应创建新会话，不能把已冻结的阅读证据当成新版本。`read_max_shortlist` 可选，显式提供的论文优先保留；若数量超过上限则显式报错。`cache_dir` 可选，未持久化，不能作为安全的恢复变更。 |
 | `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`max_fulltext_documents`、`max_pdf_mb`、`materials_only` | 开关默认 false，可选上限默认不设。`materials_only = true` 使用本地输入（`assets.papers`，或写作的 `assets.materials`）并禁用 search，仍允许模型阅读；writing 始终仅用本地输入。引导入口的 `--fulltext --sources search` 会允许缓存 PDF，默认最多 4 份、每份 20 MiB；专家可在 TOML 中调整正整数上限。远程 PDF 需要下载许可与缓存许可；获取失败仍明确标注只读摘要或不可用。 |
 | `[research]` | `max_iterations`、`interaction` | `max_iterations` 默认 `1`，`0` 表示首轮分析后停止。`interaction` 新 CLI 默认 `checkpoints`，可选 `assisted`、`checkpoints`、`autonomous`；硬事实和权限缺口在任何模式下都是阻塞。 |
-| `[assets]` | `papers`、`materials` | 只读本地 Markdown/text/PDF 路径，相对 TOML 所在目录解析。`papers` 表示书目来源；`materials` 用于 `writing` 的草稿、笔记、外部结果说明或附有数据副本的完整 `table_analysis.v1` 分析包，不当成本次实测实验指标。写作至少需要一份输入，不接受重复文件或同一文件兼任两种角色。 |
+| `[assets]` | `papers`、`materials`、`data` | 路径相对 TOML 所在目录解析。`papers` 表示书目来源；`materials` 用于 `writing` 的草稿、笔记、外部结果说明或附有数据副本的完整 `table_analysis.v1` 分析包，不当成本次实测实验指标。写作至少需要一份输入，不接受重复文件或同一文件兼任两种角色。`data` 表示执行输入：隔离 CodeTask 准备复制声明的项目数据，直接/外部输入保持原位置；不核验论文划分或改写 argv。 |
+
+本地已有PDF也会尽力解析，即使关闭远程全文获取。省略页数上限提取全部页；
+观察到的总页/提取页、截断和空文本页会保留并传入下游。阅读窗口仍独立有界，
+全部提取不代表OCR或完整理解，旧无页覆盖记录不能追认。
+该页数上限由基础PDF解析器实现；可选unstructured后端无法执行显式PDF上限时会报错，
+不静默忽略用户限制。外部parser应声明自己观察到的覆盖。
 
 未知分区/字段和类型错误会显式拒绝。accepted plan 是短顺序计划，动作唯一且输入由
 能力适配函数绑定，不是任意模型调度器。只调研不会创建实验进程；`bug_fix` 必须提供
@@ -179,10 +239,19 @@ value_unit = "秒"
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
 | `[execution]` | `command`、`cwd`、`timeout_sec`、`code_task_config` | 选择一个执行边界：literal argv `command` 加已存在的绝对 `cwd`，或 CodeTask TOML 引用。只调研时两者都省略；`timeout_sec` 在 CLI/应用边界提供默认值。 |
+| `[execution.environment]` | `mode`、`requirements`、`install_project`、`python_executable`、`timeout_sec` | 可选的单命令任务虚拟环境：`mode = "venv"`；项目相对依赖文件列表默认空，`install_project` 默认 false，基础 Python 默认当前运行时，每步超时默认 300 秒。省略沿用当前环境；专家 TOML 须明确预留准备进程额度，引导入口会计入。 |
 | `[execution]` | `primary_metric`、`metrics`、`metric_directions` | 可选测量 schema；方向为 `higher`、`lower`、`resource` 或 `ignore`。 |
+| `[execution]` | `output_files` | 可选映射，最多八个附件名称，对应进程 `SIMPLE_AR_OUTPUT_DIR` 内的相对 POSIX 文件路径。仅登记每个不超过 2 MiB 的 UTF-8 普通文件，提供有界预览与读取句柄；缺失或不可读附件独立于执行成功状态记录。 |
 | `[execution]` | `pairs`、`seeds`、`seed_flag`、`seed_count` | 可选的显式比较输入。`pairs` 每行包含唯一整数 `seed` 与 literal `baseline_command`/`candidate_command`；compact seed 必须有 literal command 和显式 seed flag/count，不解析自然语言 seed。 |
 | `[execution]` | `baseline_policy`、`baseline_ref`、`protocol` | policy 为 `run`、`skip` 或 `reuse`；`reuse` 要求当前 session 中通过且命令、schema、协议条件、保护资产和准备 lineage 都匹配的产物。`protocol` 复用已有实验合同，但不证明数据内容。 |
-| `[report]` | `template`、`reviewer`、`max_review_iterations`、`document_review`、`max_section_tokens`、`max_cited_sources`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，CLI 修订次数默认 `1`。可选 `document_review = true` 增加有界整稿审查，最多选择两处，每处最多修订 `max_review_iterations` 次；被拒候选也计入额度，恢复不重置。整稿审查默认关闭。`max_section_tokens = 0` 取消单次输出上限；可选正整数 `max_cited_sources` 限制最终报告的不同引用数，不提前截断检索/阅读候选，超出则终审失败；省略即不设此上限。图表默认使用确定性图表，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
+| `[report]` | `template`、`reviewer`、`max_review_iterations`、`document_review`、`max_section_tokens`、`max_cited_sources`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，CLI 修订次数默认 `1`。可选 `document_review = true` 增加整稿审查：新论证计划可纠正冻结的各章节，旧计划保留两处目标；每处最多修订 `max_review_iterations` 次，被拒候选计入额度，恢复不重置。整稿审查默认关闭。`max_section_tokens = 0` 取消单次输出上限；正整数 `max_cited_sources` 限制最终不同引用数，不提前截断阅读池，超出在终审记录；省略即不设此上限。图表默认确定性生成，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
+| `[report]` | `max_document_review_prompt_chars` | 专家可选的完整审阅请求字符上限，默认 `0` 不添加隐藏的拼接请求限制。已有检索窗口、60,000 字符稿件窗口、模型容量及累计会话预算仍有效。正数上限拒绝超量审阅，不截断证据、不假称已经审完。 |
+
+`report.figures.max_figures = 0` 选择自动生成，不表示纯文字。自适应文章只生成
+计划中受支持且有证据的概念图，不为凑数量造图；已有用户图片可以与之共存。
+正整数是报告总上限，包含导入的分析图，超出明确失败而不丢弃用户数据。
+关闭生成用 `enabled = false` 或 `mode = "off"`。原生图是可编辑概念概览，
+不是任意机制插图或图像生成。
 
 单条固定命令只写 `seed_flag` 会记录当前 seed，但不授权增加新 seed。若希望先只运行 seed 0、以后允许按证据决定是否补测，可同时写 `seeds = [0]` 和 `seed_flag = "--seed"`；这不会默认多跑种子。补测仍须分析提出理由、运行同种子的 baseline/candidate 配对、通过剩余进程预算检查并由既定交互模式接受。
 
@@ -198,7 +267,8 @@ value_unit = "秒"
 综合来源证据、执行声明的命令、分析实测值，可选复现报告。要求 `research.materials_only = true`、
 `assets.papers`、`execution.command`，以及至少包含 `hypothesis`、`dataset`、`expected_outcome`
 的 `execution.protocol`；使用 `baseline_policy = "skip"` 和有限进程超时。
-它不提出创新、不改代码、不扩种子，也不自动安装或寻找缺失环境。配对对照和 CodeTask
+它不提出创新、不改代码、不扩种子，也不寻找缺失环境；依赖安装仅在明确选择上述
+`execution.environment` 虚拟环境设置后进行。配对对照和 CodeTask
 仍使用普通研究路径。报告使用 `template = "reproduction"`，明确区分原论文结果、改编检查和本地实测。
 完整低开销案例见 [conformal_reproduction](../examples/conformal_reproduction/README.md)。
 
@@ -334,6 +404,10 @@ CodeTask TOML 旧有的相对路径仍以运行时 cwd 为基准，不会被静�
 | `[edit_scope].mode` | 可选标签，写入 `manifest.json` 供审计使用；它本身不改变行为。 |
 | `[safety].max_file_bytes` | copy/sparse 模式最大复制文件大小，避免误复制大模型、数据或 checkpoint。 |
 | `[safety].validation_max_file_bytes` | 静态 validation 扫描文件大小上限。 |
+
+静态检查遵守 Python 源码编码规则。Git worktree 中，确认与记录的冻结提交字节一致的
+既有语法缺陷仍显示为警告；strict 模式不降级。新建/改坏文件与无法核实的基线仍报错。
+这不是测试目录豁免，也不代表运行或受保护验证成功。
 
 ### Execute 与 Budget 字段
 

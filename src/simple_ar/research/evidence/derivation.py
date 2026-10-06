@@ -11,7 +11,7 @@ from simple_ar.research.contracts import (
 )
 
 
-def build_gap_summary(pack: dict[str, Any]) -> str:
+def build_gap_summary(pack: dict[str, Any], *, require_execution: bool = True) -> str:
     """Render a conservative gap summary from the evidence package."""
     paper_cards = _list(pack.get("paper_cards"))
     claim_cards = _list(pack.get("claim_cards"))
@@ -35,7 +35,7 @@ def build_gap_summary(pack: dict[str, Any]) -> str:
         "## Observed Gaps",
         "",
     ]
-    gaps = _observed_gaps(pack)
+    gaps = _observed_gaps(pack, require_execution=require_execution)
     lines.extend(f"- {gap}" for gap in gaps)
     if limitations:
         lines.extend(["", "## Evidence Limitations", ""])
@@ -194,15 +194,15 @@ def build_experiment_contract(
     )
 
 
-def _observed_gaps(pack: dict[str, Any]) -> list[str]:
+def _observed_gaps(pack: dict[str, Any], *, require_execution: bool = True) -> list[str]:
     coverage = _dict(pack.get("coverage"))
     gaps = [f"Missing facet `{facet}` should be resolved before strong claims." for facet in _string_list(coverage.get("missing_facets"))]
     counts = _dict(pack.get("counts"))
     if int(counts.get("method_cards") or 0) == 0:
         gaps.append("Method structure is not well captured yet.")
-    if int(counts.get("dataset_cards") or 0) == 0:
+    if require_execution and int(counts.get("dataset_cards") or 0) == 0:
         gaps.append("Dataset and metric evidence is sparse.")
-    if int(counts.get("code_links") or 0) == 0:
+    if require_execution and int(counts.get("code_links") or 0) == 0:
         gaps.append("Runnable code links are not visible from the current evidence.")
     return gaps or ["No major deterministic gap was detected, but human review is still required."]
 

@@ -1,4 +1,4 @@
-﻿# Development Guide
+# Development Guide
 
 [中文版本](DEVELOPMENT_zh.md)
 
@@ -6,22 +6,52 @@ This document is for contributors who want to extend SimpleAutoResearch. For com
 
 ## Project Shape
 
-The console script and Python callers use `simple_ar.cli.main:main` (Python:
-`from simple_ar.cli.main import main`). Do not re-export that function as the
-same-named package attribute: importing the child module replaces it. After an
-entry-point change, reinstall with `uv sync --inexact` before using `--no-sync`.
-
 SimpleAutoResearch is file-first with persisted session state:
 
 - capabilities read and write concrete artifacts;
 - session state is visible in `session_manifest.json`, attempts, and `ArtifactRef` handoffs;
 - tests verify contracts/artifacts instead of hidden in-memory state;
-- risky code changes happen in isolated editable workspaces, usually a guarded
-  copy, optionally a detached git worktree, and experimentally a sparse copy.
+- code changes happen in isolated editable workspaces, not the original project.
 
-This keeps the project easier to learn, debug, and refactor.
+The main responsibilities are:
+
+```text
+src/simple_ar/
+  cli/              user input, configuration and command dispatch
+  app/              task coordination and next-action decisions
+  core/             sessions, attempts, artifacts, budgets and processes
+  research/         documents, reading, synthesis, design and analysis contracts
+  code_task/        project inspection, scoped edits, validation and repair
+  result_analysis/  deterministic table analysis and data figures
+  report/           writing, review, assembly, references, audit and export
+  integrations/     model and service adapters
+  agent_backends/   scoped handoff and backend interfaces
+```
+
+Use `simple_ar.cli.main:main` for the console entrypoint and
+`from simple_ar.cli.main import main` for Python callers. After an entrypoint
+change, reinstall before using `--no-sync`; do not recreate package-level forwarding
+that depends on child-module import order.
 
 ## Engineering Principles And Code Review Standard
+
+Code prompts share `scope.prompt_file_inventory`: all indexed paths retain their
+edit/evidence roles; detailed descriptions are limited to editable or selected
+files. `interfaces.source_snippet_views` merges matching adjacent/overlapping
+observations for prompt rendering and API extraction, never unread gaps or access
+roles. Complete coverage requires the known whole-file length; conflicting ranges
+remain separate. This is an immutable projection, not another source index/cache.
+Source inventories also prune directories with the standard `pyvenv.cfg`
+marker before traversal, rather than relying only on `.venv`/`venv` names. Task
+environments nested in a project must not become project source or setup context;
+an ordinary source folder named `environment` remains discoverable.
+
+`execution/repair` uses the same source-window reader and renderer. Traceback and
+static-validation lines precede current diff hunk anchors; at most two locations
+share the original per-file character allowance. Small files stay whole; stale
+coordinates fall back to an explicitly partial current view. Read-only evidence
+can inform a repair, but cannot acquire edit permission. Prior plans are hypotheses,
+not mandatory diagnoses. This improves information supply, not proof of correct repair.
 
 The primary principle is: **provide a reliable path for the current real task; preserve evidence and continue reasoning when the research is uncertain; block only when an explicit execution boundary is reached.**
 
@@ -33,6 +63,13 @@ SimpleAutoResearch must avoid two forms of drift: adding general architecture wi
 2. **The normal path should be readable.** A reader should be able to follow the path from research input to the next action through a small number of application functions. Use the existing capability registry for explicit capability boundaries, but do not register every internal helper or route an ordinary call through layers of factories, managers, gateways, and adapters merely for replaceability.
 3. **Reuse concrete code before extracting an abstraction.** Extract a shared function when two behaviors are genuinely the same; allow a little duplication when they only look similar. Abstractions should come from an observed common need, not every imagined future implementation. Before converging the CodeTask bridge and independent entrypoint, compare defaults, authorization, and failure semantics rather than only renaming functions.
 4. **Every configuration option needs a real use case.** Do not add a switch for every `if`, or require users to understand internal stages to run a task. Make budgets, edit scope, and research objectives explicit when they affect user decisions; use sensible defaults for internal choices.
+
+Prefer the standard library, then an existing dependency, before adding a new
+library. State the concrete consumer, which custom implementation it replaces,
+behavior/serialization compatibility, license and installation cost. Declare
+direct dependencies explicitly; do not quietly rely on a transitive dependency.
+Developer tools need not become runtime dependencies. A mature library is useful
+when it removes maintenance responsibility, not merely a few lines of code.
 
 ### Contracts, Truthfulness, And Errors
 
@@ -175,11 +212,20 @@ retirement; shared projections alone do not establish one execution owner.
 ## Ownership Map
 
 CLI/TOML input validation belongs to `cli.research_config.validate_session_arguments`;
-the application owns action dispatch, execution decisions and persistence. Ordinary
+report option projection belongs to `report_settings` in the same module, using
+the existing `FIELDS["report"]` mapping for creation and explicit resume overrides.
+Omitted resume options do not overwrite saved values; explicit false, zero and
+empty mappings are retained. Template selection remains task policy in the CLI.
+The application owns action dispatch, execution decisions and persistence. Ordinary
 action handlers remain in that same owner. Bounded report prompt views belong to
 `report.narrative`, not a second report memory. Editable-context selection belongs
 to `code_task.editing.scope` and is shared by initial edits and repair. Moving pure
 views does not authorize changing checkpoint, budget or adopted-draft semantics.
+
+Reading lookup context is owned by `research.evidence.reader.reading_followup_context`.
+Synthesis consumes the adopted note, its original lookup passages and remaining
+questions, not nested superseded notes. Full diagnostic history stays in the
+Read artifact; report projection shares the same lookup view without copying it.
 
 Use this map when deciding where a change belongs. The stable entry is the
 small public boundary a new caller may depend on; the final column is equally
@@ -365,10 +411,8 @@ Results and deterministic analysis are separate persisted attempts. Failed
 executions retain their status and can still deliver diagnostic analysis; a
 completed application means requested artifacts exist, not that the experiment
 succeeded. Saved physical results are reused after reload, including interruption
-between attempt finalization and application-reference persistence. Protocol
-complete asset protection and the real Linux/CUDA acceptance remain pending; the
-report lifecycle is connected but its live semantic quality still needs
-user-scale validation.
+between attempt finalization and application-reference persistence. Named asset checks and report lifecycle behavior are described below;
+workflow completion does not certify scientific validity or prose quality.
 
 Execution configuration also accepts `protocol`, using the existing
 `ResearchExperimentContract`: `protocol_revision`, `dataset_refs`, `split_spec`,
@@ -564,8 +608,7 @@ streamed and is not included in the child-process wall-time budget.
 
 New application sessions also persist a session-level `BudgetLedger` and its
 manifest reference. A standard `LLMClient` passed to the application is copied
-with that ledger attached, while the broader CodeTask/Writer/client-factory
-convergence remains a later migration step.
+with that ledger attached, without introducing a separate accounting path.
 
 `SessionController.mutation_scope()` is the public grouping boundary for an
 application mutation. It keeps a capability result, its state reference, and
@@ -743,7 +786,8 @@ re-fetching or duplicating it into another stage artifact.
 
 `research.evidence.reader.ReadRequest` accepts a `DocumentBundle` and optional
 document or paper identifiers. `read_documents()` returns typed evidence cards
-and diagnostics without calling an LLM or writing files. The existing
+and diagnostics without writing files. It is deterministic by default; explicit
+`use_llm=True` with a client enables bounded screening, notes and gap reading. The existing
 `write_read_card_artifacts()` function remains a compatibility projection over
 that boundary, so stage artifact paths and legacy callers stay unchanged.
 For a session-owned attempt, `run_read_capability()` persists the same cards and
@@ -760,8 +804,20 @@ content revision, exact location, extraction status, target text, and real
 same-document neighboring context. Unknown IDs are errors; an adjacent chunk
 is never used as a substitute for a missing target.
 Read handoffs consume this projection for `source_spans`, excluding raw text
-so the document bundle remains the source of truth. Per-paper context coverage
-and tracking exactly which chunks reached the model remain P05a follow-up work.
+so the document bundle remains the source of truth. Model notes retain bounded
+overview coverage, gap queries and returned source windows, not a full-reading certificate.
+Mixed-case lettered appendices are split from references when freshly parsing
+retained text; prose cross-references/citation initials are not headings. Shared
+`research.store.retrieval` ranks body terms and retained section headings for
+navigation, and selects exact windows using nearby distinct terms with word/number
+boundaries. Explicit captions, headings and phrases remain navigation cues, not
+support judgments. Old bundles/notes are immutable; reparsing creates new artifacts,
+and better lexical access does not establish source identity or semantic correctness.
+Basic PDF parsing defaults to all pages; an explicit positive page limit remains
+authoritative. Optional `ParsedDocument.coverage` feeds existing record/extraction
+metadata, Reader diagnostics and Writer limits. A successful parse can still be
+partial or have empty-text pages. External two-argument parsers and historical
+bundles keep unknown coverage; no second state model or inferred retroactive proof.
 
 ### Reusing The Synthesis Boundary
 
@@ -1166,8 +1222,14 @@ Use the docs this way:
 - `docs/CONFIG_REFERENCE.md`: TOML schema and configuration examples.
 - `docs/WORKFLOWS.md`: what each workflow/stage does and what files it produces.
 - `docs/DEVELOPMENT.md`: contributor guidance.
-- `CHANGELOG.md`: chronological development progress.
+- `CHANGELOG.md`: dated, user-visible changes and compatibility notes in reverse chronological order.
 - `MDfiles/`: private or learning-heavy planning notes, usually ignored from GitHub.
+
+Update the relevant section in its existing style instead of appending a progress note.
+Keep commands, worked examples and interface contracts where readers need them;
+conciseness alone is not a reason to remove them. CHANGELOG has one heading per date,
+with related changes merged under that date. Internal debugging and acceptance details
+belong in maintainer records. Keep English and Chinese instructions aligned.
 
 ## Tests
 
@@ -1176,6 +1238,8 @@ Use layered checks during development:
 ```bash
 uv run simple-ar-checks --list
 uv run simple-ar-checks quick
+uv run simple-ar-checks intake
+uv run simple-ar-checks data
 uv run simple-ar-checks code-task
 uv run --extra examples simple-ar-checks pipeline
 uv run simple-ar-checks research
@@ -1203,6 +1267,8 @@ Recommended validation layers:
 | Intake, application state, candidate assessment | `uv run simple-ar-checks application`. |
 | LLM transport and accounting | `uv run simple-ar-checks llm`. |
 | Report changes only | `uv run simple-ar-checks report`. |
+| Guided/chat setup and shared CLI/TOML inputs | `uv run simple-ar-checks intake`. |
+| Table analysis, figures and writing handoff | `uv run simple-ar-checks data`. |
 | Local process control and execution results | `uv run --extra examples simple-ar-checks execution`. |
 | Shared-interface/architecture checkpoint or release candidate | `uv run --extra examples simple-ar-checks all`. |
 
@@ -1211,6 +1277,30 @@ Combining check groups deduplicates modules; `all` supersedes other groups.
 Do not rerun the full suite merely because a commit is being made. Preserve
 useful regression tests; remove one when its behavior is obsolete or demonstrably
 covered by another retained test. A green mock suite does not replace real execution.
+
+Groups are smoke selections, not exhaustive coverage of a domain. Run a changed
+module directly, for example `uv run python -m unittest tests.test_report_source_backtracking`.
+The `code-task` group covers execution in `test_code_task` and context selection,
+named windows, review and repair consumers in `test_code_source_views`. Keep
+these context scenarios together rather than creating a module per retrieval
+fix. Execution scenarios share a temporary-root fixture, not task policy.
+Whole-document drafting, review and joint revision belong to
+`test_report_document_first`; adopted-note history and persisted input identity
+belong to `test_report_checkpoints`. Keep their scenario-specific clients and
+assertions explicit; do not add a module for each corrective iteration.
+Data tests separate responsibilities: `test_table_analysis` owns the five-plot
+CLI/freeze/recovery/relocation/import lifecycle and distribution-package checks; `test_table_figures` owns
+distributions, matrices and exports; `test_coordinate_figures` owns coordinate
+and grouped-series behavior, association evidence and recovery; `test_report_data_delivery` owns writing projection.
+Do not repeat a complete CLI fixture for each new plot. The product follows the
+same boundary: `table._write_analysis_delivery` emits packages for analysis,
+writing imports and explicit rebuild; validation and completed recovery stay separate.
+Shared fixtures belong to the `tests` package; neither named tests nor full
+discovery should require adding `tests/` to `PYTHONPATH`. Discovery uses
+`python -m unittest discover -s tests -t .`. Prefer outcome and side-effect
+assertions to exact private call counts or wording. For optional static cleanup,
+use `uvx ruff check src/simple_ar tests --select F401,F811` and review each finding;
+do not auto-delete public re-exports or imports with required side effects.
 
 Experiment and CodeTask use `core/process.py` for bounded output capture and
 process lifetime. Each stream keeps a 200 KB memory tail and, when an output

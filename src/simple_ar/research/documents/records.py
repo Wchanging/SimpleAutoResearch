@@ -8,9 +8,8 @@ from typing import Any
 from simple_ar.literature.models import Paper, normalize_paper_id
 from simple_ar.research.contracts import DocumentRecord, ExtractionStatus, SourcePlan
 from simple_ar.research.documents.fulltext import fulltext_hints_for_paper
-
-
-TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
+from simple_ar.research.documents.ports import MATERIAL_TEXT_SUFFIXES, HTML_SUFFIXES
+from simple_ar.research.documents.sections import abstract_excerpt as _abstract
 
 
 def build_document_records(
@@ -28,7 +27,7 @@ def build_document_records(
     Returns:
         Deduplicated document records. Metadata records are always preserved; local
         Markdown/text inputs are parsed into inspectable document records when
-        available. Supplied PDFs are passed to the bounded extraction stage so
+        available. Supplied HTML/PDF uses the bounded extraction stage so
         parsing succeeds or fails once with an inspectable manifest row.
     """
     records: list[DocumentRecord] = []
@@ -59,7 +58,7 @@ def build_cache_manifest(
         "source_counts": dict(sorted(source_counts.items())),
         "notes": [
             "Metadata records are stored without downloading restricted full text.",
-            "Local Markdown/text files are parsed locally; supplied PDFs use bounded best-effort parsing.",
+            "Local Markdown/text is read locally; supplied HTML/PDF uses bounded best-effort extraction.",
         ],
     }
 
@@ -105,7 +104,7 @@ def _record_from_local_path(path: Path) -> DocumentRecord:
             parser="local_file",
             metadata={"error": "file_not_found"},
         )
-    if suffix in TEXT_SUFFIXES:
+    if suffix in MATERIAL_TEXT_SUFFIXES:
         text = _read_text(path)
         return DocumentRecord(
             **base,
@@ -115,8 +114,8 @@ def _record_from_local_path(path: Path) -> DocumentRecord:
             parser="plain_text",
             metadata={"suffix": suffix, "bytes": path.stat().st_size},
         )
-    if suffix == ".pdf":
-        return _record_from_pdf(path, base=base)
+    if suffix == ".pdf" or suffix in HTML_SUFFIXES:
+        return _record_from_formatted_path(path, base=base)
     return DocumentRecord(
         **base,
         content_hash=_sha256(path),
@@ -126,15 +125,15 @@ def _record_from_local_path(path: Path) -> DocumentRecord:
     )
 
 
-def _record_from_pdf(path: Path, *, base: dict[str, Any]) -> DocumentRecord:
-    # The extraction stage parses this once and records parser failures. A
-    # supplied PDF does not require permission to download remote full text.
+def _record_from_formatted_path(path: Path, *, base: dict[str, Any]) -> DocumentRecord:
+    # Extraction parses once and records failures. Supplied HTML/PDF does not
+    # require remote full-text download permission.
     return DocumentRecord(
         **base,
         content_hash=_sha256(path),
         extraction_status="metadata_only",
-        parser="pdf_pending",
-        metadata={"suffix": ".pdf", "bytes": path.stat().st_size},
+        parser=path.suffix.lower().lstrip('.') + "_pending",
+        metadata={"suffix": path.suffix.lower(), "bytes": path.stat().st_size},
     )
 
 
@@ -173,13 +172,6 @@ def _read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace")
 
 
-def _abstract(text: str, *, limit: int = 1200) -> str:
-    return " ".join(text.split())[:limit]
-
-
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(handle, "sha256").hexdigest()

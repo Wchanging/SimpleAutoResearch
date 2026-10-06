@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from simple_ar.report.retrieval import ReportSourceResolver, rank_source_chunks
-from simple_ar.research.store.retrieval import order_source_chunks, source_chunk_views as _chunk_views
+from simple_ar.report.retrieval import ReportSourceResolver
+from simple_ar.research.store.retrieval import order_source_chunks, rank_source_chunks, source_chunk_views as _chunk_views
 from simple_ar.research.documents.ingest import DocumentBundle
-from simple_ar.report.schema import ReportContext, ReportToolCall, ReportToolResult, ReportToolSpec, SourceHandle
+from simple_ar.report.schema import ReportContext, ReportIterationRecord, ReportToolCall, ReportToolResult, ReportToolSpec, SourceHandle
 from simple_ar.report.tools import (
     GetCodeTaskResultArgs,
     GetMetricSourceArgs,
@@ -17,17 +17,46 @@ from simple_ar.report.tools import (
 )
 
 
+def checkpointed_report_reads(
+    gateway: ReportToolGateway, requests: list[ReportToolCall], event: ReportIterationRecord,
+    all_results: list[ReportToolResult], checkpoint: Callable[[], None],
+) -> None:
+    """One read-allocation owner for Writer and Reviewer; recovery never replays.
+
+    An allocated but unconfirmed result stays explicitly unavailable rather
+    than becoming evidence or a fresh tool allowance after interruption.
+    """
+    for index, request in enumerate(requests):
+        if index < len(event.tool_results):
+            continue
+        pending = ReportToolResult(tool_name=request.tool_name, status="blocked",
+            summary="Read allocated before checkpoint; no confirmed result was saved. This is not source evidence.",
+            metadata={"request": request.model_dump(mode="json"), "lookup_state": "allocated"})
+        result_index = len(all_results)
+        event.tool_results.append(pending)
+        all_results.append(pending)
+        checkpoint()
+        result = gateway.call(request)
+        event.tool_results[index] = result
+        all_results[result_index] = result
+        checkpoint()
+
+
 class ReportToolGateway:
     """Local report tool executor with OpenAI-style schema export."""
 
     def __init__(self, context: ReportContext, *, documents: DocumentBundle | None = None,
                  output_reader: Callable[[str, int, int, str, dict], dict] | None = None) -> None:
-        self.context = context
-        self.resolver = ReportSourceResolver(context)
+        self.set_context(context)
         self.specs = {spec.name: spec for spec in report_tool_specs()}
         self.call_counts = {name: 0 for name in self.specs}
         self.documents = documents
         self.output_reader = output_reader
+
+    def set_context(self, context: ReportContext) -> None:
+        """Reproject accepted citation fields without resetting tool allowance."""
+        self.context = context
+        self.resolver = ReportSourceResolver(context)
 
     def list_specs(self) -> list[ReportToolSpec]:
         """Return tool specs."""

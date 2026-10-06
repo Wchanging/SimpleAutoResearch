@@ -16,8 +16,6 @@ from simple_ar.app.research_execution import (
     merge_execution_protocol,
     normalize_execution_config,
 )
-from simple_ar.code_task import initialize_code_task
-from simple_ar.code_task.runtime.state import code_task_paths
 from simple_ar.integrations.llm import LLMClient, LLMSettings
 from simple_ar.research.task_plan import (
     TaskPlanResult,
@@ -32,6 +30,47 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class TaskPlanTests(unittest.TestCase):
+    def test_default_delivery_omits_unrequested_summary_but_keeps_saved_plans(self):
+        request = TaskPlanRequest(task_kind="survey", goal="Compare sources", request_text="Compare sources",
+            requested_outputs=("report",), config={"research_materials_only": True, "research_local_documents": ["notes.md"]})
+        report_plan = build_task_plan(request)
+        self.assertEqual([step.action for step in report_plan.steps],
+            ["document_ingest", "report_write", "report", "report_audit"])
+        for outputs in ((), ("research_summary",), ("report", "summary")):
+            with self.subTest(outputs=outputs):
+                old_plan = build_task_plan(replace(request, requested_outputs=outputs))
+                self.assertIn("summarize", [step.action for step in old_plan.steps])
+                # Recovery reads its accepted route; it does not recompile newer defaults.
+                self.assertEqual(TaskPlanResult.from_handoff_dict(old_plan.to_handoff_dict()), old_plan)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'notes.md'
+            source.write_text('# Methods\nTwo methods use distinct conditions.\n# Limits\nNo local measurements were requested.\n')
+            brief = ResearchBrief(request_text=request.request_text, requested_outputs=('report',),
+                asset_requests=({'locator': str(source), 'kind': 'file', 'role': 'paper'},))
+            app = create_session(brief, root=root / 'session', services=ResearchApplicationServices(config={
+                **request.config, 'research_local_documents': [str(source)], 'research_task_kind': 'survey'}))
+            view = app.advance(max_actions=20)
+            # No model is supplied: real evidence preparation ends at Writer,
+            # without inventing an offline paper or an unrequested summary.
+            self.assertEqual(view.status, 'paused', view.status_reason)
+            self.assertEqual(view.next_action, 'report_write')
+            self.assertIn('LLM client', view.status_reason)
+            self.assertNotIn('read', view.state_refs)
+            self.assertNotIn('synthesis', view.state_refs)
+            self.assertNotIn('summary', view.state_refs)
+            context, memory = app.report_inputs()
+            self.assertEqual(context.report_mode, 'supplied_materials')
+            self.assertEqual(context.synthesis_markdown, '')
+            self.assertEqual(context.metric_sources, [])
+            self.assertTrue(memory.source_handles)
+            self.assertEqual(context.source_handles[0].artifact, view.state_refs['documents'].path)
+            self.assertFalse((root / 'session/outputs/research_summary.md').exists())
+            self.assertNotIn('summarize', [row['action'] for row in view.work_plan['steps']])
+            before = app.controller.manifest.to_dict()
+            app.advance(max_actions=20)
+            self.assertEqual(app.controller.manifest.to_dict(), before)
+
     def test_material_writing_plan_requires_no_fake_synthesis_or_execution(self):
         request = TaskPlanRequest(task_kind="writing", goal="Write from existing results", request_text="Write from existing results",
             requested_outputs=("report",), config={"research_materials_only": True, "research_local_documents": ["notes.md"]})
@@ -546,6 +585,39 @@ class TaskPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires supplied local documents"):
             build_task_plan(replace(missing, use_llm=True, llm_client=client))
         self.assertEqual(client.calls, 0)
+
+        # The same compiler binds report inputs to real documents. Optional
+        # notes still have their own dependencies; explicit old plans survive.
+        class ReportClient:
+            def __init__(self, actions):
+                self.actions = actions
+
+            def ask_json(self, *_args, **_kwargs):
+                return {"steps": [{"action": action} for action in self.actions]}
+
+        for kind in ("survey", "research"):
+            for outputs in (("report",), ("paper",), ("full_paper",)):
+                report = replace(supplied, task_kind=kind, requested_outputs=outputs, execution=None)
+                for optional in ([], ["read"], ["synthesize"]):
+                    with self.subTest(kind=kind, outputs=outputs, optional=optional):
+                        trace = []
+                        plan = build_task_plan(replace(report, use_llm=True,
+                            llm_client=ReportClient(optional + ["report_audit"])), trace=trace)
+                        actions = [step.action for step in plan.steps]
+                        self.assertEqual(actions[0], "document_ingest")
+                        self.assertEqual("read" in actions, bool(optional))
+                        self.assertEqual("synthesize" in actions, "synthesize" in optional)
+                        self.assertNotIn("search", actions)
+                        self.assertEqual(TaskPlanResult.from_handoff_dict(plan.to_handoff_dict()), plan)
+                for changes in ({"intents": ("assessment",)}, {"requested_outputs": ("report", "summary")}):
+                    with self.subTest(changes=changes):
+                        plan = build_task_plan(replace(report, **changes))
+                        self.assertIn("synthesize", [step.action for step in plan.steps])
+                for invalid in (["report_write", "document_ingest", "report", "report_audit"],
+                                ["document_ingest", "report_write", "read", "report", "report_audit"],
+                                ["document_ingest", "read", "report_write", "synthesize", "report", "report_audit"]):
+                    with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "missing prerequisite"):
+                        build_task_plan(replace(report, use_llm=True, llm_client=ReportClient(invalid)))
 
     def test_compiler_does_not_reorder_explicit_steps_or_deliver_before_design(self) -> None:
         request = TaskPlanRequest(

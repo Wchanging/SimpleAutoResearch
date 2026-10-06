@@ -18,7 +18,7 @@ from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, Capabili
 from simple_ar.literature.bibtex import papers_to_bibtex
 from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import CitationError, validate_citations
-from simple_ar.report.assembler import apply_section_numbering, assemble_report_sections
+from simple_ar.report.assembler import apply_section_numbering, assemble_report_sections, split_report_references
 from simple_ar.report.citations import (
     append_references_section,
     cited_papers,
@@ -65,7 +65,14 @@ class ReportAssemblyRequest:
     def __post_init__(self) -> None:
         if not self.title.strip():
             raise ValueError("ReportAssemblyRequest.title cannot be empty.")
-        object.__setattr__(self, "sections", tuple(self.sections))
+        object.__setattr__(self, "sections", tuple(
+            section if isinstance(section, ReportSectionDraft) else ReportSectionDraft.model_validate(section)
+            for section in self.sections
+        ))
+        if not isinstance(self.config, ReportRuntimeConfig):
+            object.__setattr__(self, "config", ReportRuntimeConfig.model_validate(self.config))
+        if self.document_plan is not None and not isinstance(self.document_plan, ReportDocumentPlan):
+            object.__setattr__(self, "document_plan", ReportDocumentPlan.model_validate(self.document_plan))
         object.__setattr__(self, "papers", tuple(dict(paper) for paper in self.papers))
         object.__setattr__(self, "citation_key_map", dict(self.citation_key_map))
         object.__setattr__(self, "analysis_handles", dict(self.analysis_handles))
@@ -84,6 +91,12 @@ class ReportAssemblyResult:
     report_body_markdown: str = ""
     figures: tuple[ReportFigureRecord, ...] = ()
     removed_citations: tuple[str, ...] = ()
+    citation_numbers: Mapping[str, int] = field(default_factory=dict)
+
+    @property
+    def references_markdown(self) -> str:
+        """Read the actual displayed bibliography, without regenerating it."""
+        return split_report_references(self.report_markdown)[1]
 
 
 def assemble_report_document(
@@ -111,9 +124,8 @@ def assemble_report_document(
     # Keep figures in the citation-key body shared by Markdown, audit, and
     # downstream exports instead of leaving them only in the display report.
     report_body = rendered.report_markdown
-    return ReportAssemblyResult(
-        report_markdown=_display_report_text(report_body, cited, config, request.template_name),
-        report_body_markdown=report_body,
+    return replace(
+        _display_report_text(report_body, cited, config, request.template_name),
         figures=tuple(rendered.figures),
         removed_citations=tuple(removed_citations),
     )
@@ -127,9 +139,9 @@ def preview_report_document(request: ReportAssemblyRequest) -> ReportAssemblyRes
     output, attachment rechecks or the scientific validity of the content.
     """
     body, cited, removed, config, _ = _prepare_assembly_text(request)
-    return ReportAssemblyResult(
-        report_markdown=_display_report_text(body, cited, config, request.template_name),
-        report_body_markdown=body, removed_citations=tuple(removed),
+    return replace(
+        _display_report_text(body, cited, config, request.template_name),
+        removed_citations=tuple(removed),
     )
 
 
@@ -141,29 +153,11 @@ def _prepare_assembly_text(
     if request.table_analyses:
         raise ValueError("Analysis packages require run_report_capability with registered inputs.")
 
-    sections = tuple(
-        section
-        if isinstance(section, ReportSectionDraft)
-        else ReportSectionDraft.model_validate(section)
-        for section in request.sections
-    )
+    sections = request.sections
     if not sections or not any(section.draft_markdown.strip() for section in sections):
         raise ValueError("Report assembly requires at least one non-empty section draft.")
 
-    config = (
-        request.config
-        if isinstance(request.config, ReportRuntimeConfig)
-        else ReportRuntimeConfig.model_validate(request.config)
-    )
-    document_plan = (
-        request.document_plan
-        if isinstance(request.document_plan, ReportDocumentPlan)
-        else (
-            ReportDocumentPlan.model_validate(request.document_plan)
-            if request.document_plan is not None
-            else None
-        )
-    )
+    config, document_plan = request.config, request.document_plan
     if request.experiment_context is not None:
         from simple_ar.report.projection import _append_verified_experiment_evidence
         sections = _append_verified_experiment_evidence(sections, request.experiment_context, config)
@@ -181,7 +175,7 @@ def _prepare_assembly_text(
     return report_body, cited, removed_citations, config, document_plan
 
 
-def _display_report_text(report_body: str, cited: list[Paper], config: ReportRuntimeConfig, template_name: str) -> str:
+def _display_report_text(report_body: str, cited: list[Paper], config: ReportRuntimeConfig, template_name: str) -> ReportAssemblyResult:
     """Format the same reader-facing text before or after figure insertion."""
     citation_map = citation_display_map(cited)
     report = append_references_section(
@@ -195,7 +189,8 @@ def _display_report_text(report_body: str, cited: list[Paper], config: ReportRun
         template_name=template_name,
         style=config.style,
     )
-    return report
+    return ReportAssemblyResult(report_markdown=report, report_body_markdown=report_body,
+                                citation_numbers=citation_map)
 
 
 def _prepare_report_citations(
@@ -271,7 +266,7 @@ def run_report_capability(
     )
     if imported_figures:
         result = replace(result, figures=(*result.figures, *imported_figures))
-    config = request.config if isinstance(request.config, ReportRuntimeConfig) else ReportRuntimeConfig.model_validate(request.config)
+    config = request.config
     if config.figures.max_figures > 0 and len(result.figures) > config.figures.max_figures:
         raise ValueError("Supplied and generated figures exceed the explicit report max_figures; no figures were silently dropped.")
     report_ref = context.store.write_text(
@@ -399,14 +394,11 @@ def _attach_table_analyses(
     """Copy registered data into the report; leave pure text assembly unchanged."""
     from simple_ar.result_analysis.table import copy_analysis_package
 
-    config = request.config if isinstance(request.config, ReportRuntimeConfig) else ReportRuntimeConfig.model_validate(request.config)
+    config = request.config
     attachments: list[ArtifactRef] = []
     figures: list[ReportFigureRecord] = []
-    sections = [row if isinstance(row, ReportSectionDraft) else ReportSectionDraft.model_validate(row)
-                for row in request.sections]
+    sections = list(request.sections)
     plan = request.document_plan
-    if plan is not None and not isinstance(plan, ReportDocumentPlan):
-        plan = ReportDocumentPlan.model_validate(plan)
     for index, ref in enumerate(request.table_analyses, start=1):
         prefix = f"analyses/analysis-{index:03d}"
         result = copy_analysis_package(context.require_input(ref), context.store.root / prefix)

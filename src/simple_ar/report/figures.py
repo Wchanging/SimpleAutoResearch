@@ -12,7 +12,7 @@ from simple_ar.core.artifacts import write_text
 from simple_ar.report.document_plan import visual_plan_for_renderer
 from simple_ar.report.schema import ReportDocumentPlan, ReportFigureConfig
 # Retain the old import surface; data rendering no longer depends on reporting.
-from simple_ar.result_analysis.figures import render_table_figures
+from simple_ar.result_analysis.figures import render_table_figures as render_table_figures
 
 
 _DEFAULT_PAIRED_FIGURE_LIMIT = 4
@@ -168,10 +168,13 @@ def maybe_add_report_figures(
         return ReportFigureResult(report_markdown=report_markdown)
     if config.format != "svg":
         return ReportFigureResult(report_markdown=report_markdown)
-    if re.search(r"!\[[^\]]*\]\([^)]+\)", report_markdown):
+    existing_images = set(re.findall(r"!\[[^\]]*\]\(([^)]+)\)", report_markdown))
+    if document_plan is None and existing_images:
         return ReportFigureResult(report_markdown=report_markdown)
 
-    max_figures = config.max_figures if config.max_figures > 0 else _default_figure_count(template_name)
+    planned_figures = visual_plan_for_renderer(document_plan)
+    automatic = len(planned_figures) if document_plan is not None else _default_figure_count(template_name)
+    max_figures = config.max_figures if config.max_figures > 0 else automatic
     if max_figures <= 0:
         return ReportFigureResult(report_markdown=report_markdown)
 
@@ -181,7 +184,6 @@ def maybe_add_report_figures(
     updated = report_markdown
 
     specs = {spec.figure_id: spec for spec in _FIGURE_SPECS}
-    planned_figures = visual_plan_for_renderer(document_plan)
     # Legacy reports without an agent-resolved plan preserve the previous
     # conservative renderer behavior. A resolved plan with no visual intent is
     # an explicit decision to render no figures.
@@ -202,6 +204,9 @@ def maybe_add_report_figures(
             title = item.title
         if not section:
             continue
+        rel_path = f"figures/{spec.figure_id}.svg"
+        if rel_path in existing_images:
+            continue
         items = _figure_items(section["body"], spec)
         if len(items) < 3:
             if emit is not None:
@@ -209,7 +214,6 @@ def maybe_add_report_figures(
             continue
         path = figures_dir / f"{spec.figure_id}.svg"
         write_text(path, _render_svg(title, items[:8]))
-        rel_path = f"figures/{path.name}"
         image_block = f"\n![{title}]({rel_path})\n\n*{spec.caption}*\n"
         updated = _insert_after_heading(updated, section["heading"], image_block)
         generated.append(

@@ -1,6 +1,8 @@
 import contextlib
 import io
 import json
+import shutil
+import statistics
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,7 +11,11 @@ import xml.etree.ElementTree as ET
 
 from simple_ar.app.research_application import create_session, load_session, ResearchApplicationServices
 from simple_ar.research.workflow_contracts import ResearchBrief
-from simple_ar.result_analysis.table import TableSpec, parse_table, describe_table, rebuild
+from simple_ar.result_analysis.table import (
+    TableSpec, parse_table, describe_table, rebuild, copy_analysis_package,
+    load_analysis_package, table_values_markdown,
+)
+from simple_ar.report.narrative import _compact_execution_results
 from simple_ar.cli.main import main
 from simple_ar.cli.parser import build_parser
 from simple_ar.cli.research_config import research_defaults
@@ -17,6 +23,17 @@ from simple_ar.cli.start import prepare_start
 
 
 class TableAnalysisTests(unittest.TestCase):
+    def test_configuration_preserves_model_defaults_and_explicit_options(self):
+        minimal = {'value_columns': ['value'], 'observation_unit': 'one run', 'file': 'values.csv'}
+        self.assertEqual(TableSpec.from_config(minimal), TableSpec(('value',), 'one run'))
+        selected = TableSpec(('y',), 'one row', 'group', 'accuracy', mode='values', missing='omit',
+            width='column', max_mb=3, max_figures=4, plot='scatter', x_column='x', x_unit='seconds',
+            max_points=20, series_layout='shared', attribution='supplied measurement', association='pearson')
+        self.assertEqual(TableSpec.from_config(selected.to_config()), selected)
+        for options in ({'value_columns': 'value'}, {'max_mb': 0}, {'missing': None}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                TableSpec.from_config({**minimal, **options})
+
     def test_descriptive_observations_have_explicit_counts_and_sample_std(self):
         rows = parse_table('group,value\nA,1\nA,3\nB,-2\n', '.csv')
         result = describe_table(rows, TableSpec(('value',), 'one run', 'group'))
@@ -106,25 +123,66 @@ class TableAnalysisTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'no longer matches'):
                 rebuild(moved / 'analysis.json')
 
-    def test_start_and_toml_use_the_same_settings_and_no_model(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / 'table with spaces.tsv'
-            source.write_text('label\tscore\nA\t1\nB\t2\n', encoding='utf-8')
-            argv = ['start', '--kind', 'data_analysis', '--goal', 'Describe results', '--data-file', str(source),
-                    '--value-column', 'score', '--group-column', 'label', '--observation-unit', 'one summary',
-                    '--data-mode', 'values', '--output-root', str(root / 'runs'), '--prepare-only']
-            with patch('sys.stdin.isatty', return_value=False), contextlib.redirect_stdout(io.StringIO()):
-                config = prepare_start(build_parser().parse_args(argv))
-            defaults = research_defaults(['research-session', '--config', str(config)])
-            self.assertEqual(defaults['data_file'], str(source))
-            self.assertEqual(defaults['data_mode'], 'values')
-            with patch('simple_ar.cli.main._optional_research_llm_client', side_effect=AssertionError('No API/model expected')), contextlib.redirect_stdout(io.StringIO()):
-                self.assertIsNone(main(['research-session', '--config', str(config)]))
-                sessions = list((config.parent / 'sessions').iterdir())
-                source.unlink()
-                self.assertIsNone(main(['research-session', '--session-root', str(sessions[0]), '--model', 'env']))
-
+    def test_plot_tasks_share_config_no_model_recovery_move_and_writing_import(self):
+        cases = [
+            ('bar', 'values', 'label\tscore\nA\t1\nB\t2\n', '.tsv', ['score'], 'label', []),
+            ('box', 'observations', '[{"label":"A","score":1},{"label":"A","score":5}]', '.json', ['score'], 'label', []),
+            ('heatmap', 'values', '[{"label":"A","score":1,"b":null},{"label":"B","score":2,"b":3}]',
+             '.json', ['score', 'b'], 'label', []),
+            ('line', 'values', 'x\tscore\n2\t1\n1\t3\n3\t\n', '.tsv', ['score'], '', ['--x-column', 'x', '--x-unit', 'iteration']),
+            ('scatter', 'values', '[{"label":"A","x":1,"score":2},{"label":"B","x":1,"score":3}]',
+             '.json', ['score'], 'label', ['--x-column', 'x']),
+        ]
+        for plot, mode, text, suffix, columns, group, extras in cases:
+            with self.subTest(plot=plot), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / ('table with spaces' + suffix)
+                source.write_text(text, encoding='utf-8')
+                raw = source.read_bytes()
+                argv = ['start', '--kind', 'data_analysis', '--goal', 'Describe supplied data',
+                        '--data-file', str(source), '--observation-unit', 'one supplied row',
+                        '--data-mode', mode, '--data-plot', plot, '--data-missing', 'omit',
+                        '--output-root', str(root / 'runs'), '--prepare-only', *extras]
+                for column in columns:
+                    argv.extend(['--value-column', column])
+                if group:
+                    argv.extend(['--group-column', group])
+                with patch('sys.stdin.isatty', return_value=False), contextlib.redirect_stdout(io.StringIO()):
+                    config = prepare_start(build_parser().parse_args(argv))
+                defaults = research_defaults(['research-session', '--config', str(config)])
+                self.assertEqual((defaults['data_file'], defaults['data_mode'], defaults['data_plot']),
+                                 (str(source), mode, plot))
+                if extras:
+                    self.assertEqual(defaults['x_column'], 'x')
+                with patch('simple_ar.cli.main._optional_research_llm_client', side_effect=AssertionError('No API/model expected')), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertIsNone(main(['research-session', '--config', str(config)]))
+                    package = next(config.parent.glob('sessions/*/attempts/data_analysis-*/analysis.json'))
+                    frozen = package.read_bytes()
+                    source.unlink()
+                    self.assertIsNone(main(['research-session', '--session-root', str(package.parents[2]), '--model', 'env']))
+                    self.assertEqual(package.read_bytes(), frozen)
+                original = json.loads(frozen)
+                moved = root / 'moved'
+                shutil.copytree(package.parent, moved)
+                # Explicit rebuilding may use a user-chosen result filename.
+                path = (moved / 'analysis.json').rename(moved / 'renamed-result.json')
+                rebuild(path)
+                imported = copy_analysis_package(path, root / 'writing-input')
+                rebuilt = json.loads(path.read_text())
+                self.assertEqual(TableSpec.from_config(imported['spec']), TableSpec.from_config(original['spec']))
+                self.assertEqual(rebuilt['spec'], original['spec'])
+                for field in ('records', 'figures', 'observation_summaries', 'coordinate_summaries'):
+                    self.assertEqual(rebuilt.get(field), original.get(field))
+                    self.assertEqual(imported.get(field), original.get(field))
+                self.assertEqual((moved / original['source']['path']).read_bytes(), raw)
+                self.assertEqual((root / 'writing-input' / imported['source']['path']).read_bytes(), raw)
+                for figure in original['figures']:
+                    self.assertEqual((package.parent / figure['path']).read_bytes(), (moved / figure['path']).read_bytes())
+                    self.assertEqual((package.parent / figure['path']).read_bytes(), (root / 'writing-input' / figure['path']).read_bytes())
+                    for kind, asset in figure['exports'].items():
+                        self.assertGreater((moved / asset).stat().st_size, 100)
+                        self.assertTrue((root / 'writing-input' / asset).is_file())
+                        self.assertIn(f'[{kind.upper()}]({asset})', (moved / 'analysis.md').read_text())
     def test_guided_analysis_rejects_unrelated_options_before_saving(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -157,22 +215,73 @@ class TableAnalysisTests(unittest.TestCase):
 
     def test_figures_keep_all_categories_negative_values_and_xml_escaping(self):
         from simple_ar.report.figures import render_table_figures
+        from tests import captured_data_figures
         rows = [{'group': f'A<& very long category {i}' * 3, 'value': i - 10} for i in range(25)]
         for width in ('column', 'wide'):
-            with self.subTest(width=width), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(width=width), tempfile.TemporaryDirectory() as directory, captured_data_figures() as drawn:
                 result = describe_table(rows, TableSpec(('value',), 'one run', 'group', width=width))
                 figures = render_table_figures(result, Path(directory))
                 self.assertEqual(len(figures), 3)
-                titles = []
+                groups = []
                 for figure in figures:
                     tree = ET.parse(Path(directory) / figure['path'])
-                    titles.extend(node.text for node in tree.findall('.//{http://www.w3.org/2000/svg}g/{http://www.w3.org/2000/svg}g/{http://www.w3.org/2000/svg}title'))
-                self.assertEqual(len(titles), 25)
+                    self.assertIn('A<&', ''.join(tree.getroot().itertext()))
+                    groups.extend(figure['encoding']['groups'])
+                self.assertEqual(groups, [row['group'] for row in rows])
+                self.assertEqual(sum(len(fig.axes[0].patches) for fig in drawn), 25)
+                self.assertTrue(any(bar.get_width() < 0 for fig in drawn for bar in fig.axes[0].patches))
         with tempfile.TemporaryDirectory() as directory:
             result = describe_table(rows, TableSpec(('value',), 'one run', 'group', max_figures=1))
             with self.assertRaisesRegex(ValueError, 'physical max_figures'):
                 render_table_figures(result, Path(directory))
             self.assertFalse((Path(directory) / 'figures').exists())
+
+
+class ObservationDistributionTests(unittest.TestCase):
+    def test_all_groups_and_missing_cells_are_used_not_the_preview_prefix(self):
+        rows = [{"g": "A", "x": value, "y": None if value == 1 else 2 * value}
+                for value in range(1, 14)] + [{"g": "B", "x": -10, "y": 100}]
+        result = describe_table(rows, TableSpec(("x", "y"), "one specimen", "g", missing="omit"))
+        a, ay, b, by = result["observation_summaries"]
+        self.assertEqual(a["value"], {"min": 1, "q1": 4, "median": 7, "q3": 10, "max": 13})
+        self.assertEqual(ay["missing"], 1)
+        self.assertEqual(ay["value"]["median"], statistics.median(range(4, 27, 2)))
+        self.assertEqual(b["value"], dict.fromkeys(("min", "q1", "median", "q3", "max"), -10))
+        text = table_values_markdown(result)
+        self.assertIn("| B | x | 1 | 0 | -10 | -10 | -10 | -10 | -10 |", text)
+        self.assertIn("not confidence intervals", text)
+        self.assertNotIn("significant", text)
+        view = _compact_execution_results({"supplied_analyses": [{"document_id": "data", **result}]})["supplied_analyses"][0]
+        self.assertEqual(view["observation_summaries"], result["observation_summaries"])
+        self.assertIn("not representative", view["observation_summary_scope"])
+
+    def test_summary_inputs_have_no_fabricated_distribution_and_extremes_are_finite(self):
+        values = describe_table([{"g": "A", "x": 3}], TableSpec(("x",), "one mean", "g", mode="values"))
+        self.assertNotIn("observation_summaries", values)
+        result = describe_table([{"x": 1e308}, {"x": 1e308}], TableSpec(("x",), "one value"))
+        self.assertEqual(result["observation_summaries"][0]["value"]["median"], 1e308)
+
+    def test_legacy_import_recomputes_and_new_summary_tampering_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = '[{"x":1},{"x":3},{"x":8},{"x":10}]'
+            (root / "input.json").write_text(raw)
+            result = describe_table(json.loads(raw), TableSpec(("x",), "one observation"))
+            result["source"] = {"path": "input.json", "kind": "user_data"}
+            path = root / "analysis.json"
+            path.write_text(json.dumps(result))
+            copied = copy_analysis_package(path, root / "moved")
+            self.assertEqual(copied["observation_summaries"], result["observation_summaries"])
+            result["observation_summaries"][0]["value"]["median"] = 99
+            path.write_text(json.dumps(result))
+            with self.assertRaisesRegex(ValueError, "distributions"):
+                load_analysis_package(path)
+            result.pop("observation_summaries")
+            path.write_text(json.dumps(result))
+            before = path.read_bytes()
+            restored, _, _ = load_analysis_package(path)
+            self.assertEqual(restored["observation_summaries"][0]["value"]["median"], 5.5)
+            self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == '__main__':

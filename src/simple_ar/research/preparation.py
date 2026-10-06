@@ -4,9 +4,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 import os
+import re
 import shlex
 import subprocess
 import sys
+import tomllib
+from importlib import metadata
+
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion
 
 from simple_ar.code_task.orchestration.workflow import initialize_code_task
 from simple_ar.code_task.review_pipeline import build_review_index
@@ -16,6 +23,109 @@ from simple_ar.experiment.templates import build_experiment_code
 from simple_ar.research.text_dataset import read_text_dataset
 
 
+def _requirement_lines(excerpt: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Read the plain-specifier subset, not pip's installer instruction language.
+
+    Retain line provenance and unresolved directives. Includes, environment
+    expansion, hashes and editable installs are never followed or executed.
+    """
+    output, pending, start = [], "", 1
+    lines = excerpt["text"].splitlines(keepends=True)
+    for number, physical in enumerate(lines, 1):
+        text = physical.rstrip("\r\n")
+        if not pending:
+            start = number
+        continued = (len(text) - len(text.rstrip("\\"))) % 2 == 1
+        pending += text[:-1] if continued else text
+        unread_end = number == len(lines) and excerpt.get("has_unread_tail", excerpt.get("truncated", False))
+        if unread_end and (continued or not physical.endswith(("\r", "\n"))):
+            output.append({"declared": pending, "source_path": excerpt["path"],
+                "source_lines": [start, number], "status": "incomplete_requirement_line"})
+            pending = ""
+            break
+        if continued:
+            continue
+        value = re.sub(r"\s+#.*$", "", pending).strip()
+        pending = ""
+        if not value or value.startswith("#"):
+            continue
+        row = {"declared": value, "source_path": excerpt["path"], "source_lines": [start, number]}
+        if value.startswith("-"):
+            row["status"] = "pip_directive_not_processed"
+        elif "${" in value:
+            row["status"] = "environment_reference_not_expanded"
+        output.append(row)
+    if pending:
+        output.append({"declared": pending, "source_path": excerpt["path"],
+            "source_lines": [start, len(lines)], "status": "incomplete_requirement_line"})
+    return output
+
+
+def _dependency_probe(declared: Mapping[str, Any], *, requirements_excerpts: tuple[Mapping[str, Any], ...] = ()) -> dict[str, Any]:
+    """Inspect distribution metadata in this interpreter, never import the project.
+
+    This is not a resolver or environment installer. URL provenance, extras,
+    transitive dependencies and binary compatibility require other evidence.
+    """
+    probe = {"scope": "inspecting_interpreter_only", "python_executable": sys.executable,
+             "project_imported": False, "packages": [], "limitations": [
+        "Distribution metadata does not establish import/runtime or binary compatibility.",
+        "Project interpreter, extras, transitive dependencies and URL provenance are not verified."]}
+    python_requirement = declared.get("requires-python")
+    if isinstance(python_requirement, str):
+        try:
+            probe["python_requirement"] = {"declared": python_requirement,
+                "matches_inspecting_python": SpecifierSet(python_requirement).contains(sys.version.split()[0])}
+        except InvalidSpecifier:
+            probe["python_requirement"] = {"declared": python_requirement, "status": "invalid_declaration"}
+    requirements = declared.get("dependencies")
+    rows = [{"declared": value, "source_path": "pyproject.toml"}
+            for value in requirements] if isinstance(requirements, list) else []
+    for excerpt in requirements_excerpts:
+        rows.extend(_requirement_lines(excerpt))
+    if requirements_excerpts:
+        probe["requirements_sources"] = [{"path": row["path"], "truncated": row["truncated"]}
+            for row in requirements_excerpts]
+        probe["limitations"].append(
+            "Requirements files are observed separately, not combined into a resolved environment. "
+            "Only plain PEP 508 specifiers are compared; includes, constraints, pip options, environment expansion and install artifacts remain unresolved.")
+    if not isinstance(requirements, list) and not requirements_excerpts:
+        probe["status"] = "no_static_dependency_list"
+        return probe
+    probe["status"] = "metadata_inspected"
+    for row in rows:
+        probe["packages"].append(row)
+        if "status" in row:
+            continue
+        value = row["declared"]
+        try:
+            if not isinstance(value, str):
+                raise InvalidRequirement("Requirement must be text")
+            requirement = Requirement(value)
+            row["name"] = requirement.name
+            if requirement.marker and not requirement.marker.evaluate():
+                row["status"] = "marker_not_applicable_here"
+                continue
+            try:
+                version = metadata.version(requirement.name)
+            except metadata.PackageNotFoundError:
+                row["status"] = "distribution_not_found_here"
+                continue
+            row["installed_version"] = version
+            if requirement.url:
+                row["status"] = "installed_source_not_verified"
+            else:
+                row["matches_declared_version"] = requirement.specifier.contains(version)
+                row["status"] = "version_matches" if row["matches_declared_version"] else "version_mismatch"
+            if requirement.extras:
+                row["unverified_extras"] = sorted(requirement.extras)
+        except (InvalidRequirement, InvalidVersion, ValueError) as exc:
+            row.update(status="unresolved_declaration", reason=type(exc).__name__)
+        except (OSError, UnicodeError) as exc:
+            row.update(status="metadata_unreadable", reason=type(exc).__name__)
+    return probe
+
+
 @dataclass(frozen=True)
 class PreparationRequest:
     execution: Mapping[str, Any]
@@ -23,6 +133,193 @@ class PreparationRequest:
     run: RunRequest | None = None
     run_dir: Path | None = None
     source_project: Path | None = None
+    data_paths: tuple[Path, ...] = ()
+
+
+def inspect_project_preparation(
+    project: Path, *, data_paths: tuple[Path, ...] = (), index: Mapping[str, Any] | None = None,
+    read_paths: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Read preparation inputs; neither README commands nor manifests execute.
+
+    Use the same repository index as design/CodeTask, not another discovery
+    engine. Runtime identity describes the inspecting interpreter only.
+    """
+    from simple_ar.code_task.execution.environment import DEPENDENCY_FILE_NAMES
+
+    root = project.expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"Project directory not found: {root}")
+    index = build_review_index(root) if index is None else index
+    documents = []
+    # Generated lock files are intentionally absent from the code-review
+    # text index. Their top-level names still belong in preparation inventory.
+    for path in root.iterdir():
+        if path.is_file() and path.name.endswith(".lock") and path.name in DEPENDENCY_FILE_NAMES:
+            documents.append((path.name, "dependency_declaration"))
+    for row in index.get("files", []):
+        relative = str(row["path"])
+        path = root / relative
+        is_dependency = path.name in DEPENDENCY_FILE_NAMES
+        is_readme = path.name.lower().startswith("readme") and path.suffix.lower() in {".md", ".txt", ""}
+        if not (is_dependency or is_readme):
+            continue
+        # Top-level declarations first; nested examples often describe a
+        # different environment. Both retain exact provenance and scope.
+        documents.append((relative, "dependency_declaration" if is_dependency else "project_instructions"))
+    documents.sort(key=lambda item: (len(Path(item[0]).parts), item[0]))
+    selected_documents = documents[:12]
+    root_manifest = ("pyproject.toml", "dependency_declaration")
+    if root_manifest in documents and root_manifest not in selected_documents:
+        selected_documents[-1:] = [root_manifest]
+    excerpts = []
+    notes = []
+    for relative, role in selected_documents:
+        path = root / relative
+        if path.name.endswith(".lock"):
+            # Lockfile identities are useful; their large generated contents
+            # are not preparation prose. Keep the path available for later use.
+            continue
+        if path.is_symlink():
+            notes.append(f"Not followed: {relative} is a symbolic link.")
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                text = stream.read(16001)
+        except (OSError, UnicodeError) as exc:
+            notes.append(f"Could not read {relative}: {type(exc).__name__}")
+            continue
+        excerpts.append({"path": relative, "role": role, "text": text[:16000],
+                         "truncated": len(text) > 16000, "has_unread_tail": len(text) > 16000})
+    if len(documents) > 12:
+        notes.append(f"{len(documents) - 12} additional instruction/dependency files not read; their paths are retained.")
+    declared = {}
+    manifest = next((row for row in excerpts if row["path"] == "pyproject.toml"), None)
+    if manifest and not manifest["truncated"]:
+        try:
+            payload = tomllib.loads(manifest["text"])
+            project_metadata = payload.get("project", {})
+            if isinstance(project_metadata, Mapping):
+                declared = {key: project_metadata[key] for key in ("name", "requires-python", "dependencies", "optional-dependencies", "scripts") if key in project_metadata}
+            else:
+                notes.append("pyproject.toml project metadata is not a table; its original text is retained.")
+        except tomllib.TOMLDecodeError:
+            notes.append("pyproject.toml could not be parsed; its original text is retained.")
+    # Entry source explains flags and emitted measurements without importing
+    # the project. It shares the established index; notebooks remain unread.
+    available_paths = {str(row["path"]) for row in index.get("files", [])}
+    if len(read_paths) > 15 or any(path not in available_paths for path in read_paths):
+        raise ValueError("Preparation reads must name indexed project text files (at most 15 extra files); no external or excluded paths.")
+    # Console entries commonly have no main guard. Read their indexed source
+    # within the same five-file allowance, not just arbitrary script prefixes.
+    # These are candidate source locations, not installed executable bindings.
+    script_declarations = declared.get("scripts", {})
+    declared_entries = []
+    for name, reference in script_declarations.items() if isinstance(script_declarations, Mapping) else ():
+        module = reference.split(":", 1)[0] if isinstance(reference, str) and ":" in reference else ""
+        parts = module.split(".")
+        candidates = []
+        if all(part.isidentifier() for part in parts):
+            stem = "/".join(parts)
+            candidates = [path for prefix in ("", "src/") for path in
+                (f"{prefix}{stem}.py", f"{prefix}{stem}/__init__.py") if path in available_paths]
+        declared_entries.append({"name": name, "reference": reference, "source_candidates": candidates,
+            "scope": "Static project declaration; root/src source candidates only, installed binding and callable unverified."})
+    entrypoints = list(dict.fromkeys([path for row in declared_entries for path in row["source_candidates"]]
+                                    + list(index.get("entrypoints", []))))
+    for relative in entrypoints[:5]:
+        if any(row["path"] == relative for row in excerpts):
+            continue
+        path = root / relative
+        if path.is_symlink():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                text = stream.read(8001)
+        except (OSError, UnicodeError) as exc:
+            notes.append(f"Could not read entry {relative}: {type(exc).__name__}")
+            continue
+        excerpts.append({"path": relative, "role": "entry_source", "text": text[:8000],
+                         "truncated": len(text) > 8000, "has_unread_tail": len(text) > 8000, "read_limit_characters": 8000})
+    from simple_ar.code_task.analysis.source_context import requested_source_context
+    for relative in read_paths:
+        windows = requested_source_context(root, dict(index), {"files": [relative]}, supplied=excerpts,
+            max_files=1, max_chars=8000)
+        for window in windows:
+            excerpts.append({**window, "role": "project_source", "read_limit_characters": 8000})
+    datasets = []
+    for supplied in data_paths:
+        path = supplied.expanduser()
+        path = path if path.is_absolute() else root / path
+        path = path.resolve()
+        row = {"path": str(path), "available": path.exists()}
+        if path.is_file():
+            row.update(kind="file", size_bytes=path.stat().st_size, suffix=path.suffix.lower())
+        elif path.is_dir():
+            row["kind"] = "directory"
+        datasets.append(row)
+    reading_coverage = {}
+    for row in excerpts:
+        coverage = reading_coverage.setdefault(row["path"], {"ranges": [], "has_unread_tail": True})
+        coverage["ranges"].append([row.get("source_offset", 0), row.get("source_offset", 0) + len(row["text"])])
+        coverage["has_unread_tail"] = row.get("has_unread_tail", False)
+    return {
+        "schema_version": "project_preparation.v1", "project": str(root),
+        "file_count": index.get("file_count", 0), "entrypoint_candidates": entrypoints,
+        "declared_entrypoints": declared_entries,
+        "notebook_candidates": list(index.get("notebooks", [])),
+        "source_file_paths": sorted(available_paths)[:2000],
+        "source_paths_omitted": max(0, len(available_paths) - 2000),
+        "reading_coverage": reading_coverage,
+        "test_files": [str(row["path"]) for row in index.get("files", []) if "test" in str(row.get("role", ""))],
+        "runtime": {"python_executable": sys.executable, "python_version": sys.version.split()[0]},
+        "dependency_probe": _dependency_probe(declared, requirements_excerpts=tuple(row for row in excerpts
+            if row["role"] == "dependency_declaration" and Path(row["path"]).name in {"requirements.txt", "requirements-dev.txt"})),
+        "declared_project": declared, "document_paths": [row[0] for row in documents],
+        "excerpts": excerpts, "data_paths": datasets, "notes": notes,
+        "open_questions": [
+            "Which published conclusion or software behavior should be checked?",
+            "Which documented command and data split correspond to that scope?",
+            "What computation limit and accepted adaptations apply?",
+        ],
+        "limitations": [
+            "Read-only preparation: no project imports, dependency installation, downloads, tests or training.",
+            "Declarations/instructions are project-authored, not verified dependency availability or execution authority.",
+            "Data presence/size does not establish contents, completeness, splits or paper correspondence.",
+        ],
+    }
+
+
+def project_preparation_markdown(facts: Mapping[str, Any]) -> str:
+    """Readable material for an independent writing/planning task."""
+    lines = ["# Project preparation", "", f"Project: {facts['project']}", "",
+             "## Inspecting runtime", f"Python: {facts['runtime']['python_version']} ({facts['runtime']['python_executable']})",
+             "", "## Declared console entries (bindings and callables unverified)",
+             *[f"- {row['name']}: {row['reference']}; indexed source candidates: {row['source_candidates']}"
+               for row in facts.get("declared_entrypoints", [])],
+             "", "## Entry candidates (not executed)", *[f"- {path}" for path in facts["entrypoint_candidates"]],
+             "", "## Notebook candidates (cells and saved outputs unread)",
+             *[f"- {row['path']}: {row['size_bytes']} bytes; not a confirmed command" for row in facts.get("notebook_candidates", [])],
+             "", "## Data locations", *[f"- {row['path']}: {'present' if row['available'] else 'missing'}; {row.get('size_bytes', 'size not inspected')}" for row in facts["data_paths"]],
+             "", "## Decisions still needed", *[f"- {text}" for text in facts["open_questions"]],
+             "", "## Inspection limits", *[f"- {text}" for text in [*facts["limitations"], *facts["notes"]]],
+             "", "## Project-authored instructions and declarations"]
+    for row in facts["excerpts"]:
+        lines.extend(["", f"### {row['path']} ({row['role']})", "",
+                      f"Read range: offset {row.get('source_offset', 0)}, up to {row.get('read_limit_characters', 16000)} characters; " +
+                      ("excerpt, not a complete-file read." if row["truncated"] else "complete file.") +
+                      (" Further tail unread." if row.get('has_unread_tail') else ""),
+                      "", *["> " + line for line in row["text"].splitlines()]])
+    probe = facts.get("dependency_probe")
+    if isinstance(probe, Mapping):
+        lines.extend(["", "## Dependency metadata in the inspecting interpreter", "",
+            f"Interpreter: {probe['python_executable']}. This is not a project-environment readiness check.",
+            *[f"- {row.get('source_path', 'declaration')}" + (f":{row['source_lines'][0]}–{row['source_lines'][1]}" if row.get('source_lines') else "")
+              + f" / {row['declared']!r}: {row['status']}; installed version: {row.get('installed_version', 'not observed')}"
+              + (f"; extras not verified: {row['unverified_extras']}" if row.get('unverified_extras') else "")
+              for row in probe["packages"]],
+            *[f"- {limit}" for limit in probe["limitations"]]])
+    return "\n".join(lines) + "\n"
 
 
 def inspect_execution_entry(execution: Mapping[str, Any]) -> dict[str, Any]:
@@ -71,6 +368,7 @@ def inspect_execution_entry(execution: Mapping[str, Any]) -> dict[str, Any]:
             "entrypoint_candidates": entrypoints,
         }
         facts["entrypoint_candidates"] = entrypoints
+        facts["preparation"] = inspect_project_preparation(root, index=index)
         for entrypoint in entrypoints:
             prefix = [sys.executable, entrypoint]
             if prefix not in facts["authorized_argv_prefixes"]:
@@ -88,7 +386,10 @@ def inspect_execution_entry(execution: Mapping[str, Any]) -> dict[str, Any]:
     return facts
 
 
-def run_preparation_capability(*, context: CapabilityContext, request: PreparationRequest) -> CapabilityResult:
+def run_preparation_capability(*, context: CapabilityContext, request: PreparationRequest, backend=None) -> CapabilityResult:
+    if "environment" in request.execution:
+        from simple_ar.research.project_environment import prepare_project_environment
+        return prepare_project_environment(context=context, request=request, backend=backend)
     if "dataset" in request.execution:
         return _prepare_text_baseline(context, request)
     config = dict(request.execution)
@@ -123,6 +424,15 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     config.setdefault("cwd", str(root))
     if request.run.cwd.resolve() != root.resolve():
         raise ValueError("Preparation cwd must match code_root; shared data should use explicit external paths.")
+    # Project-relative data keeps its runtime location, including on candidate
+    # revisions copied from an earlier workspace. External inputs stay external.
+    data_inputs = []
+    lineage_root = lineage_root.resolve()
+    for path in request.data_paths:
+        path = Path(path).absolute()
+        if path.is_relative_to(lineage_root):
+            data_inputs.append(path.relative_to(lineage_root).as_posix())
+    data_inputs = tuple(dict.fromkeys(data_inputs))
     task_ref = context.store.write_text("inputs/task.md", request.task_text, kind="task_input", schema="markdown.v1")
     command = subprocess.list2cmdline(request.run.command) if os.name == "nt" else shlex.join(request.run.command)
     initialized = initialize_code_task(
@@ -132,6 +442,7 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
         env_mode=env_mode, python_executable=python_executable,
         edit_scope_allowed_patterns=tuple(allowed or ()),
         edit_scope_protected_patterns=tuple(protected),
+        data_inputs=data_inputs,
     )
     config["cwd"] = str(initialized.workspace_dir)
     if "baseline" in config:
@@ -147,8 +458,8 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
         "source_project": str(lineage_root.resolve()), "workspace": str(initialized.workspace_dir),
         "copy_report": initialized.copy_report.to_json(),
         "workspace_info": initialized.workspace.to_manifest(run_dir=initialized.run_dir),
-        "limitations": ["No dependency installation or dataset download; shared datasets remain external assets.",
-                         "Copy modes may exclude large files; inspect the recorded copy report.",
+        "limitations": ["No dependency installation or dataset download; external datasets remain external assets.",
+                         "Declared project data is copied independently and protected from automated edits, not OS-sandboxed. Undeclared large files and excluded paths may remain absent; inspect the copy report.",
                          *initialized.workspace.warnings],
     }, kind="prepared_execution", schema="prepared_execution.v1", producer="research.preparation")
     return CapabilityResult(status="completed", artifacts=(task_ref, ref))

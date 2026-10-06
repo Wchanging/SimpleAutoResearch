@@ -223,6 +223,38 @@ def _normalize_pattern(value: object) -> str:
     return value.replace("\\", "/").strip()
 
 
+def prompt_file_inventory(
+    index: dict[str, Any], *, allowed_patterns: tuple[str, ...],
+    protected_patterns: tuple[str, ...], selected_paths: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Keep every indexed path without repeating all repository signatures.
+
+    Discovery uses the complete role-separated path lists. Short indexed hints
+    are useful for editable files and selected evidence; exact API contracts
+    belong to the supplied source snippets, not an unbounded AST dump. This is
+    a prompt projection only: the stored index and enforcement stay unchanged.
+    """
+    selected = set(selected_paths)
+    inventory: dict[str, Any] = {
+        "project": index.get("project", {}), "editable_files": [],
+        "read_only_files": [], "file_details": [],
+    }
+    for item in index.get("files", []):
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", ""))
+        editable = is_edit_allowed_path(
+            path, allowed_patterns=allowed_patterns, protected_patterns=protected_patterns,
+        )
+        inventory["editable_files" if editable else "read_only_files"].append(path)
+        if editable or path in selected:
+            inventory["file_details"].append({
+                "path": path, "kind": item.get("kind"),
+                "role_tags": item.get("role_tags", []), "summary": item.get("summary", ""),
+            })
+    return inventory
+
+
 def _normalized_unique(values: Iterable[object]) -> tuple[str, ...]:
     result: list[str] = []
     for value in values:

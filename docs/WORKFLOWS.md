@@ -1,4 +1,4 @@
-﻿# Workflows And Artifacts
+# Workflows And Artifacts
 
 [中文版本](WORKFLOWS_zh.md)
 
@@ -11,7 +11,100 @@ duplicating the full artifact manual; for concrete commands and file trees, see
 
 ## Task-Driven Execution And Recovery
 
+New default research plans generate a standalone summary only when requested
+(or when summary is the default deliverable). With local sources and explicit
+materials-only scope, a report-only survey/research task can ingest and write
+directly from retained original text. Reading notes and synthesis remain
+available when the accepted plan selects them; explicit summary, assessment,
+design and experiment requests keep their evidence dependencies. This does not
+certify source comprehension or paper quality. Recovery follows the saved plan.
+
+### Changed-source review coverage
+
+Existing-project review allocates its existing cluster/file allowance to changed
+files first, then selects background role clusters. The review metadata lists
+`changed_files_outside_review_clusters` when the allowance cannot cover a larger
+change set; selection is not proof of whole-file review or patch correctness.
+Review and repair share exact current-source windows around diff/failure lines,
+with range and partial-coverage labels. Generated-project review without a diff
+retains separate head/tail views, not a fabricated contiguous source excerpt.
+Protected source remains read-only; review does not authorize edits or replace
+runtime validation. This changes input selection, not the number of model rounds.
+
+### Initial source defects versus new defects
+
+CodeTask initialization retains only initial syntax-error checksums in the existing
+workspace manifest. It reuses the source index, not a second source snapshot or
+all-file integrity system. Non-strict static validation records unchanged initial
+syntax failures as warnings; changed/new failures and strict mode still fail.
+Refreshing the source index does not replace initial evidence. Saved legacy copy
+tasks without that evidence remain conservative; current source is not backfilled
+as an initialization baseline. A frozen Git baseline remains usable.
+
+This distinction does not prove that an initial defect is intentional, that a
+project can run, or that a patch works. Inspect warnings and run the declared
+behavior checks; static `passed` is not runtime success.
+
+### Optional natural-language task setup
+
+`start --chat` precedes the ordinary configuration/session path. A small setup draft
+retains original user replies, proposed settings, asset approvals and the existing
+budget ledger for this conversation. Named asset previews are bounded and explicitly
+mark unread/truncated content. Models select semantic settings, not execution powers.
+After confirmation, the same serializer validates and saves task TOML. Setup recovery
+(`--resume-setup`) reuses awaiting proposals and accounting; execution recovery remains
+the existing session controller. Structured setup and descriptive execution need no API;
+opting into chat uses the configured model for clarification.
+
+For reproduction, the same adapter may read named project instructions/entry source
+and explicitly supplied data-location metadata, and request bounded additional
+indexed text. It proposes a source-backed command and
+protocol for confirmation, not an execution result. Accepted values feed the existing
+serializer/executor; directory and timeout are not model authority. Preparation notes
+remain distinct from scientific sources. There is no second execution runtime or
+automatic dependency installer behind this conversation.
+Repeated `--data-path` inputs also enter `[assets].data` and the existing session
+inventory, not document ingestion or a separate data registry. Direct measurements
+can use the same named inputs without relocation. CodeTask preparation copies
+declared project data into the isolated workspace and protects it from automated
+patches; external inputs remain in place and completed workspaces are unchanged.
+
+### Explicit task dependency preparation
+
+A confirmed `[execution.environment]` venv profile adds `prepare_execution` before
+the declared measurement. The existing preparation attempt owns the environment,
+`environment_setup.json`, process records and logs; the original process backend
+and session ledger account for creation, selected requirements/explicit project package installation and
+`pip check`. `execution.json` is the existing `prepared_execution.v1` artifact,
+binding only the command's Python executable. There is no second environment runtime.
+Failed setup never starts the scientific command. Inspect with `status RUN`; explicitly
+continuing a failed session creates a fresh attempt without clearing previous usage.
+Completed recovery reuses the prepared command/results. A venv is not an OS sandbox
+or a portable environment image; installation does not certify scientific conditions.
+This single-command path does not change CodeTask's current/external environment modes.
+
 ### Describe and plot existing data (no model required)
+
+For **analysis, figures and a written report in the same session**, add
+`--with-report --model env` to the command below. Confirmed `start --chat`
+can select this when you ask for a report. Analysis still runs without API
+calls; the existing material writer then uses the saved numerical package and
+figures, with review and audit. No online research, training or second writing
+session is implied. Expert TOML uses `outputs = ["data_analysis", "report"]`
+and a model connection. Resume the printed session with the same model; do not
+rerun setup or create another writing task.
+
+Newly guided data reports compose the sections together, then review the complete
+body with bounded revision. Existing task configs keep their accepted scopes.
+
+When requesting a report, add `--material README.md` for data documentation or
+notes, and `--document reference.pdf` for a reference paper. They are read-only
+local sources, retained through the existing document bundle and available to
+writing after resume. Keep your goal in `--goal`, metadata in these files, and
+the raw table in `--data-file`; documentation does not override confirmed
+analysis settings or become measured evidence. Analysis-only does not consume
+these additional sources. Captions describe the plotted quantities; detailed
+provenance and rebuilding records stay in the linked analysis package.
 
 ```bash
 uv run simple-ar start --kind data_analysis --goal "Describe my measurements" \
@@ -28,23 +121,47 @@ For bars of existing means or other summaries use `--data-mode values`: labels m
 values are not averaged again and error bars are not inferred. `--data-missing omit`
 explicitly allows per-column omission with counts; otherwise missing values fail, not become zero.
 Nonfinite/nonnumeric values, duplicate columns, malformed/empty input and nested JSON fail explicitly.
+Reports distinguish the configured missing-value policy from observed input use.
+Counts cover all selected records (complete x/y pairs for coordinates), not the
+writing preview; `reject` does not mean rows were deleted.
 
 The same session/controller freezes the UTF-8 CSV/TSV or homogeneous JSON records and settings,
-then emits `analysis.json`, `analysis.md`, copied data and editable SVGs. No search, model,
+then emits `analysis.json`, `analysis.md`, copied data, editable SVGs, vector PDFs and
+300-dpi PNG previews. Matplotlib is installed with the package; no GUI or separate
+plotting setup is needed. One figure counts once regardless of its three formats. No search, model,
 training or invented experiment status is involved. A completed calculation does not verify
 collection, units, independence, significance or causality. Outputs contain copied data: review
-sensitivity before sharing. Physical limits default to 20 MiB input and 100 SVG pages
+sensitivity before sharing. Physical limits default to 20 MiB input and 100 figure pages
 (`--data-max-mb`, `--data-max-figures` override); excess pages fail rather than drop data.
 Separate metrics have separate axes; categories are paginated without dropping data.
 `--figure-width column|wide` uses generic 3.5/7-inch targets, not venue-specific dimensions.
 Visual checks are initially `not_performed`, separate from numeric computation.
 
 For numeric curves or coordinate pairs, use `--data-mode values --data-plot line|scatter
---x-column step` instead of a grouping column. Repeat `--value-column` for separate
+--x-column step`. Optional `--group-column` separates category series without
+aggregating or pairing them. Repeat `--value-column` for separate
 axes; `--x-unit` records the declared x unit. Lines sort by numeric x and require
-unique x coordinates; scatter retains duplicate x values. Missing x fails;
-explicit `--data-missing omit` keeps missing y records and breaks lines at those gaps.
+unique x coordinates within each group; scatter retains duplicate x values.
+Explicit `--data-missing omit` keeps missing coordinates in the package but does
+not plot unavailable scatter positions. Lines need complete x and break at missing y.
+Group legends paginate on common axes without dropping categories.
+Dense scatter panels use smaller translucent markers and retain every complete
+coordinate pair in supplied record order; no sampling, jitter or smoothing.
+For writing, the package also carries all-complete-pair counts and per-group
+axis minima, quartiles, medians and maxima. Quartiles interpolate at `(n-1)*p`;
+these are marginal descriptive summaries, not joint association, significance
+or native image inspection. Raw points are not replaced by the summaries.
+Opt-in `--data-association pearson` adds the descriptive coefficient for complete
+x/y pairs inside each group, not a difference or implicit pooled result. Constant
+axes and fewer than two pairs produce an explicit undefined status. Two nonconstant
+pairs give ±1; there is no significance or causal interpretation. The same copied
+data, numerical attachment, writing projection and relocation checks carry it.
 There is no smoothing, regression, replicate aggregation or guessed error bar.
+For row-level `observations` analysis, each group/column also retains the
+full nonmissing empirical five-number distribution. These summaries and counts
+travel into writing and its numerical appendix; they do not turn a mean bar into
+a box plot or imply paired differences. Imported legacy packages recompute them
+from the copied input without changing the original package.
 `--data-max-points` defaults to 10000 rows per coordinate figure and is adjustable;
 overflow fails without sampling. The same copied input, resume and rebuilding apply.
 See the complete [coordinate case](../examples/data-curves/README.md).
@@ -53,10 +170,23 @@ Resume with `research-session --session-root PATH` even if the original data cha
 completed input snapshots are reused. Copy the completed analysis directory, then rebuild figures
 there with `python -m simple_ar.result_analysis.table analysis.json` using an installed package.
 The rebuilder refuses changed computed records; it is not a full file-integrity certification.
+Explicit rebuilding also refreshes generated captions/encoding in `analysis.json`
+and `analysis.md`. Ordinary completed-session recovery leaves saved deliveries unchanged.
 Supply the completed `analysis.json` as `--material` in a later writing task to
 recheck the values and attach its editable figures. Keep its copied `input.csv`,
 `input.tsv` or `input.json` beside it; do not submit a raw table as writing JSON.
 Complex statistics are not inferred.
+
+For explicitly matched baseline/candidate observations, add `--paired-baseline baseline`
+and select both columns. Each row must represent a matched pair of the same quantity/unit.
+The analysis adds paired differences, sample standard deviation and standard error;
+`omit` uses jointly nonmissing pairs. At least two pairs are needed for uncertainty.
+The extra difference figure shows ±1 SE assuming independent pairs, not a confidence
+interval or significance test. Rebuilding and material writing recheck the complete
+paired result against copied input. Try the [complete no-API case](../examples/data-paired/README.md).
+The baseline/candidate bar panels share the declared quantity's numeric scale;
+the paired-difference panel has its own labelled axis. This prevents independent
+automatic scaling from disguising a difference or suggesting a larger one.
 
 Server numerical acceptance: `python scripts/validate_table_nist.py --output-root runs/nist-NEW`.
 It compares two official NIST StRD datasets with certified mean/sample-standard-deviation values
@@ -75,7 +205,13 @@ Repeat `--material` for drafts, notes or result descriptions; `--document` ident
 a separate bibliographic paper. Writing extracts and persists the supplied text, then
 uses the shared Writer, Reviewer, assembly and audit capabilities. It does not search,
 create innovation candidates, execute experiments or manufacture an empty synthesis.
-Inputs are Markdown/text/PDF or a completed `table_analysis.v1` analysis package.
+Inputs are Markdown, text, HTML, PDF, ordinary JSON or a completed `table_analysis.v1` analysis package.
+Material writing reserves bounded views for explicit abstract sections and selects
+other retained passages against the task with the existing lexical retrieval.
+Long abstracts may span multiple windows; each window retains its exact chunk
+offsets and omission status. This is not whole-document reading or semantic
+verification. Unheaded parsed notes remain body text, not inferred abstracts;
+missing headings do not mean the document lacks relevant results.
 New guided writing tasks using built-in templates enable adaptive article planning:
 the saved request and evidence determine a concise title, section responsibilities,
 length allocation and placement of registered data figures. Custom templates retain
@@ -94,8 +230,13 @@ frozen heading, with pending ownership recorded and no invented future prose. Un
 ownership makes the preview unavailable. Whole-document review uses the same canonical
 total; raw section and attachment counts remain components, not competing whole totals.
 Whole-document inspection can cover every supplied section. Its correction allowance
-still targets at most two sections, prioritizing required and severe findings; excess
-findings remain unresolved. Saved source briefs use bounded evidence views without
+uses the frozen argument plan's section set (legacy plans retain two targets),
+prioritizing required and severe findings; excess findings remain unresolved.
+Joint editing can coordinate current sections literally quoted in a required editing
+finding, without copying that opinion to another section. Advisory/verification-only
+opinions and absent quotations do not expand targets. Saved correction requests retain
+their original targets during recovery; no extra model round is granted.
+Saved source briefs use bounded evidence views without
 rewriting the original records or removing authorized source backtracking.
 Section verification and final delivery are different gates. The candidate guard
 rejects a correction that takes a complete, fitting delivery outside its frozen
@@ -105,8 +246,10 @@ even if the model passes the edited section. Do not infer semantic certification
 from `status: passed`; inspect `semantic_review_status`, unresolved findings and
 the delivered prose separately. An exhausted editing allowance does not silently
 increase on recovery.
-Template section bodies supply writing requirements, not just headings; adaptive
-planning treats their topology as guidance. Material-based writing keeps supplied material visible alongside
+Fixed and custom templates supply section requirements, not just headings.
+Adaptive built-in planning receives only the template's intended use; fallback
+chapter assignments are not another proposed outline. The accepted plan supplies
+the writing responsibilities. Material-based writing keeps supplied material visible alongside
 papers within the source budget; more references do not replace the task's own results.
 For data-backed writing, pass the analysis task's printed `analysis.json` path
 to `--material` (optionally alongside notes). The system checks the saved records
@@ -125,7 +268,7 @@ Review copied data for privacy before sharing. Arithmetic rechecking does not
 verify collection, semantics, independence, significance or scientific validity;
 these are not experiments independently repeated by this session.
 
-The default is a concise analysis report. Add `--template experiment` for a
+The default is a supplied-material report (`material_report`). Add `--template experiment` for a
 paper-style draft with explicit evidence gaps. It does not authorize experiments or
 guarantee scientific quality. Local source metadata can be incomplete; do not rely on
 generated bibliographies without checking them. Template/review files are checked at setup.
@@ -154,6 +297,19 @@ candidate assessment/design still uses research synthesis. Reading notes remain
 model interpretations; report Writer, section Reviewer and document Reviewer receive
 the same bounded, identified source passages and source-access status. Truncation
 is explicit, and absence from an excerpt is not absence from the paper.
+When all reading inputs are explicitly required, automatic reading omits redundant
+coarse screening/reranking; retrieved/mixed pools and explicit model screening retain
+selection. Basic PDF reading installs pypdf's official font extra for embedded CFF
+font decoding, rather than custom glyph rules. This is not OCR, layout reconstruction
+or a guarantee that formulas, tables and scientific objects were extracted correctly.
+Targeted follow-up questions can access references and appendices within
+the same saved source, while initial overview sampling prioritizes the body. Original
+section labels accompany these excerpts; a reference entry is not experimental evidence.
+Explicit numbered objects (figures, tables, theorems and related statements) route
+to their retained definition/caption rather than a prose cross-reference. This is
+navigation, not mathematical verification. Native source surveys use the existing
+article planner even without a legacy survey contract; `outline_strategy = "template"`
+keeps fixed topology, custom templates and frozen checkpoints are not replanned.
 Delivery shares its six source windows between exact saved followup hits and
 a section-aware overview of note/claim references. Up to two followup slots are
 reserved; either pool can borrow unused slots. Selected late windows retain
@@ -227,11 +383,12 @@ adopt that candidate. Correction and recovery retain the existing allowance.
 Incomplete previews and already-out-of-range originals are not assigned a guessed
 section-local fix; final audit still checks the actual assembled report. This
 prevents that regression, not all length failures or semantic errors.
-Survey planning receives the same complete original task. With a valid explicit
-whole-document word request, its proposed 2–12 purposeful sections do not gain
-unrelated broad-survey coverage sections or filler subsection hints. Without
-that request, the existing broad-survey path remains; custom and frozen plans
-are unchanged. This is input consistency, not a guarantee of compliance.
+Survey planning receives the same complete original task. Its proposed 2–12
+usable sections do not gain keyword-inserted coverage chapters or filler
+subsections, with or without a word request. Generic titles alone are not grounds
+for rejecting an outline. Broad-survey coverage guidance and source routing
+remain; custom and frozen plans are unchanged. Preserving a proposal is not a
+guarantee that it answers the task or has adequate scientific coverage.
 The claim view follows current adopted drafts, preserving separate declarations even
 when two sections reuse a claim id; rejected revisions do not replace current prose.
 Revision verification receives the original findings, requested changes and a bounded
@@ -397,10 +554,17 @@ and checkpointed after completion. Interrupted reads remain explicitly unconfirm
 are not repeated on resume. Retrieval alone does not verify a scientific judgement.
 Controller failures keep separate operation identities even with identical wording;
 only actual success of their owning operation clears a stale service failure.
-Whole-document editing can select at most two section targets. Each target uses
+Whole-document editing can select the frozen argument plan's section set;
+legacy plans retain at most two targets. Each target uses
 the existing `max_review_iterations` allowance, including rejected candidates.
 Saved iterations preserve consumed allowance and original findings/instructions;
-resuming cannot create a third target or reset correction attempts.
+resuming cannot expand the frozen legacy target contract or reset correction attempts.
+Explicit document drafting instead counts joint candidate rounds under the same
+  limit and preserves previously consumed legacy rounds and pending contracts.
+  A joint Writer can ask the registered tools for one retained-source batch before
+  composing or correcting, when the overview lacks a needed condition or passage.
+  These are the same read-only tools and limits used by review, not a new reading
+  pipeline. Unavailable or unmatched reads remain unknown, not proof of absence.
 Known publication dates, DOI and author-list coverage notes survive document handoff
 and share one metadata projection for writing, references, BibTeX and `citation_map.json`.
 Missing details are displayed rather than inferred. Provider metadata is not independent
@@ -412,14 +576,35 @@ Audit warns for cited conflicts. Missing metadata and unused conflicting sources
 do not by themselves block delivery, and consistent fields remain unverified.
 Extracted text before the first recognized heading is retained as front matter;
 Bounded chunk budgets prioritize body evidence and may leave front matter out of indexed chunks.
-Reading a byline does not automatically replace metadata.
+Model reading may propose missing local citation fields from an explicit bounded
+front-matter view in the existing reading call; it does not replace recorded metadata.
+Adaptive material-writing planning uses the same saved view in its existing
+outline call, without requiring a separate reading stage. Accepted source-matched
+proposals stay in the existing outline checkpoint and are projected consistently
+into drafting, assembly, citation maps and BibTeX on recovery. Custom fixed outlines
+and old plans without proposals do not acquire new metadata automatically.
+Filename-only title placeholders are requested as missing titles. Exact short
+byline subsets may be retained with incomplete coverage; erroneous full-list
+transcriptions are not accepted through fuzzy matching. Publication dates in
+ISO or complete English written-month forms are calendar-checked while the
+recorded text remains unchanged; ambiguous numeric dates and guessed years are
+not accepted. This checks the given field's format, not whether a date belongs
+to publication rather than submission or to the correct version.
+Local filename titles are labelled as placeholders, not established publication titles.
 `get_paper_brief` returns recorded metadata alongside saved front matter, even if
 the indexed chunk cap omitted that header. It does not open live file paths or
 guess missing headers in old saved bundles; truncation and missing text stay explicit.
-For a filename-only local source, a reading note's title proposal can become the
-report display title only if it occurs in that same source's saved, bounded front
-matter. Original records are unchanged. The citation map exposes title provenance;
-unknown authors/date/DOI remain unknown. This is not identity/version validation.
+For a local source, missing title/byline/date/DOI/public URL can be filled in the
+report projection only with the same source's saved front-matter locator and matching
+quotation. A title can replace only the filename default. Original records and
+provider/user metadata are unchanged; incomplete bylines are explicit. Citation maps,
+Markdown and BibTeX share the projection. There is no network lookup, guessing from
+filenames or independent identity/version validation. Unread or unavailable fields
+remain unknown. Older notes keep their narrower source-matched title behavior.
+Front matter is a parser label, not a guarantee that the text contains only a
+byline. When no explicit abstract was identified, that opening text remains a
+candidate for task-related passage selection. It is not relabelled as an abstract
+or treated as exhaustive reading.
 Reading notes receive the user task focus separately from source evidence. Default excerpts
 retain an ingest-sized chunk; smaller windows mark further clipping. Note identities and
 declared references are checked against their owning document. This prevents misattribution,
@@ -625,6 +810,12 @@ available, reviewers can request bounded passages around a cited chunk; cached
 excerpts alone are not reported as fresh source reading. Revision traces retain
 candidate text and whole-document adoption decisions even when verification fails.
 Inspect unresolved findings before treating a generated report as a checked paper.
+
+With explicit `report.draft_scope = "document"`, cross-section correction uses
+one saved candidate and checks the complete candidate before adopting the changed
+sections together. Rejected corrections leave the original manuscript intact.
+The same trace retains correction requests, completed checks and consumed rounds;
+default section editing and pending legacy candidates keep their previous path.
 
 An assembled report can be exported independently with `report-export`:
 the canonical citation-key body and bibliography become an editable ACM
@@ -863,6 +1054,14 @@ plan -> search -> document ingest -> read -> synthesize -> design
   existing work plans retain their batch workflow.
 - Implementation produces frozen patch, validation, review and plan evidence.
   These checks do not themselves establish a scientific improvement.
+- CodeTask preparation is task-bound, not only a source copy. Goal, constraint
+  or editing-contract revisions require a fresh prepared run; old plans and
+  evidence remain available and the same session budget continues. Preferences
+  alone do not require another prepared workspace.
+  Saved task configuration keeps the declared source/execution settings;
+  prepared directories remain in their own artifact and are overlaid when run.
+  Revision invalidation and checkpoint consent compare the task declaration,
+  not a configuration flattened into an earlier workspace.
 - Experiment results and comparisons keep their execution references. A failed
   process is not a valid measurement; a valid negative result is not an
   instruction to repair forever.

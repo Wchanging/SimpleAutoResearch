@@ -1103,12 +1103,20 @@ class ResearchApplication:
 
         refs = self.controller.manifest.state_refs
         documents = self._load_documents()
-        if self._task_kind() == "writing":
+        planned = {step.capability for step in self._load_task_plan().steps} if "task_plan" in refs else set()
+        if self._task_kind() in {"writing", "data_analysis"} or (
+            "task_plan" in refs and "synthesis" not in refs and "synthesize" not in planned
+            and not set(self.brief.requested_outputs) & {"experiment", "experiments"}
+        ):
             from simple_ar.report.projection import build_material_report_inputs
-            return build_material_report_inputs(
+            context, memory = build_material_report_inputs(
                 topic=self.brief.objective or self.brief.request_text,
                 documents=documents, documents_ref=refs["documents"], assets=self.assets,
             )
+            if "read" in refs or "read" in planned:
+                return attach_report_read_evidence(context, memory, documents=documents,
+                    read=self._load_read(documents=documents), read_ref=refs["read"])
+            return context, memory
         search = self._load_search(documents=documents)
         synthesis = self._load_synthesis()
         read = self._load_read(documents=documents)
@@ -1165,6 +1173,7 @@ class ResearchApplication:
             context, memory = attach_experiment_history(
                 context, memory, self._report_experiment_observations(),
                 current_ref=analysis.execution_ref, include_prior_metrics=False,
+                output_store=self.controller.store,
             )
             memory.source_handles = list(context.source_handles)
             return attach_report_read_evidence(context, memory, documents=documents,
@@ -1229,6 +1238,7 @@ class ResearchApplication:
         context, memory = attach_experiment_history(
             context, memory, self._report_experiment_observations(),
             current_ref=analysis.execution_ref,
+            output_store=self.controller.store,
         )
         return attach_report_read_evidence(context, memory, documents=documents,
                                            read=read, read_ref=refs["read"])
@@ -1357,23 +1367,32 @@ class ResearchApplication:
         return accepted
 
     def _run_document_ingest_action(self) -> bool:
-        plan = self._load_plan()
+        if self._task_kind() == "data_analysis":
+            from simple_ar.research.contracts import SourcePlan
+            source_plan = SourcePlan(queries=[], sources=["local_files"],
+                                     local_documents=[str(path) for path in self._local_documents()])
+        else:
+            source_plan = self._load_plan().source_plan
         has_search = "search" in self.controller.manifest.state_refs
         papers = self._load_search().selected_papers if has_search else ()
+        analysis_paths = tuple(Path(asset.locator) for asset in self.assets
+            if self._task_kind() == "writing" and asset.role == "material" and Path(asset.locator).suffix.lower() == ".json")
+        if self._task_kind() == "data_analysis" and "data_analysis" in self.controller.manifest.state_refs:
+            analysis_paths = (self.controller.store.resolve(self.controller.manifest.state_refs["data_analysis"]),)
         if self.services.message_callback:
-            self.services.message_callback(f"Ingesting {len(papers)} selected papers and {len(plan.source_plan.local_documents)} supplied documents.")
-        if not papers and not plan.source_plan.local_documents:
-            self.controller.pause("Document ingest needs at least one selected paper.")
+            self.services.message_callback(f"Ingesting {len(papers)} selected papers and {len(source_plan.local_documents)} supplied documents; checking {len(analysis_paths)} JSON materials for declared analysis packages.")
+        if not papers and not source_plan.local_documents and not analysis_paths:
+            self.controller.pause("Document ingest needs supplied material, a completed analysis package or a selected paper.")
             return False
         accepted = self._execute(
             "document_ingest", "documents",
             DocumentIngestRequest(
-                papers=papers, source_plan=plan.source_plan,
+                papers=papers, source_plan=source_plan,
                 cache_dir=self._cache_dir("literature"), extraction_dir=self._extraction_dir(),
                 max_chunks=self.services.max_chunks,
-                analysis_paths=tuple(Path(asset.locator) for asset in self.assets
-                    if self._task_kind() == "writing" and asset.role == "material" and Path(asset.locator).suffix.lower() == ".json"),
-            ), self._input_refs("plan", "search") if has_search else self._input_refs("plan", "assets"), allow_partial=True,
+                analysis_paths=analysis_paths,
+            ), self._input_refs("task_plan" if self._task_kind() == "data_analysis" else "plan", "search" if has_search else "assets",
+                *(("data_analysis",) if self._task_kind() == "data_analysis" else ())), allow_partial=True,
         )
         if accepted:
             documents = self._load_documents()
@@ -1445,11 +1464,9 @@ class ResearchApplication:
     def _run_prepare_execution_action(self) -> bool:
         execution = self._execution_config().get("execution")
         if not isinstance(execution, Mapping):
-            self.controller.pause(
+            return self._pause_action(
                 "This task needs an explicit execution.code_task specification before preparation."
             )
-            self._persist_application_views()
-            return False
         config = dict(execution)
         if "dataset" in config:
             # The existing CSV preparation contract is intentionally
@@ -1457,13 +1474,12 @@ class ResearchApplication:
             config.pop("baseline_policy", None)
             config.pop("protocol_seed_reason", None)
         if self._task_kind() != "bug_fix" and "code_task" in config and self._state_payload("design").get("contract") is None:
-            self.controller.pause("CodeTask preparation requires a selected research design contract; review the candidate assessment before running its experiment matrix.")
-            self._persist_application_views()
-            return False
+            return self._pause_action("CodeTask preparation requires a selected research design contract; review the candidate assessment before running its experiment matrix.")
         try:
             run = None
             if "dataset" not in config:
-                config.setdefault("cwd", config["code_task"]["code_root"])
+                if "code_task" in config:
+                    config.setdefault("cwd", config["code_task"]["code_root"])
                 run = execution_request(
                     config, task_text=self.brief.request_text,
                     contract=self._execution_contract(),
@@ -1474,10 +1490,11 @@ class ResearchApplication:
             return False
         return self._execute(
             "prepare_execution", "preparation",
-            PreparationRequest(config, self._problem_markdown(), run),
+            PreparationRequest(config, self._problem_markdown(), run, data_paths=self._execution_data_paths()),
             self._input_refs("brief", "runtime_config")
-            if self._task_kind() == "bug_fix"
+            if self._task_kind() == "bug_fix" or "environment" in config
             else self._input_refs("brief", "design", "runtime_config"),
+            backend=LocalExecutionBackend(budget_ledger=self.budget_ledger, message_callback=self.services.message_callback),
         )
 
     def _run_matrix_analysis_action(self) -> bool:
@@ -1524,9 +1541,7 @@ class ResearchApplication:
         try:
             report_context, memory, config, template, _ = self._report_writing_parts()
         except ResearchApplicationError as exc:
-            self.controller.pause(f"Report inputs are not ready: {exc}")
-            self._persist_application_views()
-            return False
+            return self._pause_action(f"Report inputs are not ready: {exc}")
         sources = tuple(ref for key, ref in self.controller.manifest.state_refs.items() if key not in {"work_plan", "work_plan_markdown", "readiness"})
         # Attachment handles come from measured results, but read permission
         # comes from the producing attempt's registered outputs, not model text.
@@ -1574,9 +1589,7 @@ class ResearchApplication:
         inputs = self._input_refs("synthesis", "assessment", "brief", "runtime_config")
         if revision:
             if self.services.llm_client is None:
-                self.controller.pause("A research design revision needs the configured design model; no deterministic direction was inferred.")
-                self._persist_application_views()
-                return False
+                return self._pause_action("A research design revision needs the configured design model; no deterministic direction was inferred.")
             design_ref = self._implementation_design_ref()
             decision_ref = self.controller.manifest.state_refs.get("decision")
             analysis_ref = self._latest_analysis_ref()
@@ -1614,9 +1627,7 @@ class ResearchApplication:
                             source_index = json.loads(index_path.read_text(encoding="utf-8"))
                     inputs.append(implementation_ref)
             except (OSError, TypeError, ValueError, KeyError) as exc:
-                self.controller.pause(f"Research design revision could not load its evidence boundary: {exc}")
-                self._persist_application_views()
-                return False
+                return self._pause_action(f"Research design revision could not load its evidence boundary: {exc}")
         else:
             assessment = self.controller.store.read_json(self.controller.manifest.state_refs["assessment"])
             selected = self._effective_config().get("research_selected_idea_id")
@@ -1639,9 +1650,7 @@ class ResearchApplication:
                     reason = "Selected the first execution-ready direction provisionally; CodeTask must inspect and validate it."
             if not selected and self.services.llm_client is not None:
                 details = " ".join(assessment.get("diagnostics", []))
-                self.controller.pause("No validated model recommendation is available. " + details + " Review idea_comparison before continuing.")
-                self._persist_application_views()
-                return False
+                return self._pause_action("No validated model recommendation is available. " + details + " Review idea_comparison before continuing.")
             if not selected:
                 reason = "Deterministic execution-readiness selection; scientific preference has not been assessed."
             if has_execution:
@@ -1660,9 +1669,7 @@ class ResearchApplication:
                             required_paths=(source_config,) if isinstance(source_config, str) else (),
                         )
                 except (OSError, TypeError, ValueError) as exc:
-                    self.controller.pause(f"Could not inspect the supplied execution entry: {exc}")
-                    self._persist_application_views()
-                    return False
+                    return self._pause_action(f"Could not inspect the supplied execution entry: {exc}")
                 entry_facts["input_refs"] = [ref.to_dict() for ref in self._input_refs("brief", "assessment", "runtime_config")]
         return self._execute(
             "research_design", action if revision else "design",
@@ -1688,9 +1695,7 @@ class ResearchApplication:
         if self._task_kind() == "bug_fix":
             execution = self._execution_config().get("execution")
             if not isinstance(execution, Mapping) or not isinstance(execution.get("code_task"), Mapping):
-                self.controller.pause("Bug repair requires an explicit existing-project CodeTask configuration.")
-                self._persist_application_views()
-                return False
+                return self._pause_action("Bug repair requires an explicit existing-project CodeTask configuration.")
             try:
                 request = implementation_request(
                     execution, self.services.llm_client, validate=True,
@@ -1770,9 +1775,7 @@ class ResearchApplication:
                 if self.budget_ledger.remaining(resource) is None:
                     raise ValueError(f"Execution requires an explicit finite {resource} budget.")
         except ValueError as exc:
-            self.controller.pause(str(exc))
-            self._persist_application_views()
-            return False
+            return self._pause_action(str(exc))
         inputs = self._experiment_input_refs()
         if action.startswith("matrix_candidate_") and "implementation" in self.controller.manifest.state_refs:
             revision = int(action.split("_r")[1].split("_")[0]) if "_r" in action else 0
@@ -1800,9 +1803,7 @@ class ResearchApplication:
                 iteration, supplement, pair_index=selected_pair, check_round_budget=False,
             )
             if config is None:
-                self.controller.pause(reason)
-                self._persist_application_views()
-                return False
+                return self._pause_action(reason)
             condition = "baseline" if action.startswith("supplement_baseline:") else "candidate"
             preparation_ref: ArtifactRef | None = None
             if isinstance(config.get("code_task"), Mapping):
@@ -1814,9 +1815,7 @@ class ResearchApplication:
                 else:
                     config, reason = self._code_task_supplement_candidate_config(config)
                     if config is None:
-                        self.controller.pause(reason)
-                        self._persist_application_views()
-                        return False
+                        return self._pause_action(reason)
             request = execution_request(
                 config, condition=condition, pair_index=selected_pair,
                 task_text=self.brief.request_text,
@@ -1826,9 +1825,7 @@ class ResearchApplication:
                 if self.budget_ledger.remaining(resource) is None:
                     raise ValueError(f"Execution requires an explicit finite {resource} budget.")
         except (TypeError, ValueError) as exc:
-            self.controller.pause(str(exc))
-            self._persist_application_views()
-            return False
+            return self._pause_action(str(exc))
         inputs = [self._implementation_design_ref(), *self._input_refs("runtime_config")]
         if preparation_ref is not None:
             inputs.append(preparation_ref)
@@ -1870,10 +1867,12 @@ class ResearchApplication:
             iteration = int(action.rsplit(":", 1)[1])
         except (TypeError, ValueError) as exc:
             raise ResearchApplicationError(f"Invalid research reanalysis action: {action}") from exc
+        refs = self.controller.manifest.state_refs
+        baseline_arguments = {}
+        append_history = True
         failed_measurement = self._failed_followup_measurement(iteration)
         if failed_measurement is not None:
-            failed_name, failed_ref = failed_measurement
-            refs = self.controller.manifest.state_refs
+            failed_name, result_ref = failed_measurement
             baseline_ref = None
             if failed_name.startswith("experiment_supplement_"):
                 baseline_ref = refs.get(failed_name.replace("experiment_", "baseline_", 1))
@@ -1884,8 +1883,8 @@ class ResearchApplication:
             baseline_ref = baseline_ref or refs.get("baseline") or next(
                 iter(self._revision_baseline_refs()), None
             )
-            inputs = [failed_ref, *self._optional_refs("decision")]
-            measured_implementation = self._measured_implementation_ref(failed_ref)
+            inputs = [result_ref, *self._optional_refs("decision")]
+            measured_implementation = self._measured_implementation_ref(result_ref)
             if measured_implementation is not None:
                 inputs.append(measured_implementation)
             previous = self._latest_analysis_ref()
@@ -1893,138 +1892,89 @@ class ResearchApplication:
                 inputs.append(previous)
             if baseline_ref is not None:
                 inputs.insert(0, baseline_ref)
-            return self._execute(
-                "analysis", f"analysis_r{iteration}", None, tuple(inputs),
-                allow_partial=True, baseline_ref=baseline_ref,
-                result_ref=failed_ref, analysis_context=self._analysis_context(),
-                use_llm=self.services.llm_client is not None,
-                client=self.services.llm_client,
-            )
-        revision_candidates = self._revision_candidate_refs(iteration)
-        pairs = execution_pairs(
-            self._execution_config().get("execution"),
-            task_text=self.brief.request_text,
-        )
-        if revision_candidates and not pairs:
-            baseline_ref = self.controller.manifest.state_refs.get("baseline")
-            if baseline_ref is None:
-                raise ResearchApplicationError(
-                    f"Reanalysis {iteration} requires the original baseline measurement."
-                )
-            current_candidate = revision_candidates[-1]
-            inputs = [baseline_ref, current_candidate, *self._optional_refs(
-                "analysis", "decision",
-            )]
-            measured_implementation = self._measured_implementation_ref(current_candidate)
-            if measured_implementation is not None:
-                inputs.append(measured_implementation)
-            return self._execute(
-                "analysis", f"analysis_r{iteration}", None, tuple(inputs),
-                allow_partial=True, baseline_ref=baseline_ref,
-                result_ref=current_candidate,
-                analysis_context=self._analysis_context(),
-                use_llm=self.services.llm_client is not None,
-                client=self.services.llm_client,
-            )
-        if revision_candidates and pairs and len(revision_candidates) == len(pairs):
-            collection_ref = self.controller.manifest.state_refs.get("matrix_results")
-            if collection_ref is None:
-                raise ResearchApplicationError(
-                    f"Reanalysis {iteration} requires the persisted paired candidate collection."
-                )
-            inputs = [collection_ref, *self._revision_baseline_refs(), *revision_candidates]
-            implementation_ref = self.controller.manifest.state_refs.get(
-                f"implementation_r{iteration}"
-            )
-            if implementation_ref is not None:
-                inputs.append(implementation_ref)
-            previous = self._latest_analysis_ref()
-            if previous is not None:
-                inputs.append(previous)
-            decision_ref = self.controller.manifest.state_refs.get("decision")
-            if decision_ref is not None:
-                inputs.append(decision_ref)
-            return self._execute(
-                "analysis", f"analysis_r{iteration}", None, tuple(inputs),
-                allow_partial=True, result_ref=collection_ref,
-                analysis_context=self._analysis_context(),
-                use_llm=self.services.llm_client is not None,
-                client=self.services.llm_client,
-            )
-
-        supplement = self._decision_supplement()
-        supplement_count = self._supplement_count(supplement)
-        if isinstance(supplement, Mapping) and ("seed" in supplement or "seeds" in supplement):
-            supplement_pairs: list[tuple[ArtifactRef, ArtifactRef]] = []
-            for index in range(supplement_count):
-                baseline_ref = self.controller.manifest.state_refs.get(
-                    self._supplement_ref_name("baseline", iteration, index, supplement_count)
-                )
-                candidate_ref = self.controller.manifest.state_refs.get(
-                    self._supplement_ref_name("candidate", iteration, index, supplement_count)
-                )
-                if baseline_ref is None or candidate_ref is None:
+            baseline_arguments = {"baseline_ref": baseline_ref}
+            append_history = False
+        else:
+            revision_candidates = self._revision_candidate_refs(iteration)
+            pairs = execution_pairs(self._execution_config().get("execution"),
+                                    task_text=self.brief.request_text)
+            if revision_candidates and not pairs:
+                baseline_ref = refs.get("baseline")
+                if baseline_ref is None:
                     raise ResearchApplicationError(
-                        f"Reanalysis {iteration} requires both supplement measurements for condition {index}."
+                        f"Reanalysis {iteration} requires the original baseline measurement."
                     )
-                supplement_pairs.append((baseline_ref, candidate_ref))
-            if supplement_count > 1:
-                collection_ref = self._write_supplement_collection(
-                    iteration, supplement, supplement_pairs,
-                )
-                inputs = [collection_ref]
-                inputs.extend(ref for pair in supplement_pairs for ref in pair)
-                collection_payload = self.controller.store.read_json(collection_ref)
+                result_ref = revision_candidates[-1]
+                inputs = [baseline_ref, result_ref, *self._optional_refs("analysis", "decision")]
+                measured_implementation = self._measured_implementation_ref(result_ref)
+                if measured_implementation is not None:
+                    inputs.append(measured_implementation)
+                baseline_arguments = {"baseline_ref": baseline_ref}
+                append_history = False
+            elif revision_candidates and pairs and len(revision_candidates) == len(pairs):
+                result_ref = refs.get("matrix_results")
+                if result_ref is None:
+                    raise ResearchApplicationError(
+                        f"Reanalysis {iteration} requires the persisted paired candidate collection."
+                    )
+                inputs = [result_ref, *self._revision_baseline_refs(), *revision_candidates]
+                implementation_ref = refs.get(f"implementation_r{iteration}")
+                if implementation_ref is not None:
+                    inputs.append(implementation_ref)
+            else:
+                supplement = self._decision_supplement()
+                supplement_count = self._supplement_count(supplement)
+                collection_ref = None
+                if isinstance(supplement, Mapping) and ("seed" in supplement or "seeds" in supplement):
+                    supplement_pairs: list[tuple[ArtifactRef, ArtifactRef]] = []
+                    for index in range(supplement_count):
+                        baseline_ref = refs.get(
+                            self._supplement_ref_name("baseline", iteration, index, supplement_count)
+                        )
+                        candidate_ref = refs.get(
+                            self._supplement_ref_name("candidate", iteration, index, supplement_count)
+                        )
+                        if baseline_ref is None or candidate_ref is None:
+                            raise ResearchApplicationError(
+                                f"Reanalysis {iteration} requires both supplement measurements for condition {index}."
+                            )
+                        supplement_pairs.append((baseline_ref, candidate_ref))
+                    if supplement_count > 1:
+                        collection_ref = self._write_supplement_collection(
+                            iteration, supplement, supplement_pairs
+                        )
+                if collection_ref is not None:
+                    result_ref = collection_ref
+                    inputs = [result_ref, *(ref for pair in supplement_pairs for ref in pair)]
+                else:
+                    baseline_ref = refs.get(self._supplement_ref_name("baseline", iteration, 0, 1))
+                    result_ref = refs.get(self._supplement_ref_name("candidate", iteration, 0, 1))
+                    if baseline_ref is None or result_ref is None:
+                        raise ResearchApplicationError(
+                            f"Reanalysis {iteration} requires both supplement measurements."
+                        )
+                    inputs = [baseline_ref, result_ref]
+                    baseline_arguments = {"baseline_ref": baseline_ref}
+                result_payload = self.controller.store.read_json(result_ref)
                 implementation_ref = self._artifact_ref(
-                    collection_payload.get("implementation_ref")
-                    if isinstance(collection_payload, Mapping) else None
+                    result_payload.get("implementation_ref")
+                    if isinstance(result_payload, Mapping) else None
                 )
                 if implementation_ref is not None:
                     inputs.append(implementation_ref)
-                previous = self._latest_analysis_ref()
-                if previous is not None:
-                    inputs.append(previous)
-                decision_ref = self.controller.manifest.state_refs.get("decision")
-                if decision_ref is not None:
-                    inputs.append(decision_ref)
-                return self._execute(
-                    "analysis", f"analysis_r{iteration}", None, tuple(inputs),
-                    allow_partial=True, result_ref=collection_ref,
-                    analysis_context=self._analysis_context(),
-                    use_llm=self.services.llm_client is not None,
-                    client=self.services.llm_client,
-                )
-
-        baseline_ref = self.controller.manifest.state_refs.get(
-            self._supplement_ref_name("baseline", iteration, 0, 1)
-        )
-        candidate_ref = self.controller.manifest.state_refs.get(
-            self._supplement_ref_name("candidate", iteration, 0, 1)
-        )
-        if baseline_ref is None or candidate_ref is None:
-            raise ResearchApplicationError(
-                f"Reanalysis {iteration} requires both supplement measurements."
-            )
-        inputs = [baseline_ref, candidate_ref]
-        candidate_payload = self.controller.store.read_json(candidate_ref)
-        implementation_ref = self._artifact_ref(
-            candidate_payload.get("implementation_ref")
-            if isinstance(candidate_payload, Mapping) else None
-        )
-        if implementation_ref is not None:
-            inputs.append(implementation_ref)
-        previous = self._latest_analysis_ref()
-        if previous is not None:
-            inputs.append(previous)
-        decision_ref = self.controller.manifest.state_refs.get("decision")
-        if decision_ref is not None:
-            inputs.append(decision_ref)
+        # Each branch selects its actual observations and input order. Execution
+        # policy is shared; collections do not acquire a single-run baseline.
+        if append_history:
+            previous = self._latest_analysis_ref()
+            if previous is not None:
+                inputs.append(previous)
+            inputs.extend(self._optional_refs("decision"))
         return self._execute(
             "analysis", f"analysis_r{iteration}", None, tuple(inputs),
-            allow_partial=True, baseline_ref=baseline_ref,
-            result_ref=candidate_ref, analysis_context=self._analysis_context(),
-            use_llm=self.services.llm_client is not None,
-            client=self.services.llm_client,
+            allow_partial=True, result_ref=result_ref,
+            analysis_context=self._analysis_context(),
+            use_llm=self.services.llm_client is not None, client=self.services.llm_client,
+            **baseline_arguments,
         )
 
     def _run_report_audit_action(self, action: str) -> bool:
@@ -2037,6 +1987,9 @@ class ResearchApplication:
         snapshot = self.controller.store.read_json(snapshot_ref)
         report_context = ReportContext.model_validate(snapshot["context"])
         memory = ReportMemory.model_validate(writer["memory"])
+        from simple_ar.report.projection import apply_report_bibliography
+        report_context, memory = apply_report_bibliography(report_context, memory,
+            documents=self._load_documents(), notes=memory.outline_planning.get("source_notes", []))
         if action == "report":
             table_analyses = tuple(self.controller.store.ref(row["artifact"], kind="table_analysis", schema="table_analysis.v1")
                                   for row in report_context.results.get("supplied_analyses", []))
@@ -2142,9 +2095,7 @@ class ResearchApplication:
         iteration = _action_iteration(action)
         config, reason = self._revision_execution_config()
         if config is None:
-            self.controller.pause(reason)
-            self._persist_application_views()
-            return False
+            return self._pause_action(reason)
         try:
             config.setdefault("cwd", config["code_task"]["code_root"])
             run = execution_request(
@@ -2153,18 +2104,14 @@ class ResearchApplication:
             ).run
             repair_limit(config)
         except (KeyError, TypeError, ValueError) as exc:
-            self.controller.pause(f"Candidate revision preparation is not executable: {exc}")
-            self._persist_application_views()
-            return False
+            return self._pause_action(f"Candidate revision preparation is not executable: {exc}")
         inputs = [*self._input_refs("brief", "runtime_config"), self._implementation_design_ref()]
         inputs.extend(self._optional_refs(
             "preparation", "baseline", "matrix_results", "analysis", "decision",
         ))
         source_project = self._prepared_source_project()
         if source_project is None:
-            self.controller.pause("Candidate revision has no readable original project lineage.")
-            self._persist_application_views()
-            return False
+            return self._pause_action("Candidate revision has no readable original project lineage.")
         return self._execute(
             "prepare_execution", f"preparation_r{iteration}",
             PreparationRequest(
@@ -2173,6 +2120,7 @@ class ResearchApplication:
                 run,
                 run_dir=Path(f"project_run_revision_{iteration}"),
                 source_project=source_project,
+                data_paths=self._execution_data_paths(),
             ),
             tuple(inputs),
         )
@@ -2181,14 +2129,10 @@ class ResearchApplication:
         iteration = _action_iteration(action)
         execution = self._execution_config().get("execution")
         if not isinstance(execution, Mapping) or not isinstance(execution.get("code_task"), Mapping):
-            self.controller.pause("Candidate revision requires the prepared CodeTask execution boundary.")
-            self._persist_application_views()
-            return False
+            return self._pause_action("Candidate revision requires the prepared CodeTask execution boundary.")
         baselines, reason = self._validated_baseline_refs(execution)
         if not baselines:
-            self.controller.pause(reason)
-            self._persist_application_views()
-            return False
+            return self._pause_action(reason)
         try:
             request = implementation_request(
                 execution, self.services.llm_client, validate=False,
@@ -2203,9 +2147,7 @@ class ResearchApplication:
                 session_id=self.controller.manifest.session_id,
             )
         except (TypeError, ValueError) as exc:
-            self.controller.pause(f"Candidate revision is not executable: {exc}")
-            self._persist_application_views()
-            return False
+            return self._pause_action(f"Candidate revision is not executable: {exc}")
         inputs = [*self._input_refs("brief", "runtime_config", f"preparation_r{iteration}"), self._implementation_design_ref()]
         inputs.extend(baselines)
         inputs.extend(self._optional_refs("analysis", "decision"))
@@ -2224,14 +2166,10 @@ class ResearchApplication:
         )
         failed_ref = self.controller.manifest.state_refs.get(failed_name)
         if failed_ref is None or not self._state_failed(failed_name):
-            self.controller.pause("Technical candidate repair requires a recorded failed measurement.")
-            self._persist_application_views()
-            return False
+            return self._pause_action("Technical candidate repair requires a recorded failed measurement.")
         execution = self._execution_config().get("execution")
         if not isinstance(execution, Mapping):
-            self.controller.pause("Technical candidate repair requires the accepted execution configuration.")
-            self._persist_application_views()
-            return False
+            return self._pause_action("Technical candidate repair requires the accepted execution configuration.")
         try:
             request = implementation_request(
                 execution, self.services.llm_client, validate=False,
@@ -2246,9 +2184,7 @@ class ResearchApplication:
                 session_id=self.controller.manifest.session_id,
             )
         except (TypeError, ValueError) as exc:
-            self.controller.pause(f"Technical candidate repair is not executable: {exc}")
-            self._persist_application_views()
-            return False
+            return self._pause_action(f"Technical candidate repair is not executable: {exc}")
         inputs = [failed_ref, *self._input_refs(
             "brief", "runtime_config", f"preparation_r{iteration}",
         ), self._implementation_design_ref()]
@@ -2274,9 +2210,7 @@ class ResearchApplication:
                 if self.budget_ledger.remaining(resource) is None:
                     raise ValueError(f"Execution requires an explicit finite {resource} budget.")
         except (TypeError, ValueError) as exc:
-            self.controller.pause(f"Candidate revision measurement is not executable: {exc}")
-            self._persist_application_views()
-            return False
+            return self._pause_action(f"Candidate revision measurement is not executable: {exc}")
         inputs = [self._implementation_design_ref(), *self._input_refs("runtime_config", f"preparation_r{iteration}")]
         implementation_name = (
             f"implementation_r{iteration}_repair_{repair_index}"
@@ -2520,9 +2454,7 @@ class ResearchApplication:
             # A failed quality gate is still an inspectable artifact. Keep its
             # ref and stop this run; do not turn it into a successful delivery.
             self._record_attempt_outputs(capability, state_name, attempt_id, result)
-            self.controller.pause("Report audit failed; inspect report_audit.json before delivery or revision.")
-            self._persist_application_views()
-            return False
+            return self._pause_action("Report audit failed; inspect report_audit.json before delivery or revision.")
         if result.status not in accepted and not measured_failure:
             if capability == "implement" and self._schedule_implementation_refinement(state_name, attempt_id, result):
                 self._persist_application_views()
@@ -2634,7 +2566,8 @@ class ResearchApplication:
         run = execution_request(config, task_text=self.brief.request_text, contract=self._execution_contract()).run
         return self._execute("prepare_execution", action,
             PreparationRequest(config, self._problem_markdown(), run,
-                run_dir=Path(f"project_run_design_{iteration}"), source_project=source),
+                run_dir=Path(f"project_run_design_{iteration}"), source_project=source,
+                data_paths=self._execution_data_paths()),
             (design_ref, feedback_ref, *self._input_refs("brief", "runtime_config")),
         )
 
@@ -3495,6 +3428,7 @@ class ResearchApplication:
                 config, self._problem_markdown(), run,
                 run_dir=Path(f"project_run_supplement_{iteration}"),
                 source_project=source_project,
+                data_paths=self._execution_data_paths(),
             ),
             tuple(inputs),
         ):
@@ -3568,7 +3502,7 @@ class ResearchApplication:
         )
 
     def _request_for_attempt(self, request: Any, attempt_id: str) -> Any:
-        if isinstance(request, ExperimentRequest):
+        if isinstance(request, (ExperimentRequest, PreparationRequest)) and request.run is not None:
             return replace(request, run=replace(
                 request.run, session_id=self.controller.manifest.session_id, attempt_id=attempt_id,
             ))
@@ -3662,7 +3596,7 @@ class ResearchApplication:
                 ),
                 {
                     "schema_version": "research_application_config.v1",
-                    "config": _json_safe(self._effective_config()),
+                    "config": _json_safe(self.services.config),
                     "max_results": self.services.max_results,
                     "max_chunks": self.services.max_chunks,
                     "idea_limit": self.services.idea_limit,
@@ -4097,6 +4031,10 @@ class ResearchApplication:
         has_preparation = self._active_preparation_ref() is not None
         preparation_changed = code_project_changed or dataset_changed or (
             execution_assets_changed and (dataset_preparation or has_preparation)
+        ) or (
+            # A CodeTask run freezes the consumed task and edit contract, not
+            # just its source location. Its old plan cannot accept new inputs.
+            is_code_task and (implementation_context_changed or code_task_changed)
         )
         if preparation_changed:
             stale_capabilities.add("prepare_execution")
@@ -4401,7 +4339,7 @@ class ResearchApplication:
             except (KeyError, OSError, TypeError, ValueError):
                 return False
             saved_config = saved.get("config") if isinstance(saved, Mapping) else None
-            current = self._effective_config()
+            current = self.services.config
             if not isinstance(saved_config, Mapping) or saved_config.get("execution") != current.get("execution"):
                 return False
             if identity.get("execution_protocol") != self._execution_protocol_projection():
@@ -4620,6 +4558,11 @@ class ResearchApplication:
             and attempt.trigger == f"application:{state_name}"
             and attempt.capability == step.capability
         )
+        if completed and step.capability == "document_ingest":
+            # Older versions adopted metadata-only bundles as partial success.
+            # Keep the original attempt, but retry unusable text on explicit
+            # continuation instead of sending an empty bundle to the Writer.
+            return bool(self.controller.store.read_json(ref).get("chunks"))
         if not completed or step.capability != "experiment" or attempt is None or attempt.status != "completed":
             return completed
         try:
@@ -4910,36 +4853,28 @@ class ResearchApplication:
             elif isinstance(configured, (list, tuple)):
                 configured_refs = list(configured)
             else:
-                self.controller.pause(
+                return self._pause_action(
                     "Paired baseline reuse requires one baseline_ref per accepted seed condition."
                 )
-                self._persist_application_views()
-                return False
             if len(configured_refs) != len(pairs) or any(item is None for item in configured_refs):
-                self.controller.pause(
+                return self._pause_action(
                     "Baseline reuse requested, but a passed result is missing for an accepted seed condition."
                 )
-                self._persist_application_views()
-                return False
             for index, value in enumerate(configured_refs):
                 ref = self._coerce_reuse_ref(value)
                 if ref is None or not self._measurement_ref_matches(ref, execution, pair_index=index):
-                    self.controller.pause(
+                    return self._pause_action(
                         f"Baseline reuse condition does not match the accepted protocol for seed index {index}."
                     )
-                    self._persist_application_views()
-                    return False
                 self.controller.manifest.state_refs[f"matrix_baseline_{index}"] = ref
             return True
 
         value = configured or self.controller.manifest.state_refs.get("baseline")
         ref = self._coerce_reuse_ref(value)
         if ref is None or not self._measurement_ref_matches(ref, execution):
-            self.controller.pause(
+            return self._pause_action(
                 "Baseline reuse requested, but no passed same-condition canonical result was supplied."
             )
-            self._persist_application_views()
-            return False
         self.controller.manifest.state_refs["baseline"] = ref
         return True
 
@@ -5111,7 +5046,6 @@ class ResearchApplication:
     def _load_search(self, *, documents: DocumentBundle | None = None) -> SearchResult:
         if "search" in self.controller.manifest.state_refs:
             return SearchResult.from_handoff_dict(self._state_payload("search"))
-        from simple_ar.research.sources.capability import provided_materials_result
         return provided_materials_result((documents if documents is not None else self._load_documents()).records)
 
     def _load_documents(self) -> DocumentBundle:
@@ -5134,13 +5068,26 @@ class ResearchApplication:
             raise ResearchApplicationError(f"Application state {name} is not a JSON object.")
         return payload
 
+    def _pause_action(self, reason: str) -> bool:
+        """Persist an action stop through the existing application owner."""
+        self.controller.pause(reason)
+        self._persist_application_views()
+        return False
+
+    def _execution_data_paths(self) -> tuple[Path, ...]:
+        return tuple(dict.fromkeys(Path(asset.locator) for asset in self.assets
+                                   if asset.role in {"dataset", "data"}
+                                   and "read" in asset.allowed_uses
+                                   and Path(asset.locator).is_absolute()))
+
     def _local_documents(self) -> tuple[Path, ...]:
+        from simple_ar.research.documents.ports import SUPPORTED_DOCUMENT_SUFFIXES
         return tuple(dict.fromkeys(
             Path(asset.locator) for asset in self.assets
             if asset.availability != "missing"
             and asset.role in {"paper", "document", "reference", "material"}
             and Path(asset.locator).is_file()
-            and (Path(asset.locator).suffix.lower() in {".md", ".markdown", ".txt", ".pdf"}
+            and (Path(asset.locator).suffix.lower() in SUPPORTED_DOCUMENT_SUFFIXES
                  or (self._task_kind() == "writing" and asset.role == "material"
                      and Path(asset.locator).suffix.lower() == ".json"))
         ))
@@ -5191,6 +5138,8 @@ class ResearchApplication:
     def _needs_preparation(self) -> bool:
         execution = self.services.config.get("execution")
         if isinstance(execution, Mapping) and "dataset" in execution:
+            return True
+        if isinstance(execution, Mapping) and "environment" in execution:
             return True
         task = execution.get("code_task") if isinstance(execution, Mapping) else None
         return isinstance(task, Mapping) and "code_root" in task

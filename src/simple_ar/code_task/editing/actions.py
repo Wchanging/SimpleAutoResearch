@@ -15,6 +15,16 @@ from typing import Any, Mapping
 from simple_ar.code_task.analysis.interfaces import public_api
 
 
+def looks_like_diff_fragment(text: str) -> bool:
+    """Detect unified-diff syntax misplaced in exact old/new source replacements."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if any(line.startswith(("@@", "--- ", "+++ ")) for line in lines):
+        return True
+    removed = any(line.startswith("-") for line in lines)
+    added = any(line.startswith("+") for line in lines)
+    return removed and added
+
+
 def apply_repair_actions(
     workspace_dir: Path,
     actions: object,

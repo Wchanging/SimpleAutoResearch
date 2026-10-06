@@ -2,16 +2,161 @@
 import json
 import unittest
 
-from simple_ar.report.agent import _maybe_adapt_outline, _reviewer_prompt
+from simple_ar.report.agent import _maybe_adapt_outline, _reviewer_context, _reviewer_prompt, _evidence_outline_sections
 from simple_ar.report.editor import review_document
 from simple_ar.report.schema import (
     ReportContext, ReportDocumentPlan, ReportMemory, ReportRuntimeConfig,
-    ReportSectionDraft, ReportSectionPlan,
+    ReportSectionDraft, ReportSectionPlan, ReportToolResult, SourceHandle,
 )
 from simple_ar.report.templates import drafting_template_guidance, load_report_template_bundle
+from simple_ar.report.narrative import evidence_outline_context
+from simple_ar.report.templates import planning_template_guidance
 
 
 class TemplateOwnershipTests(unittest.TestCase):
+    def test_initial_writer_reads_are_projected_only_for_cold_section_review(self):
+        from simple_ar.report.agent import run_report_agent
+        from simple_ar.report.tool_gateway import ReportToolGateway
+        config, template, memory, plan, draft = self.objects()
+        config = config.model_copy(update={"outline_strategy": "template", "max_review_iterations": 0})
+        context = ReportContext(topic="Use the supplied source", report_mode="supplied_materials")
+        memory.outline_planning["context_requests"] = [
+            {"tool_name": "get_paper_brief", "arguments": {"citation_key": "P1"}},
+            {"tool_name": "get_synthesis_brief", "arguments": {}}]
+        brief = ReportToolResult(tool_name="get_paper_brief", content={"handles": [
+            SourceHandle(handle="paper:one", kind="paper", metadata={
+                "reading_notes": {"method": "Earlier reader interpretation"},
+                "evidence_passages": [{"text": "Literal original conditions"}]}).model_dump(mode="json")]})
+        synthesis = ReportToolResult(tool_name="get_synthesis_brief", content={"text": "Earlier synthesis interpretation"})
+        seen = {}
+        class Capture:
+            def ask_json(self, system, prompt, *, label="", **unused):
+                seen[label] = json.loads(prompt[prompt.index("{"):])
+                return ({"section_id": plan.section_id, "verdict": "pass"} if "reviewer" in label else
+                        {"section_id": plan.section_id, "heading": plan.heading, "draft_markdown": draft.draft_markdown})
+        gateway = ReportToolGateway(context)
+        gateway.call = lambda request: brief if request.tool_name == "get_paper_brief" else synthesis
+        result = run_report_agent(client=Capture(), context=context, template=template, memory=memory,
+            config=config, gateway=gateway)
+        written = json.dumps(seen[f"report-writer-{plan.section_id}"])
+        reviewed = json.dumps(seen[f"report-reviewer-{plan.section_id}"])
+        for interpretation in ("Earlier reader interpretation", "Earlier synthesis interpretation"):
+            self.assertIn(interpretation, written)
+            self.assertNotIn(interpretation, reviewed)
+        self.assertIn("Literal original conditions", reviewed)
+        self.assertEqual(result.tool_results[0], brief)
+        self.assertEqual(result.tool_results[1], synthesis)
+
+    def test_section_review_keeps_primary_evidence_without_planning_answers(self):
+        from simple_ar.report.schema import ReportArgumentPlan, ReportSectionReview, ReviewerFinding
+        config, template, memory, plan, draft = self.objects()
+        context = ReportContext(topic="Compare supplied observations", report_mode="supplied_materials",
+            goal_markdown="Preserve the original request and discuss observed limitations.",
+            source_comparisons=[{"interpretation": "Earlier synthesis answer"}])
+        plan.goal = "Unverified planning conclusion"
+        plan.evidence_handles = ["paper:one"]
+        plan.target_words = 300
+        memory.document_plan.argument_plan = ReportArgumentPlan(question="A proposed question",
+            answer="Unverified argument answer")
+        memory.source_handles = [SourceHandle(handle="paper:one", kind="paper", citation_key="P1",
+            metadata={"evidence_passages": [{"text": "Primary passage with its conditions", "chunk_id": "chunk:one"}],
+                "reading_notes": {"method": "Earlier reader answer"}})]
+        neighbor = ReportSectionDraft(section_id="other", heading="Observations",
+            draft_markdown="Previously adopted measured prose, not independently checked.")
+        primary = ReportToolResult(tool_name="get_paper_brief", content={"handles": [
+            SourceHandle(handle="paper:two", kind="paper", metadata={
+                "evidence_passages": [{"text": "Additional original source passage"}],
+                "reading_notes": {"method": "Earlier supplementary reader answer"}}).model_dump(mode="json")]})
+        derived = [ReportToolResult(tool_name="get_synthesis_brief", content={"text": "Earlier synthesis answer"})
+                   for _ in range(7)]
+        prior = ReportSectionReview(section_id=plan.section_id, verdict="revise_required", findings=[
+            ReviewerFinding(finding_id="old", type="unsupported_claim", severity="major",
+                message="A fallible historical allegation", section_id=plan.section_id)])
+        original = memory.model_dump(mode="json")
+        tools_before = [row.model_dump(mode="json") for row in [primary, *derived]]
+        for revision in (False, True):
+            checked = _reviewer_context(context=context, template=template, memory=memory, section=plan,
+                draft=draft, adopted_sections=[neighbor], extra_context=[primary, *derived], config=config,
+                revision_review=prior if revision else None, previous_draft=draft if revision else None)
+            encoded = json.dumps(checked)
+            for excluded in (plan.goal, "Unverified argument answer", "Earlier reader answer"):
+                self.assertNotIn(excluded, encoded)
+            for retained in (context.goal_markdown, draft.draft_markdown, neighbor.draft_markdown,
+                             "Primary passage with its conditions", "Additional original source passage",
+                             "Earlier supplementary reader answer"):
+                self.assertIn(retained, encoded)
+            self.assertEqual(checked["section_constraints"]["target_words"], 300)
+            self.assertEqual(len(checked["extra_tool_context"]), 6)
+            self.assertEqual(checked["extra_tool_context_omitted"], 2)
+            self.assertEqual(checked["extra_tool_context"][0]["tool_name"], "get_paper_brief")
+            self.assertEqual(checked["extra_tool_context"][1]["content"]["text_status"]["independent_verification"],
+                             "not_performed")
+            if revision:
+                self.assertEqual(checked["revision_context"]["target_findings"],
+                                 [row.model_dump(mode="json") for row in prior.findings])
+        self.assertEqual(memory.model_dump(mode="json"), original)
+        self.assertEqual([row.model_dump(mode="json") for row in [primary, *derived]], tools_before)
+
+    def test_independent_review_preserves_authored_template_not_inferred_goal(self):
+        config, template, memory, plan, draft = self.objects()
+        config = config.model_copy(update={"template": "project/custom.md", "criteria": "project/review.md"})
+        template = template.model_copy(update={"template_markdown": "## Evidence\nDiscuss incompatible conditions explicitly.",
+            "criteria_markdown": "Keep the project-specific review requirements."})
+        section = _reviewer_context(context=ReportContext(topic="Original task", report_mode="supplied_materials"),
+            template=template, memory=memory, section=plan, draft=draft, config=config)
+        captured = []
+        class Capture:
+            def ask_json(self, system, prompt, **unused):
+                captured.append(json.loads(prompt))
+                return {"section_reviews": []}
+        review_document(client=Capture(), template=template, memory=memory, sections=[draft], config=config,
+            execution_summary={}, metric_summary={})
+        for view in (section, captured[0]):
+            self.assertEqual(view["authored_template_requirements"], template.template_markdown)
+            self.assertNotIn(plan.goal, json.dumps(view))
+        self.assertEqual(section["criteria_markdown"], template.criteria_markdown)
+        self.assertEqual(captured[0]["criteria"], template.criteria_markdown)
+
+    def test_source_handles_are_explicit_without_promoting_passage_identifiers(self):
+        config, template, memory, _, _ = self.objects("material_report")
+        memory.source_handles = [SourceHandle(handle="paper:registered", kind="paper", citation_key="P1",
+            metadata={"document_id": "document", "passages": [{"chunk_id": "chunk:real", "text": "A source passage"}]})]
+        view = evidence_outline_context(ReportContext(topic="Explain", report_mode="supplied_materials"),
+            memory, config.model_copy(update={"outline_strategy": "adaptive"}), template=template)
+        self.assertEqual(view["evidence_handle_choices"], ["paper:registered"])
+        response = {"sections": [{"heading": "Methods", "goal": "Explain", "evidence_handles": ["chunk:real"]},
+                                 {"heading": "Limits", "goal": "Interpret", "evidence_handles": ["P1"]}]}
+        with self.assertRaisesRegex(ValueError, "Methods.*chunk:real.*paper:registered"):
+            _evidence_outline_sections(response, memory=memory, config=config)
+        self.assertEqual(response["sections"][0]["evidence_handles"], ["chunk:real"])
+
+    def test_adaptive_planner_receives_genre_not_fallback_chapter_assignments(self):
+        for name in ("material_report", "analysis_report", "experiment", "survey"):
+            with self.subTest(name=name):
+                config, template, memory, _, _ = self.objects(name)
+                config = config.model_copy(update={"outline_strategy": "adaptive"})
+                memory = memory.model_copy(update={"document_plan": None, "outline_planning": {}})
+                before = memory.model_dump(mode="json")
+                context = ReportContext(topic="A question from the supplied materials", report_mode="supplied_materials")
+                for retry in (False, True):
+                    view = evidence_outline_context(context, memory, config, template=template, retry=retry)
+                    self.assertEqual(view["template_responsibilities"], [])
+                    self.assertIn("## Intended Use", view["template_guidance"])
+                    self.assertNotIn("Draft order:", view["template_guidance"])
+                    self.assertNotIn("Conditional evidence", view["template_guidance"])
+                    self.assertEqual(view["sources_omitted"], 0)
+                self.assertEqual(memory.model_dump(mode="json"), before)
+
+    def test_fixed_and_custom_planning_keep_author_structure(self):
+        config, template, memory, _, _ = self.objects("material_report")
+        context = ReportContext(topic="Keep my structure", report_mode="supplied_materials")
+        for config in (config.model_copy(update={"outline_strategy": "template"}),
+                       config.model_copy(update={"template": "my-project/material_report.md", "outline_strategy": "adaptive"})):
+            view = evidence_outline_context(context, memory, config, template=template)
+            self.assertEqual(view["template_guidance"], template.template_markdown)
+            self.assertEqual(view["template_responsibilities"][0]["heading"], "Conditional evidence")
+            self.assertEqual(planning_template_guidance(template, config), template.template_markdown)
+
     def test_document_roles_omit_drafting_goals_without_changing_saved_plan(self):
         from simple_ar.report.schema import ReviewerFinding
         config, template, memory, plan, draft = self.objects()
@@ -20,8 +165,12 @@ class TemplateOwnershipTests(unittest.TestCase):
         views = []
         class Capture:
             def ask_json(self, system, prompt, **unused):
-                views.append(json.loads(prompt))
-                return {"section_reviews": []}
+                view = json.loads(prompt)
+                views.append(view)
+                return {"section_reviews": [{"section_id": row["section_id"],
+                    "finding_checks": [{"finding_id": row["finding_id"], "status": "unresolved",
+                        "explanation": "Input ownership capture does not resolve the allegation."}]}
+                    for row in view.get("historical_findings_to_check", [])]}
         prior = ReviewerFinding(finding_id="old", type="unsupported_claim", severity="major",
             section_id=plan.section_id, message="A fallible allegation about current prose.")
         for label, findings, correction in (("report-document-reviewer", [], {}),

@@ -6,7 +6,9 @@ from unittest.mock import Mock
 
 from simple_ar.report.agent import _reviewer_prompt, _writer_prompt, _writer_recovery_prompt
 from simple_ar.report.editor import review_document
-from simple_ar.report.narrative import evidence_outline_context
+from simple_ar.report.document_plan import supplied_figure_sources
+from simple_ar.report.narrative import _compact_execution_results, evidence_outline_context
+from simple_ar.result_analysis.table import TableSpec, describe_table
 from simple_ar.report.schema import (
     ReportContext, ReportDocumentPlan, ReportMemory, ReportRuntimeConfig,
     ReportSectionDraft, ReportSectionPlan, SourceHandle,
@@ -121,7 +123,8 @@ class DataDeliveryTests(unittest.TestCase):
             section_ids=[section.section_id, second.section_id])
         self.assertEqual(additions[0]["section_id"], "supplied_analysis_1")
         self.assertNotIn("![", additions[0]["markdown"])
-        self.assertIn("scientific validity were not verified", additions[0]["markdown"])
+        self.assertIn("Arithmetic was rechecked", additions[0]["markdown"])
+        self.assertIn("scientific validity were not independently verified", additions[0]["markdown"])
         self.assertIn("analysis.json", additions[0]["markdown"])
 
     def test_addition_text_is_not_silently_truncated_for_full_review(self):
@@ -172,6 +175,10 @@ class DataDeliveryTests(unittest.TestCase):
         self.assertIn(blocks[0]["markdown"], preview.report_body_markdown)
         observed = delivery_text_observation(context, memory, [draft], config)
         self.assertEqual(observed["markdown_token_count"], len(actual.report_markdown.split()))
+        self.assertEqual(observed["references"]["markdown"], actual.references_markdown)
+        self.assertEqual(actual.citation_numbers, {"paper-1": 1})
+        self.assertEqual(observed["references"]["model_keys"], {"P1": "paper-1"})
+        self.assertNotIn("Ignore this draft reference", observed["references"]["markdown"])
         self.assertFalse(observed["rendering_performed"])
         self.assertEqual((context.model_dump(), memory.model_dump(), draft.model_dump()), before)
 
@@ -185,6 +192,7 @@ class DataDeliveryTests(unittest.TestCase):
         preview = delivery_text_observation(context, memory, [draft], config)
         self.assertEqual(preview["preview_status"], "unavailable")
         self.assertIsNone(preview["markdown_token_count"])
+        self.assertIsNone(preview["references"])
         context.papers = []
         context.results["supplied_analyses"][0].pop("row_count")
         self.assertIsNone(delivery_text_observation(context, memory, [draft], config)["markdown_token_count"])
@@ -267,3 +275,98 @@ class DataDeliveryTests(unittest.TestCase):
             view = json.loads(client.ask_json.call_args.args[1])
             self.assertEqual(view["length_observation"]["known_delivery_markdown_tokens"], observation["markdown_token_count"])
             self.assertEqual(view["length_observation"]["delivery_count_scope"], observation["preview_status"])
+
+    def test_reference_preview_tracks_current_citations_not_registry_or_superseded_draft(self):
+        from simple_ar.report.narrative import delivery_text_observation
+        context, memory, section, config = self.objects()
+        context.papers = [{"id": "paper-1", "title": "First source"},
+                          {"id": "paper-2", "title": "Second source"},
+                          {"id": "unused", "title": "Uncited source"}]
+        context.citation_key_map = {"P1": "paper-1", "P2": "paper-2", "P3": "unused"}
+        draft = ReportSectionDraft(section_id=section.section_id, heading=section.heading,
+            draft_markdown="Second [@P2], then first [@P1].")
+        before = copy.deepcopy((context.model_dump(), memory.model_dump(), draft.model_dump()))
+        original = delivery_text_observation(context, memory, [draft], config)["references"]
+        self.assertEqual(original["citation_numbers"], {"paper-2": 1, "paper-1": 2})
+        self.assertIn("[1] Second source", original["markdown"])
+        self.assertIn("[2] First source", original["markdown"])
+        self.assertNotIn("Uncited source", original["markdown"])
+        candidate = draft.model_copy(update={"draft_markdown": "First source alone [@P1]."})
+        changed = delivery_text_observation(context, memory, [candidate], config)["references"]
+        self.assertEqual(changed["citation_numbers"], {"paper-1": 1})
+        self.assertEqual(changed["model_keys"], {"P1": "paper-1"})
+        self.assertNotIn("Second source", changed["markdown"])
+        self.assertEqual((context.model_dump(), memory.model_dump(), draft.model_dump()), before)
+
+    def test_absent_bibliography_is_known_empty_not_unavailable_or_fenced_example(self):
+        from simple_ar.report.narrative import delivery_text_observation
+        from simple_ar.report.assembler import split_report_references, strip_report_references
+        context, memory, section, config = self.objects()
+        draft = ReportSectionDraft(section_id=section.section_id, heading=section.heading,
+            draft_markdown="An example:\n\n```markdown\n## References\nNot a bibliography.\n```\n\nObserved data only.")
+        observed = delivery_text_observation(context, memory, [draft], config)
+        self.assertEqual(observed["references"], {"markdown": "", "citation_numbers": {}, "model_keys": {}})
+        body, references = split_report_references(draft.draft_markdown + "\n\n## References\n\nReal entry.\n")
+        self.assertIn("Not a bibliography.", body)
+        self.assertEqual(references, "## References\n\nReal entry.\n")
+        self.assertEqual(strip_report_references(draft.draft_markdown + "\n\n## References\n\nReal entry.\n"), body)
+
+    def test_document_review_receives_complete_read_only_references_within_same_window(self):
+        from simple_ar.report.narrative import delivery_text_observation
+        context, memory, section, config = self.objects()
+        context.papers = [{"id": "paper-1", "title": "Current source"}]
+        context.citation_key_map = {"P1": "paper-1"}
+        draft = ReportSectionDraft(section_id=section.section_id, heading=section.heading,
+            draft_markdown="Known source [@P1].")
+        observed = delivery_text_observation(context, memory, [draft], config)
+        client = Mock()
+        client.ask_json.return_value = {"section_reviews": []}
+        review_document(client=client, template=load_report_template_bundle(report_mode=context.report_mode, config=config),
+            memory=memory, sections=[draft], config=config, execution_summary={}, metric_summary={},
+            delivery_text_observation=observed)
+        view = json.loads(client.ask_json.call_args.args[1])
+        self.assertEqual(view["delivery_text_observation"]["references"], observed["references"])
+        self.assertIn("assembly-owned references", " ".join(view["edit_scope"]["read_only_components"]))
+        self.assertTrue(view["length_observation"]["assembly_preview_complete"])
+        client.reset_mock()
+        oversized = {**observed, "references": {**observed["references"], "markdown": "entry " * 12000}}
+        with self.assertRaisesRegex(ValueError, "bounded source window"):
+            review_document(client=client, template=load_report_template_bundle(report_mode=context.report_mode, config=config),
+                memory=memory, sections=[draft], config=config, execution_summary={}, metric_summary={},
+                delivery_text_observation=oversized)
+        client.ask_json.assert_not_called()
+
+    def test_planning_and_shared_writer_reviewer_results_keep_actual_plot_encoding(self):
+        result = describe_table([{'value': value} for value in (1, 2, 100)], TableSpec(('value',), 'specimen'))
+        # Rendering/export is checked in table figures; this owner checks consumer projection.
+        figures = [{'path': 'figures/value.svg', 'exports': {'pdf': 'figures/value.pdf', 'png': 'figures/value.png'},
+                    'encoding': {'plot': 'bar', 'statistics_shown': ['mean'], 'role': 'marginal'}}]
+        analysis = {**result, 'figures': figures, 'document_id': 'analysis-1',
+                    'evidence_role': 'recomputed_from_user_supplied_data'}
+        context = ReportContext(topic='Explain data', report_mode='supplied_materials',
+            results={'supplied_analyses': [analysis]},
+            source_handles=[SourceHandle(handle='S1', kind='material', title='Measurements',
+                metadata={'document_id': 'analysis-1'})])
+        planned = supplied_figure_sources(context)[0]
+        payload = evidence_outline_context(context, ReportMemory(source_handles=context.source_handles), ReportRuntimeConfig())
+        compact = payload['results']['supplied_analyses'][0]
+        self.assertEqual(planned['document_id'], compact['document_id'])
+        self.assertEqual(planned['figure_count'], 1)
+        self.assertNotIn('figures', planned)
+        self.assertNotIn('captions', planned)
+        self.assertEqual(compact['figures'][0]['encoding'], figures[0]['encoding'])
+        self.assertEqual(json.dumps(payload).count('"statistics_shown"'), 1)
+        self.assertEqual(compact['figures_omitted'], 0)
+        context.results['supplied_analyses'][0]['figures'] *= 13
+        compact = _compact_execution_results(context.results)['supplied_analyses'][0]
+        self.assertEqual(len(compact['figures']), 12)
+        self.assertEqual(compact['figures_omitted'], 1)
+
+    def test_old_unknown_encoding_is_not_inferred_from_filename_or_caption(self):
+        result = describe_table([{'value': 1}], TableSpec(('value',), 'specimen'))
+        context = ReportContext(topic='Old input', report_mode='supplied_materials',
+            results={'supplied_analyses': [{**result, 'document_id': 'old', 'evidence_role': 'supplied',
+                'figures': [{'path': 'box.svg', 'caption': 'Looks like variation'}]}]},
+            source_handles=[SourceHandle(handle='S1', kind='material', title='Old', metadata={'document_id': 'old'})])
+        projected = _compact_execution_results(context.results)['supplied_analyses'][0]
+        self.assertNotIn('encoding', projected['figures'][0])

@@ -134,6 +134,69 @@ def empty_copy_report() -> CopyReport:
     )
 
 
+def copy_workspace_inputs(
+    source: Path, workspace: Path, paths: tuple[str, ...], report: CopyReport,
+) -> CopyReport:
+    """Materialize explicitly named project data, without linking to originals.
+
+    Size limits for incidental source discovery do not apply to declared inputs.
+    Other copy exclusions still apply. Validate the entire selection and disk
+    capacity before overlaying inputs, including untracked data in worktrees.
+    """
+    selected: dict[str, Path] = {}
+    for relative in paths:
+        name = Path(relative)
+        if name.is_absolute() or not name.parts or ".." in name.parts:
+            raise ValueError(f"Data input must be project-relative: {relative}")
+        target = source / name
+        for ancestor in (target, *target.parents):
+            if ancestor == source:
+                break
+            reason = (_skip_dir_reason(ancestor, source, workspace) if ancestor.is_dir()
+                      else _skip_file_reason(ancestor, max_file_bytes=0))
+            if reason:
+                raise ValueError(f"Data input is excluded ({reason}): {relative}")
+        if not target.exists():
+            raise FileNotFoundError(f"Declared project data not found: {relative}")
+        files = [target] if target.is_file() else []
+        if target.is_dir():
+            for current, directories, filenames in os.walk(target):
+                directory = Path(current)
+                directories[:] = [name for name in directories
+                                  if not _skip_dir_reason(directory / name, source, workspace)]
+                files.extend(directory / name for name in filenames
+                             if not _skip_file_reason(directory / name, max_file_bytes=0))
+        for path in files:
+            if not path.is_file():
+                raise ValueError(f"Data input is not a regular file: {path}")
+            selected[path.relative_to(source).as_posix()] = path
+    total = sum(path.stat().st_size for path in selected.values())
+    if total > shutil.disk_usage(workspace).free:
+        raise OSError(f"Declared project data needs {total} bytes; insufficient workspace disk space.")
+    for relative in selected:
+        destination = workspace / relative
+        for ancestor in (destination, *destination.parents):
+            if ancestor == workspace:
+                break
+            if ancestor.is_symlink():
+                raise ValueError(f"Data destination is a symlink: {relative}")
+        _safe_destination(workspace, Path(relative))
+    added_files = added_bytes = 0
+    for relative, path in selected.items():
+        destination = _safe_destination(workspace, Path(relative))
+        # Ordinary copies already contain smaller inputs. Worktrees may contain
+        # a committed version; the explicitly supplied input is authoritative.
+        if not destination.exists() or report.files_copied == 0:
+            added_files += 1
+            added_bytes += path.stat().st_size
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+    remaining = tuple(row for row in report.skipped
+                      if not (row["kind"] == "file" and row["path"] in selected))
+    return CopyReport(report.files_copied + added_files, report.bytes_copied + added_bytes,
+                      max(0, report.skipped_count - added_files), remaining)
+
+
 def copy_code_workspace(
     code_root: Path,
     workspace_dir: Path,
@@ -253,8 +316,8 @@ def sparse_copy_code_workspace(
     if workspace.exists() and any(workspace.iterdir()):
         raise FileExistsError(f"Workspace already contains files: {workspace}")
 
-    includes = _normalize_patterns(include_patterns or DEFAULT_SPARSE_INCLUDE_PATTERNS)
-    excludes = _normalize_patterns(DEFAULT_SPARSE_EXCLUDE_PATTERNS + tuple(exclude_patterns))
+    includes = normalize_copy_patterns(include_patterns or DEFAULT_SPARSE_INCLUDE_PATTERNS)
+    excludes = normalize_copy_patterns(DEFAULT_SPARSE_EXCLUDE_PATTERNS + tuple(exclude_patterns))
     workspace.mkdir(parents=True, exist_ok=True)
     skipped: list[dict[str, Any]] = []
     skipped_count = 0
@@ -316,9 +379,9 @@ def _skip_dir_reason(path: Path, source: Path, workspace: Path) -> str | None:
     if name in DEFAULT_IGNORED_DIR_NAMES or name.startswith("."):
         return "ignored_dir"
     resolved = path.resolve()
-    if _is_relative_to(workspace, resolved) or _is_relative_to(resolved, workspace):
+    if workspace.is_relative_to(resolved) or resolved.is_relative_to(workspace):
         return "output_workspace"
-    if not _is_relative_to(resolved, source):
+    if not resolved.is_relative_to(source):
         return "outside_source"
     return None
 
@@ -344,7 +407,7 @@ def _skip_file_reason(path: Path, *, max_file_bytes: int) -> str | None:
 
 def _safe_destination(workspace: Path, relative_path: Path) -> Path:
     destination = (workspace / relative_path).resolve()
-    if not _is_relative_to(destination, workspace):
+    if not destination.is_relative_to(workspace):
         raise ValueError(f"Refusing to copy outside workspace: {relative_path}")
     return destination
 
@@ -365,7 +428,8 @@ def _record_skip(
     skipped.append({"path": relative, "kind": kind, "reason": reason})
 
 
-def _normalize_patterns(patterns: tuple[str, ...]) -> tuple[str, ...]:
+def normalize_copy_patterns(patterns: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize sparse-copy filters for both copying and its manifest."""
     result: list[str] = []
     for pattern in patterns:
         text = str(pattern).replace("\\", "/").strip().strip("/")
@@ -408,11 +472,3 @@ def _relative_posix(source: Path, path: Path) -> str:
         return path.relative_to(source).as_posix()
     except ValueError:
         return str(path).replace("\\", "/")
-
-
-def _is_relative_to(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False

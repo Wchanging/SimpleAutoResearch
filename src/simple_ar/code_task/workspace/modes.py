@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from simple_ar.code_task.workspace.copy import (
     CopyReport,
     copy_code_workspace,
+    copy_workspace_inputs,
     empty_copy_report,
+    normalize_copy_patterns,
     sparse_copy_code_workspace,
 )
+from simple_ar.code_task.runtime.state import utcnow_iso as _utcnow_iso
 
 
 SUPPORTED_WORKSPACE_MODES = {"auto", "copy", "empty", "git_worktree", "sparse_copy"}
@@ -50,6 +52,8 @@ class WorkspaceSpec:
         exclude: Additional POSIX glob patterns skipped by ``sparse_copy``.
         reuse_source_venv: Whether a detected source ``.venv`` may be recorded
             and selected as the initial execution interpreter.
+        data_inputs: Explicit project-relative runtime inputs copied without the
+            incidental size limit; source/secret/symlink exclusions still apply.
     """
 
     code_root: Path | None
@@ -59,6 +63,7 @@ class WorkspaceSpec:
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     reuse_source_venv: bool = False
+    data_inputs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -134,17 +139,17 @@ class WorkspaceResult:
 def create_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
     """Create the editable workspace requested by ``spec``."""
     mode = _normalize_mode(spec.mode)
-    if mode == "auto":
-        return _create_auto_workspace(spec)
-    if mode == "empty":
-        return _create_empty_workspace(spec)
-    if mode == "copy":
-        return _create_copy_workspace(spec)
-    if mode == "git_worktree":
-        return _create_git_worktree_workspace(spec)
-    if mode == "sparse_copy":
-        return _create_sparse_copy_workspace(spec)
-    raise WorkspaceModeError(f"Unsupported workspace mode: {spec.mode}")
+    if spec.data_inputs and mode in {"empty", "sparse_copy"}:
+        raise WorkspaceModeError("Declared project data requires auto, copy or git_worktree mode.")
+    builders = {"auto": _create_auto_workspace, "empty": _create_empty_workspace,
+                "copy": _create_copy_workspace, "git_worktree": _create_git_worktree_workspace,
+                "sparse_copy": _create_sparse_copy_workspace}
+    result = builders[mode](spec)
+    if not spec.data_inputs:
+        return result
+    report = copy_workspace_inputs(result.source_root, result.project_root, spec.data_inputs, result.copy_report)
+    return replace(result, copy_report=report,
+                   patterns={**result.patterns, "data_inputs": list(spec.data_inputs)})
 
 
 def _create_auto_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
@@ -247,8 +252,8 @@ def _create_sparse_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
             mode="sparse_copy",
         ),
         patterns={
-            "include": list(_normalize_patterns(spec.include)),
-            "exclude": list(_normalize_patterns(spec.exclude)),
+            "include": list(normalize_copy_patterns(spec.include)),
+            "exclude": list(normalize_copy_patterns(spec.exclude)),
             "default_includes_used": not bool(spec.include),
             "default_excludes_always_applied": True,
             "risk": (
@@ -422,15 +427,6 @@ def _project_relative_path(workspace_dir: Path, project_root: Path) -> str:
     except ValueError:
         return str(project_root)
     return "." if str(relative) == "." else relative.as_posix()
-
-
-def _normalize_patterns(patterns: tuple[str, ...]) -> tuple[str, ...]:
-    result: list[str] = []
-    for pattern in patterns:
-        text = str(pattern).replace("\\", "/").strip().strip("/")
-        if text:
-            result.append(text)
-    return tuple(dict.fromkeys(result))
 
 
 def _git_repo_root(path: Path) -> Path:
@@ -651,7 +647,3 @@ def _same_path(left: Path, right: Path) -> bool:
         return left.samefile(right)
     except OSError:
         return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")

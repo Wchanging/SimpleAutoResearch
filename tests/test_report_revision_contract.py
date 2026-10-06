@@ -11,7 +11,7 @@ from simple_ar.report.schema import (
 )
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
-from report_review_fixtures import draft_quotes
+from tests.report_review_fixtures import draft_quotes
 
 
 def payload(prompt):
@@ -41,7 +41,9 @@ class RevisionContractTests(unittest.TestCase):
                 for view in (normal, corrected):
                     self.assertEqual(view["narrative_context"]["planning_status"]["scope"],
                         "organizational_intent_not_current_prose_or_scientific_support")
-                    self.assertIn("not observed claims", " ".join(view["narrative_context"]["writing_rules"]))
+                    self.assertIn("not observed claims", " ".join(view["document_plan"]["interpretation_rules"]))
+                    self.assertIn("Correct or omit", " ".join(view["document_plan"]["interpretation_rules"]))
+                    self.assertEqual("schema_version" in view["document_plan"], planned)
                     self.assertEqual(view["review_findings_status"]["independent_verification"], "not_performed")
                     self.assertIn("do not manufacture", " ".join(view["narrative_context"]["writing_rules"]))
                     self.assertEqual(view["review_findings"], original["findings"])
@@ -52,6 +54,11 @@ class RevisionContractTests(unittest.TestCase):
                 self.assertEqual(checked["revision_context"]["review_opinions_status"],
                     normal["review_findings_status"])
                 self.assertEqual(checked["revision_context"]["target_findings"], original["findings"])
+                self.assertEqual(normal["document_plan"], corrected["document_plan"])
+                self.assertEqual(normal["document_plan"]["interpretation_rules"],
+                                 checked["document_plan"]["interpretation_rules"])
+                self.assertNotIn("sections", checked["document_plan"])
+                self.assertNotIn(section.goal, json.dumps(checked))
         self.assertEqual(review.model_dump(mode="json"), original)
         self.assertEqual(baseline.draft_markdown, "Only the measured observation and its qualification are established.")
 

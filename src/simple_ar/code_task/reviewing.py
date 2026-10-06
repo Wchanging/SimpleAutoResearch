@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from simple_ar.integrations.usage import record_usage
-from simple_ar.core.artifacts import write_json
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.reviewing.schema import ReviewFinding, normalize_review_findings, review_report
 

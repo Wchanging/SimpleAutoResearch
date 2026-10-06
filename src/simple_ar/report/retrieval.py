@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from simple_ar.report.schema import ReportContext, SourceHandle
-from simple_ar.research.store.retrieval import rank_source_chunks, source_query_terms
+from simple_ar.research.store.retrieval import source_query_terms
+# Preserve the old import surface; internal consumers use the store owner.
+from simple_ar.research.store.retrieval import rank_source_chunks as rank_source_chunks
 
 
 class ReportSourceResolver:
@@ -35,7 +37,7 @@ class ReportSourceResolver:
 
     def search(self, query: str, *, limit: int = 5) -> list[SourceHandle]:
         """Lightweight lexical search over handle title/summary/metadata."""
-        terms = {term.lower() for term in query.split() if len(term) > 2}
+        terms = source_query_terms(query)
         if not terms:
             return []
         scored: list[tuple[int, SourceHandle]] = []
@@ -46,8 +48,8 @@ class ReportSourceResolver:
                 + handle.summary
                 + "\n"
                 + " ".join(str(value) for value in handle.metadata.values())
-            ).lower()
-            score = sum(1 for term in terms if term in haystack)
+            )
+            score = len(terms & source_query_terms(haystack))
             if score:
                 scored.append((score, handle))
         scored.sort(key=lambda item: (-item[0], item[1].handle))

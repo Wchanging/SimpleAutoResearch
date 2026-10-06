@@ -23,6 +23,7 @@ from simple_ar.code_task.execution.failure import analyze_code_task_failure
 from simple_ar.code_task.analysis.context import (
     build_code_task_context_pack,
     load_latest_code_task_context_pack,
+    planned_context_paths,
 )
 from simple_ar.code_task.editing.patching import EditBudgetApprovalRequired, PatchValidationError, apply_patch_edits, propose_patch_edits
 from simple_ar.code_task.editing.planning import generate_patch_plan, record_plan_decision
@@ -1395,6 +1396,17 @@ def _ensure_context_pack_for_current_batch(
 ) -> None:
     loaded = load_latest_code_task_context_pack(run_dir)
     manifest = load_code_task_manifest(run_dir)
+    paths = code_task_paths(run_dir)
+    latest_batch = load_latest_code_task_batch(run_dir)
+    batch = latest_batch.state if latest_batch is not None else {}
+    work_item = batch.get("work_item", {})
+    if isinstance(work_item, dict) and isinstance(work_item.get("target_files"), list):
+        preferred = [path for path in work_item["target_files"] if isinstance(path, str)]
+    else:
+        index = read_json(paths.meta_dir / "codebase_index.json")
+        known = {row["path"] for row in index.get("files", []) if isinstance(row, dict) and isinstance(row.get("path"), str)}
+        plan_path = paths.task_dir / "patch_plan.md"
+        preferred = planned_context_paths(read_text(plan_path), known) if plan_path.is_file() else []
     requirements = manifest.get("context_requirements")
     required_paths = (
         {path for path in requirements.get("read_only_paths", []) if isinstance(path, str)}
@@ -1405,10 +1417,10 @@ def _ensure_context_pack_for_current_batch(
         str(row.get("path")) for row in loaded.context_pack.get("selected_files", [])
         if isinstance(row, dict) and row.get("access_role") != "editable"
     } if loaded is not None else set()
-    if loaded is not None and loaded.selected_files and required_paths.issubset(read_only_paths):
+    if (loaded is not None and loaded.selected_files and required_paths.issubset(read_only_paths)
+            and set(preferred[:max_files]).issubset(loaded.selected_files)):
         _emit(message_callback, f"Using existing code-task context pack: {_relative_to_run(run_dir, loaded.context_pack_path)}")
         return
-    latest_batch = load_latest_code_task_batch(run_dir)
     query = _batch_context_query(latest_batch.state if latest_batch is not None else {})
     _emit(message_callback, "Building code-task context pack for current batch.")
     context_pack = build_code_task_context_pack(
@@ -1418,6 +1430,7 @@ def _ensure_context_pack_for_current_batch(
         max_files=max_files,
         max_source_chars_per_file=max_source_chars_per_file,
         max_total_chars=max(max_files * max_source_chars_per_file, max_source_chars_per_file),
+        preferred_paths=tuple(preferred),
     )
     if latest_batch is not None:
         update_code_task_batch_state(

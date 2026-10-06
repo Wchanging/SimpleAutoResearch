@@ -19,7 +19,6 @@ from simple_ar.report.agent import (
     _merge_revision_draft,
     _normalize_draft_response,
     _outline_planner_prompt,
-    _outline_is_overly_template_like,
     run_report_agent,
 )
 from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
@@ -349,38 +348,6 @@ class ReportSafetyTests(unittest.TestCase):
         config = ReportRuntimeConfig(max_review_iterations=0)
 
         self.assertEqual(config.max_review_iterations, 0)
-
-    def test_outline_template_copy_is_detected_without_rejecting_partial_overlap(self) -> None:
-        copied = [
-            {"heading": heading}
-            for heading in (
-                "Abstract",
-                "Introduction and Scope",
-                "Conceptual Foundations and Taxonomy",
-                "Methods and System Construction",
-                "Applications and Use Cases",
-                "Evaluation, Benchmarks, and Evidence Quality",
-                "Related Surveys and Positioning",
-                "Challenges and Future Directions",
-                "Conclusion",
-            )
-        ]
-        evidence_derived = [
-            {"heading": heading}
-            for heading in (
-                "Abstract",
-                "Introduction",
-                "Gaussian Representation and Optimization",
-                "Densification, Compression, and Rendering Variants",
-                "Novel-View Synthesis and Scene Reconstruction",
-                "Benchmark Protocols and Evaluation Trade-offs",
-                "Challenges and Future Directions",
-                "Conclusion",
-            )
-        ]
-
-        self.assertTrue(_outline_is_overly_template_like(copied))
-        self.assertFalse(_outline_is_overly_template_like(evidence_derived))
 
     def test_writer_claim_status_does_not_invalidate_section_draft(self) -> None:
         section = ReportSectionPlan(section_id="methods", heading="Methods", goal="Compare methods.")
@@ -793,7 +760,8 @@ class ReportSafetyTests(unittest.TestCase):
             context=context,
             template=template,
             memory=memory,
-            config=ReportRuntimeConfig(template="survey", max_review_iterations=0),
+            # This fixture exercises fixed-template writing, not outline planning.
+            config=ReportRuntimeConfig(template="survey", outline_strategy="template", max_review_iterations=0),
             gateway=gateway,
         )
 
@@ -823,7 +791,7 @@ class ReportSafetyTests(unittest.TestCase):
         with patch.object(failing_client, "ask_json", side_effect=fail_after_first_section), self.assertRaises(LLMError):
             run_report_agent(
                 client=failing_client, context=context, template=template, memory=memory,
-                config=ReportRuntimeConfig(template="survey", max_review_iterations=1),
+                config=ReportRuntimeConfig(template="survey", outline_strategy="template", max_review_iterations=1),
                 gateway=gateway, checkpoint_sink=checkpoints.append,
             )
         saved = checkpoints[-1]
@@ -833,7 +801,7 @@ class ReportSafetyTests(unittest.TestCase):
         resumed_client = _TrackingReportLLM()
         resumed = run_report_agent(
             client=resumed_client, context=context, template=template, memory=memory,
-            config=ReportRuntimeConfig(template="survey", max_review_iterations=1),
+            config=ReportRuntimeConfig(template="survey", outline_strategy="template", max_review_iterations=1),
             gateway=gateway, completed_checkpoint=saved,
         )
         self.assertIsNotNone(resumed)
@@ -863,7 +831,7 @@ class ReportSafetyTests(unittest.TestCase):
             hypothesis_markdown="# Hypothesis\nRole separation may help.",
             evidence_summary="- Known evidence [@paper-1].",
         )
-        config = ReportRuntimeConfig(template="survey", max_review_iterations=2)
+        config = ReportRuntimeConfig(template="survey", outline_strategy="template", max_review_iterations=2)
         template = load_report_template_bundle(
             report_mode="research_only",
             config=config,
@@ -917,7 +885,7 @@ class ReportSafetyTests(unittest.TestCase):
             context=context,
             template=template,
             memory=initialize_report_memory(context=context, template=template),
-            config=ReportRuntimeConfig(template="survey", reviewer="disabled"),
+            config=ReportRuntimeConfig(template="survey", outline_strategy="template", reviewer="disabled"),
             gateway=ReportToolGateway(context),
         )
 
@@ -950,6 +918,7 @@ class ReportSafetyTests(unittest.TestCase):
             template="survey",
             reviewer="disabled",
             max_section_tokens=777,
+            outline_strategy="template",
         )
         template = load_report_template_bundle(
             report_mode="research_only",
@@ -1015,6 +984,7 @@ class ReportSafetyTests(unittest.TestCase):
                 max_section_tokens=777,
                 source_strategy="batch_refine",
                 source_batch_size=5,
+                outline_strategy="template",
             ),
             gateway=ReportToolGateway(context),
         )

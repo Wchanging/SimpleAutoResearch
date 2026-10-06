@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -15,6 +18,48 @@ from simple_ar.code_task.runtime.config import load_code_task_init_options, load
 
 
 class StartTests(unittest.TestCase):
+    def test_new_guided_survey_plans_document_from_evidence_without_changing_existing_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'source.md'
+            source.write_text('A supplied source, not a measured experiment.')
+            config = self.prepare('--kind', 'survey', '--goal', 'Compare supplied evidence',
+                '--document', str(source), '--sources', 'materials', '--output-root', str(root / 'runs'), '--prepare-only')
+            defaults = research_defaults(['research-session', '--config', str(config)])
+            self.assertEqual(defaults['report_outline_strategy'], 'adaptive')
+            self.assertTrue(defaults['report_document_review'])
+            self.assertNotIn('command_argv', defaults)
+            old = root / 'old.toml'
+            old.write_text('[task]\ngoal="Review"\nkind="survey"\noutputs=["report"]\n[report]\noutline_strategy="template"\n')
+            old_bytes = old.read_bytes()
+            self.assertEqual(research_defaults(['research-session', '--config', str(old)])['report_outline_strategy'], 'template')
+            self.assertEqual(old.read_bytes(), old_bytes)
+
+    def test_reproduction_data_paths_use_common_configuration_and_cwd_preparation(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / 'paper.md'
+            paper.write_text('A supplied conclusion.')
+            data = root / 'data'
+            data.mkdir()
+            common = ['--kind', 'reproduction', '--goal', 'Check conclusion', '--document', str(paper),
+                      '--cwd', str(root), '--data-path', str(data), '--data-path', str(data),
+                      '--hypothesis', 'Declared claim', '--dataset', 'Explicit directory; split unspecified',
+                      '--expected-outcome', 'Compare score', '--metric', 'score',
+                      '--output-root', str(root / 'runs'), '--prepare-only']
+            config = self.prepare(*common, '--command', 'python', 'run.py')
+            defaults = research_defaults(['research-session', '--config', str(config)])
+            self.assertEqual(defaults['data_path'], [str(data.resolve())])
+            self.assertEqual(defaults['command_argv'], ['python', 'run.py'])
+            facts = json.loads((config.parent / 'preparation.json').read_text())
+            self.assertEqual(facts['data_paths'][0]['kind'], 'directory')
+            self.assertIn('size does not establish', ' '.join(facts['limitations']))
+            with self.assertRaisesRegex(ValueError, 'not found'):
+                self.prepare(*common, '--data-path', str(root / 'absent'), '--command', 'python', 'run.py')
+            with self.assertRaisesRegex(ValueError, 'requires --kind reproduction'):
+                self.prepare('--kind', 'survey', '--goal', 'Survey', '--data-path', str(data), '--prepare-only')
+
     def test_default_writing_template_matches_supplied_material_not_failed_experiment(self):
         from simple_ar.report.schema import ReportRuntimeConfig
         from simple_ar.report.templates import load_report_template_bundle
@@ -126,6 +171,27 @@ class StartTests(unittest.TestCase):
             self.assertEqual(defaults["value_column"], ["A", "B"])
             self.assertEqual(defaults["data_plot"], "scatter")
 
+    def test_writing_accepts_parser_supported_html_in_both_material_roles(self):
+        from simple_ar.cli.research_config import validate_session_arguments
+        from simple_ar.research.documents.extractors import LocalDocumentParser
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for role in ("--document", "--material"):
+                for suffix in (".html", ".htm", ".HTML"):
+                    with self.subTest(role=role, suffix=suffix):
+                        material = root / ("source" + suffix)
+                        text = "<html><body><h1>Published source</h1><p>Original conditions remain readable.</p></body></html>"
+                        material.write_text(text, encoding="utf-8")
+                        config = self.prepare("--kind", "writing", "--goal", "Compare the supplied sources",
+                            role, str(material), "--output-root", str(root / "runs"), "--prepare-only")
+                        values = research_defaults(["research-session", "--config", str(config)])
+                        self.assertEqual(values["outputs"], ["report"])
+                        self.assertEqual(values["local_document" if role == "--document" else "material"], [str(material.resolve())])
+                        args = build_parser(research_defaults=values).parse_args(["research-session", "--config", str(config)])
+                        validate_session_arguments(args)
+                        self.assertIn("Original conditions remain readable", LocalDocumentParser().parse(material).text)
+                        self.assertEqual(material.read_text(encoding="utf-8"), text)
+
     def test_writing_roundtrips_material_role_template_and_no_execution(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -149,8 +215,10 @@ class StartTests(unittest.TestCase):
             root = Path(directory)
             material = root / "notes.md"
             material.write_text("Notes", encoding="utf-8")
+            invalid = root / 'invalid.json'
+            invalid.write_text('{"unfinished":', encoding='utf-8')
             for extra in (["--sources", "search"], ["--document", str(material)], ["--fulltext"],
-                          ["--command", "python", "run.py"]):
+                          ["--command", "python", "run.py"], ["--material", str(invalid)]):
                 with self.subTest(extra=extra), self.assertRaises(ValueError):
                     self.prepare("--kind", "writing", "--goal", "Write from material", "--material", str(material),
                                  "--output-root", str(root / "runs"), "--prepare-only", *extra)
@@ -205,7 +273,7 @@ class StartTests(unittest.TestCase):
             options = load_code_task_init_options(config_path=code_config)
             execution = load_code_task_execute_options(config_path=code_config)
             self.assertEqual(Path(options.code_root), project.resolve())
-            self.assertEqual(options.workspace_mode, "copy")
+            self.assertEqual(options.workspace_mode, "auto")
             self.assertEqual(options.env_mode, "current")
             self.assertEqual(options.edit_scope_allowed_patterns, ("src/**",))
             self.assertIn("tests/**", options.edit_scope_protected_patterns)
@@ -213,6 +281,72 @@ class StartTests(unittest.TestCase):
             self.assertEqual(execution.baseline_policy, "skip")
             self.assertEqual(Path(options.task_file).read_text(encoding="utf-8"), "Fix the rounding error\n")
             self.assertEqual(list(project.iterdir()), [])
+            interpreter = root / "environment with spaces" / "python"
+            interpreter.parent.mkdir()
+            interpreter.touch()  # Input check only; prepare-only must not execute it.
+            external = self.prepare("--kind", "bug_fix", "--goal", "Fix with the existing environment",
+                "--project", str(project), "--project-python", str(interpreter), "--allow", "src/**",
+                "--validate", "python -m unittest", "--output-root", str(root / "external-runs"), "--prepare-only")
+            external_defaults = research_defaults(["research-session", "--config", str(external)])
+            external_options = load_code_task_init_options(config_path=external_defaults["code_task_config"])
+            self.assertEqual(external_options.env_mode, "external")
+            self.assertEqual(Path(external_options.python_executable), interpreter.absolute())
+            self.assertEqual(external_options.edit_scope_allowed_patterns, options.edit_scope_allowed_patterns)
+            self.assertEqual(external_options.edit_scope_protected_patterns, options.edit_scope_protected_patterns)
+            self.assertEqual(list(project.iterdir()), [])
+            if os.name != "nt":
+                alias = interpreter.parent / "venv-python"
+                alias.symlink_to(interpreter)
+                linked = self.prepare("--kind", "bug_fix", "--goal", "Use the chosen venv",
+                    "--project", str(project), "--project-python", str(alias), "--allow", "src/**",
+                    "--validate", "python -m unittest", "--output-root", str(root / "linked-runs"), "--prepare-only")
+                linked_defaults = research_defaults(["research-session", "--config", str(linked)])
+                linked_options = load_code_task_init_options(config_path=linked_defaults["code_task_config"])
+                self.assertEqual(Path(linked_options.python_executable), alias.absolute())
+                self.assertNotEqual(Path(linked_options.python_executable), alias.resolve())
+            for flags, expected in ((["--kind", "writing", "--project-python", str(interpreter)], "requires --kind bug_fix"),
+                                    (["--kind", "bug_fix", "--project-python", str(root / "missing")], "not found")):
+                with self.subTest(flags=flags), self.assertRaisesRegex(ValueError, expected):
+                    self.prepare(*flags, "--prepare-only", "--output-root", str(root / "refused"))
+                self.assertFalse((root / "refused").exists())
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required for workspace isolation")
+    def test_guided_code_workspace_keeps_large_committed_source_and_dirty_changes(self):
+        from simple_ar.code_task.workspace.modes import WorkspaceSpec, create_workspace
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            source = project / "generated.py"
+            source.write_text("# generated source\n" + "# retained\n" * 190000, encoding="utf-8")
+            for command in (("init",), ("config", "user.name", "Workspace Test"),
+                            ("config", "user.email", "test@example.invalid"),
+                            ("add", "."), ("commit", "-m", "fixture")):
+                subprocess.run(["git", "-C", str(project), *command],
+                               check=True, capture_output=True)
+            config = self.prepare("--kind", "bug_fix", "--goal", "Keep project behavior",
+                                  "--project", str(project), "--allow", "*.py",
+                                  "--validate", "python -m unittest", "--output-root", str(root / "runs"),
+                                  "--prepare-only")
+            code_config = Path(research_defaults(["research-session", "--config", str(config)])["code_task_config"])
+            options = load_code_task_init_options(config_path=code_config)
+            clean = create_workspace(WorkspaceSpec(code_root=project, task_dir=root / "clean",
+                                                   mode=options.workspace_mode,
+                                                   max_file_bytes=options.max_file_bytes))
+            self.assertEqual(clean.mode, "git_worktree")
+            self.assertGreater(source.stat().st_size, options.max_file_bytes)
+            self.assertEqual((clean.project_root / source.name).stat().st_size, source.stat().st_size)
+            changed = project / "user_changes.py"
+            changed.write_text("VALUE = 7\n", encoding="utf-8")
+            dirty = create_workspace(WorkspaceSpec(code_root=project, task_dir=root / "dirty",
+                                                   mode=options.workspace_mode,
+                                                   max_file_bytes=options.max_file_bytes))
+            self.assertEqual(dirty.mode, "copy")
+            self.assertIn("uncommitted", dirty.fallback_reason)
+            self.assertEqual((dirty.project_root / changed.name).read_text(), changed.read_text())
+            self.assertTrue(any(item["path"] == source.name and item["reason"] == "file_too_large"
+                                for item in dirty.copy_report.skipped))
+            self.assertEqual(changed.read_text(), "VALUE = 7\n")
 
     def test_fulltext_is_explicit_and_maps_to_existing_retrieval_permissions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -295,7 +429,7 @@ class StartTests(unittest.TestCase):
                 config = prepare_start(args)
             self.assertEqual(tomllib.loads(config.read_text())["task"]["kind"], "writing")
             self.assertIn("no API needed", output.getvalue())
-            self.assertIn("ready environment", output.getvalue())
+            self.assertIn("confirmed command and environment", output.getvalue())
 
     def test_invalid_interactive_selection_creates_no_bundle(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -325,6 +459,7 @@ class StartTests(unittest.TestCase):
                 "--document", str(paper), "--hypothesis", "Published claim, not a new method",
                 "--dataset", "User-prepared adapted data", "--expected-outcome", "Compare coverage with 0.9",
                 "--metric", "coverage", "--metric", "mc_error", "--cwd", directory, "--timeout-sec", "12",
+                "--output-files", '{"raw":"measurements.json","setup":"summary.json"}',
                 "--max-cited-sources", "1", "--output-root", str(root / "runs"), "--prepare-only",
                 "--command", "python", "a script.py", "--label", "one value")
             values = research_defaults(["research-session", "--config", str(config)])
@@ -337,6 +472,8 @@ class StartTests(unittest.TestCase):
             self.assertEqual(values["process_invocations"], 1)
             self.assertEqual(values["process_wall_seconds"], 12)
             self.assertEqual(values["report_template"], "reproduction")
+            self.assertEqual(values["report_outline_strategy"], "adaptive")
+            self.assertEqual(values["execution_details"]["output_files"], {"raw": "measurements.json", "setup": "summary.json"})
             self.assertTrue(values["report_document_review"])
             self.assertEqual(values["report_max_cited_sources"], 1)
             self.assertNotIn("total_tokens", values)
@@ -353,7 +490,8 @@ class StartTests(unittest.TestCase):
                 "--metric", "coverage", "--output-root", str(output), "--prepare-only"]
             for flags in (["--sources", "search"], ["--fulltext"], ["--timeout-sec", "0"],
                           ["--cwd", str(Path(directory) / "missing")], ["--metric", "coverage"],
-                          ["--project", directory]):
+                          ["--project", str(Path(directory) / "missing-project")],
+                          ["--output-files", '{"raw":"../outside.json"}'], ["--output-files", '[]']):
                 with self.subTest(flags=flags), self.assertRaises(ValueError):
                     self.prepare(*base, *flags, "--command", "python", "run.py")
                 self.assertFalse(output.exists())

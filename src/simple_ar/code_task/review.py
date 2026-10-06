@@ -60,7 +60,8 @@ def review_code_task_changes(
     paths = code_task_paths(root)
     manifest = load_code_task_manifest(root)
     changed_files = _changed_files(manifest, paths)
-    deterministic = _deterministic_findings(root, manifest, changed_files)
+    interface_mismatches = find_local_api_mismatches(paths.workspace_dir, relevant_paths=changed_files)
+    deterministic = _deterministic_findings(root, manifest, changed_files, interface_mismatches=interface_mismatches)
     contract = _contract_from_run(paths)
     review_index = build_review_index(
         paths.workspace_dir,
@@ -72,6 +73,7 @@ def review_code_task_changes(
         deterministic_findings=deterministic,
         max_clusters=4,
         max_files_per_cluster=5,
+        relevant_paths=changed_files,
     )
     write_json(_review_index_path(paths.meta_dir, phase), review_index)
     write_json(
@@ -89,6 +91,7 @@ def review_code_task_changes(
         manifest=manifest,
         phase=phase,
         changed_files=changed_files,
+        interface_mismatches=interface_mismatches,
         review_index=review_index,
         review_clusters=review_clusters,
         model=model,
@@ -105,6 +108,8 @@ def review_code_task_changes(
         metadata={
             "phase": phase,
             "changed_files": changed_files,
+            "changed_files_outside_review_clusters": [path for path in changed_files
+                if not any(path in cluster.get("files", []) for cluster in review_clusters)],
             "patch_diff": "code_task/patch.diff" if (paths.task_dir / "patch.diff").is_file() else "",
             "review_mode": "layered",
             "review_index": _relative_meta_path(phase, "review_index"),
@@ -141,7 +146,8 @@ def review_code_task_changes(
     )
 
 
-def _deterministic_findings(root: Path, manifest: dict[str, Any], changed_files: list[str]) -> list[ReviewFinding]:
+def _deterministic_findings(root: Path, manifest: dict[str, Any], changed_files: list[str], *,
+                            interface_mismatches: list[dict[str, Any]] | None = None) -> list[ReviewFinding]:
     paths = code_task_paths(root)
     findings: list[ReviewFinding] = []
     allowed = allowed_patterns_from_manifest(manifest)
@@ -159,7 +165,9 @@ def _deterministic_findings(root: Path, manifest: dict[str, Any], changed_files:
                     source="code-task.rule-review",
                 )
             )
-    for mismatch in find_local_api_mismatches(paths.workspace_dir, relevant_paths=changed_files):
+    if interface_mismatches is None:
+        interface_mismatches = find_local_api_mismatches(paths.workspace_dir, relevant_paths=changed_files)
+    for mismatch in interface_mismatches:
         caller = str(mismatch.get("caller", ""))
         target_path = str(mismatch.get("target_path", ""))
         target_module = str(mismatch.get("target_module", ""))
@@ -238,6 +246,7 @@ def _layered_llm_findings(
     manifest: dict[str, Any],
     phase: str,
     changed_files: list[str],
+    interface_mismatches: list[dict[str, Any]],
     review_index: dict[str, Any],
     review_clusters: list[dict[str, Any]],
     model: str | None,
@@ -246,18 +255,22 @@ def _layered_llm_findings(
     max_source_chars_per_file: int,
     message_callback: MessageCallback | None,
 ) -> list[ReviewFinding]:
+    if not use_llm:
+        return []
     paths = code_task_paths(run_dir)
     compact_index = compact_review_index(review_index)
-    interface_mismatches = find_local_api_mismatches(paths.workspace_dir, relevant_paths=changed_files)
     interface_paths = _dedupe(
         [*changed_files, *(str(row.get("target_path", "")) for row in interface_mismatches)]
     )[:20]
+    local_api_contract = project_api_contract(paths.workspace_dir, relevant_paths=interface_paths)
+    patch_diff = _read_optional_text(paths.task_dir / "patch.diff")
     findings: list[ReviewFinding] = []
     for cluster in review_clusters:
         snippets = snippets_for_cluster(
             paths.workspace_dir,
             cluster,
             chars_per_file=max_source_chars_per_file,
+            patch_diff=patch_diff,
         )
         if not snippets:
             continue
@@ -269,8 +282,8 @@ def _layered_llm_findings(
             changed_files=changed_files,
             review_index=compact_index,
             review_cluster=cluster,
-            interface_paths=interface_paths,
             interface_mismatches=interface_mismatches,
+            local_api_contract=local_api_contract,
             snippets=snippets,
         )
         findings.extend(
@@ -295,7 +308,7 @@ def _layered_llm_findings(
 
 _CORRECTNESS_CATEGORIES = frozenset({
     "logic", "data_flow", "interface", "degenerate_implementation", "execution",
-    "runtime", "metrics", "validation", "correctness", "contract",
+    "runtime", "metrics", "correctness", "contract",
     "benchmark_integrity", "scope",
 })
 
@@ -306,6 +319,9 @@ def _corroborated_review_findings(findings: list[ReviewFinding]) -> list[ReviewF
     The opening clause is a deliberately conservative, auditable signature.
     It may miss differently worded reports; it cannot turn a lone model
     judgment or three unrelated warnings into an execution blocker.
+    Validation requests are advisory: a pre-validation review cannot require
+    the missing downstream result to authorize its own validation. Actual
+    failed validation is independently blocking in deterministic findings.
     """
 
     groups: dict[tuple[str, tuple[str, ...]], list[ReviewFinding]] = defaultdict(list)
@@ -330,7 +346,7 @@ def _corroborated_review_findings(findings: list[ReviewFinding]) -> list[ReviewF
             key=f"corroborated:{category}:{'-'.join(signature)}",
             severity="blocking",
             category=category,
-            summary=f"Independent review clusters corroborated: {representative.summary}",
+            summary=f"Review clusters reported the same concern: {representative.summary}",
             evidence=list(dict.fromkeys(path for finding in matching for path in finding.evidence))[:12],
             recommendation=(
                 "Resolve this specific correctness concern and re-review the patch before "
@@ -349,8 +365,8 @@ def _review_prompt(
     changed_files: list[str],
     review_index: dict[str, Any],
     review_cluster: dict[str, Any],
-    interface_paths: list[str],
     interface_mismatches: list[dict[str, Any]],
+    local_api_contract: dict[str, list[str]],
     snippets: list[str],
 ) -> str:
     paths = code_task_paths(run_dir)
@@ -359,6 +375,9 @@ def _review_prompt(
             "Review the applied patch for scope, interface compatibility, logic, tests, benchmark integrity, "
             "and repair risk. Use the full review index to understand project shape, but focus findings on "
             "the current review cluster and the supplied patch evidence. Do not request broad rewrites."
+            " This review can precede validation. Missing test coverage or an unrun validation command "
+            "belongs to category validation as an advisory request to run the authorized check, not "
+            "evidence of a runtime defect. Distinguish absent results from recorded failed results."
         ),
         context={
             "phase": phase,
@@ -371,10 +390,7 @@ def _review_prompt(
             "validation_report": _read_optional_json(paths.meta_dir / "validation_report.json"),
             "patched_run_record": _run_record(manifest, "patched"),
             "patch_diff": _clip(_read_optional_text(paths.task_dir / "patch.diff"), 9000),
-            "local_api_contract": project_api_contract(
-                paths.workspace_dir,
-                relevant_paths=interface_paths,
-            ),
+            "local_api_contract": local_api_contract,
             "local_api_mismatches": interface_mismatches,
         },
         snippets=snippets,

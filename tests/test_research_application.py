@@ -24,6 +24,69 @@ from simple_ar.research.implementation import ImplementationRequest
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_empty_ingest_remains_pending_and_explicit_resume_retries_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.html"
+            source.write_text("<html><body></body></html>", encoding="utf-8")
+            app = create_session(ResearchBrief(request_text="Write from the supplied source", requested_outputs=("report",),
+                asset_requests=({"locator": str(source), "role": "paper"},)), root=root / "session",
+                services=ResearchApplicationServices(config={"research_task_kind": "writing"}))
+            initial = app.advance(max_actions=2)
+            self.assertEqual(initial.status, "paused")
+            self.assertEqual(initial.next_action, "document_ingest")
+            self.assertNotIn("documents", initial.state_refs)
+            attempts = list(app.controller.list_attempts())
+            failed = next(row for row in attempts if row.capability == "document_ingest")
+            self.assertEqual(failed.status, "blocked")
+            source.write_text("<h1>Supplied source</h1><p>Now usable original evidence.</p>", encoding="utf-8")
+            restored = load_session(root / "session")
+            restored.continue_session(reason="The user replaced the empty supplied document.")
+            completed = restored.advance(max_actions=1)
+            self.assertEqual(completed.next_action, "report_write")
+            self.assertIn("Now usable original evidence", "\n".join(row.text for row in restored._load_documents().chunks))
+            self.assertEqual(len(restored.controller.list_attempts()), len(attempts) + 1)
+            self.assertEqual(next(row for row in restored.controller.list_attempts()
+                                  if row.attempt_id == failed.attempt_id).status, "blocked")
+
+    def test_local_document_selection_uses_parser_formats_without_importing_raw_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.HTML"
+            material = root / "notes.htm"
+            raw_table = root / "observations.csv"
+            paper.write_text("<h1>Primary paper</h1><p>Original conditions.</p>", encoding="utf-8")
+            material.write_text("<h1>Supplied notes</h1><p>Declared observations.</p>", encoding="utf-8")
+            raw_table.write_text("a,b\n1,2\n", encoding="utf-8")
+            app = create_session(ResearchBrief(request_text="Write from supplied sources",
+                requested_outputs=("report",), asset_requests=(
+                    {"locator": str(paper), "role": "paper"},
+                    {"locator": str(material), "role": "material"},
+                    {"locator": str(raw_table), "role": "material"})), root=root / "session",
+                services=ResearchApplicationServices(config={"research_task_kind": "writing"}))
+            self.assertEqual(app._local_documents(), (paper, material))
+
+    def test_action_stop_uses_one_existing_pause_and_view_without_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'session'
+            app = create_session(ResearchBrief(request_text='Summarize supplied evidence',
+                requested_outputs=('summary',)), root=root)
+            before_attempts = app.view().attempts
+            with patch.object(app.controller, 'pause', wraps=app.controller.pause) as pause, \
+                    patch.object(app, '_persist_application_views', wraps=app._persist_application_views) as persist:
+                self.assertFalse(app._pause_action('  Keep the measured inputs; clarify scope.  '))
+            pause.assert_called_once_with('  Keep the measured inputs; clarify scope.  ')
+            persist.assert_called_once_with()
+            restored = load_session(root)
+            self.assertEqual(restored.view().status, 'paused')
+            self.assertEqual(restored.view().status_reason, 'Keep the measured inputs; clarify scope.')
+            self.assertEqual(restored.view().attempts, before_attempts)
+            with patch.object(app.controller, 'pause', side_effect=RuntimeError('Cannot stop a live action')), \
+                    patch.object(app, '_persist_application_views') as persist:
+                with self.assertRaisesRegex(RuntimeError, 'live action'):
+                    app._pause_action('Do not swallow lifecycle errors')
+            persist.assert_not_called()
+
     def test_writing_auto_template_keeps_started_snapshot_across_default_change(self):
         from simple_ar.report.schema import ReportRuntimeConfig
         from simple_ar.report.templates import load_report_template_bundle
@@ -54,54 +117,56 @@ class ResearchApplicationTests(unittest.TestCase):
         from simple_ar.report.schema import AgentReportResult, ReportSectionDraft, ReportToolCall
         from simple_ar.report.agent import _prompt_handle_view
 
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            material = root / "external results.markdown"
-            material.write_text("# Results\nA single external observation suggests a difference.\n", encoding="utf-8")
-            app = create_session(ResearchBrief(request_text="Write an honest summary", requested_outputs=("report",),
-                asset_requests=({"locator": str(material), "role": "material"},)), root=root / "session",
-                services=ResearchApplicationServices(config={"research_task_kind": "writing"},
-                    budget_limits={"process_invocations": 0}))
-            view = app.advance(max_actions=2)
-            self.assertEqual(view.next_action, "report_write", view.status_reason)
-            documents_ref = view.state_refs["documents"]
-            self.assertNotIn("synthesis", view.state_refs)
-            material.write_text("Changed input that must not replace extracted evidence.", encoding="utf-8")
-            app = load_session(root / "session", services=ResearchApplicationServices(
-                llm_client=LLMClient(LLMSettings(api_key="fixture"))))
+        for kind in ("writing", "survey"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                material = root / "external results.markdown"
+                material.write_text("# Results\nA single external observation suggests a difference.\n", encoding="utf-8")
+                app = create_session(ResearchBrief(request_text="Write an honest summary", requested_outputs=("report",),
+                    asset_requests=({"locator": str(material), "role": "material"},)), root=root / "session",
+                    services=ResearchApplicationServices(config={"research_task_kind": kind,
+                        "research_materials_only": True, "research_plan_mode": "deterministic"},
+                        budget_limits={"process_invocations": 0}))
+                view = app.advance(max_actions=2)
+                self.assertEqual(view.next_action, "report_write", view.status_reason)
+                documents_ref = view.state_refs["documents"]
+                self.assertNotIn("synthesis", view.state_refs)
+                material.write_text("Changed input that must not replace extracted evidence.", encoding="utf-8")
+                app = load_session(root / "session", services=ResearchApplicationServices(
+                    llm_client=LLMClient(LLMSettings(api_key="fixture"))))
 
-            def writer(**kwargs):
-                context, memory = kwargs["context"], kwargs["memory"]
-                self.assertEqual(context.report_mode, "supplied_materials")
-                self.assertEqual(context.papers, [])
-                self.assertEqual(context.metric_sources, [])
-                self.assertEqual(context.synthesis_markdown, "")
-                self.assertEqual(kwargs["template"].name, "material_report")
-                handle = memory.source_handles[0]
-                self.assertEqual(_prompt_handle_view(handle)["metadata"]["evidence_role"], "user_supplied_unverified")
-                result = kwargs["gateway"].call(ReportToolCall(tool_name="get_neighbor_chunks", arguments={"handle": handle.handle}))
-                self.assertIn("single external observation", result.content["chunks"][0]["text"])
-                self.assertNotIn("Changed input", json.dumps(result.content))
-                return AgentReportResult(report_body="", memory=memory, used_agent=True,
-                    sections=[ReportSectionDraft(section_id="results", heading="Results and Limitations",
-                        draft_markdown="The supplied notes describe one external observation. No experiment was conducted in this task; the result is not independently verified.",
-                        used_sources=[handle.handle])])
+                def writer(**kwargs):
+                    context, memory = kwargs["context"], kwargs["memory"]
+                    self.assertEqual(context.report_mode, "supplied_materials")
+                    self.assertEqual(context.papers, [])
+                    self.assertEqual(context.metric_sources, [])
+                    self.assertEqual(context.synthesis_markdown, "")
+                    self.assertEqual(kwargs["template"].name, "material_report")
+                    handle = memory.source_handles[0]
+                    self.assertEqual(_prompt_handle_view(handle)["metadata"]["evidence_role"], "user_supplied_unverified")
+                    result = kwargs["gateway"].call(ReportToolCall(tool_name="get_neighbor_chunks", arguments={"handle": handle.handle}))
+                    self.assertIn("single external observation", result.content["chunks"][0]["text"])
+                    self.assertNotIn("Changed input", json.dumps(result.content))
+                    return AgentReportResult(report_body="", memory=memory, used_agent=True,
+                        sections=[ReportSectionDraft(section_id="results", heading="Results and Limitations",
+                            draft_markdown="The supplied notes describe one external observation. No experiment was conducted in this task; the result is not independently verified.",
+                            used_sources=[handle.handle])])
 
-            with patch("simple_ar.report.writing.run_report_agent", side_effect=LLMError("Temporary outage")):
-                view = app.advance(max_actions=1)
-            self.assertEqual(view.status, "paused")
-            app = load_session(root / "session", services=ResearchApplicationServices(
-                llm_client=LLMClient(LLMSettings(api_key="fixture"))))
-            app.continue_session()
-            with patch("simple_ar.report.writing.run_report_agent", side_effect=writer):
-                view = app.advance(max_actions=3)
-            self.assertEqual(view.status, "completed", view.status_reason)
-            self.assertEqual(view.state_refs["documents"], documents_ref)
-            self.assertCountEqual([row["capability"] for row in view.attempts],
-                             ["plan", "document_ingest", "report_write", "report_write", "report", "report_audit"])
-            self.assertNotIn("experiment", view.state_refs)
-            self.assertNotIn("synthesis", view.state_refs)
-            self.assertEqual(app.budget_ledger.remaining("process_invocations"), 0)
+                with patch("simple_ar.report.writing.run_report_agent", side_effect=LLMError("Temporary outage")):
+                    view = app.advance(max_actions=1)
+                self.assertEqual(view.status, "paused")
+                app = load_session(root / "session", services=ResearchApplicationServices(
+                    llm_client=LLMClient(LLMSettings(api_key="fixture"))))
+                app.continue_session()
+                with patch("simple_ar.report.writing.run_report_agent", side_effect=writer):
+                    view = app.advance(max_actions=3)
+                self.assertEqual(view.status, "completed", view.status_reason)
+                self.assertEqual(view.state_refs["documents"], documents_ref)
+                self.assertCountEqual([row["capability"] for row in view.attempts],
+                                 ["plan", "document_ingest", "report_write", "report_write", "report", "report_audit"])
+                self.assertNotIn("experiment", view.state_refs)
+                self.assertNotIn("synthesis", view.state_refs)
+                self.assertEqual(app.budget_ledger.remaining("process_invocations"), 0)
 
     def test_writing_preserves_paper_material_roles_and_missing_text(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -650,7 +715,8 @@ class ResearchApplicationTests(unittest.TestCase):
             ))
             self.assertNotIn("decision", app.view().state_refs)
             self.assertIsNotNone(app.view().next_action)
-            self.assertEqual(app.view().state_refs["read"], before.state_refs["read"])
+            self.assertEqual(app.view().state_refs["documents"], before.state_refs["documents"])
+            self.assertNotIn("read", before.state_refs)
             self.assertTrue(app.controller.store.exists(decision))
 
             decision_id = "fedcba9876543210"
@@ -1662,7 +1728,8 @@ class ResearchApplicationTests(unittest.TestCase):
                     budget_limits={"process_invocations": 4, "process_wall_seconds": 20}))
             plan = app.controller.store.read_json(app.view().state_refs["work_plan"])
             self.assertEqual(plan["requested_outputs"][0]["status"], "pending")
-            app.advance(max_actions=8)
+            self.advance_to(app, "research_design")
+            app.advance(max_actions=1)
             self.assertEqual(app.view().next_action, "plan")
             # The first plan ends at the design checkpoint.  The same plan
             # capability then binds the accepted execution protocol before
@@ -2170,6 +2237,47 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(Path(resolved["cwd"]).resolve(), new_project.resolve())
             self.assertTrue(app.controller.store.exists(preparation))
 
+    def test_code_task_input_revision_retires_prepared_run_not_history_or_budget(self):
+        for change in ("goal", "constraint", "edit_scope", "preference"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                project = root / "project"
+                project.mkdir()
+                execution = {"command": [sys.executable, "-c", "print('ok')"],
+                    "cwd": str(project), "timeout_sec": 5,
+                    "code_task": {"code_root": str(project), "allowed_patterns": ["module.py"]}}
+                app = create_session(ResearchBrief(request_text="Fix the supplied public issue.",
+                    objective="Fix the supplied public issue.", requested_outputs=("bug_fix",)),
+                    root=root / "session", services=ResearchApplicationServices(
+                        config={"research_task_kind": "bug_fix", "execution": execution},
+                        budget_limits={"llm_requests": 9}))
+                app.controller.pause("Seed the existing task-bound preparation.")
+                prepared = app.controller.store.write_json("inputs/prepared_execution.json",
+                    {"execution": {**execution, "cwd": str(root / "prepared_workspace"),
+                        "code_task": {"run_dir": str(root / "prepared_run")}},
+                        "workspace": str(root / "prepared_workspace")},
+                    kind="prepared_execution", schema="prepared_execution.v1", producer="test")
+                app.controller.manifest.state_refs["preparation"] = prepared
+                app._persist_inputs(())
+                app = load_session(root / "session")
+                self.assertEqual(app.services.config["execution"], execution)
+                original = app.controller.store.read_json(prepared)
+                if change == "edit_scope":
+                    app.continue_session(revised_execution={**execution,
+                        "code_task": {**execution["code_task"], "allowed_patterns": ["*.py"]}})
+                else:
+                    revision = {"goal": {"objective": "Also preserve inherited behavior."},
+                        "constraint": {"hard_constraints": ("Keep inherited behavior.",)},
+                        "preference": {"preferences": ("Keep the status concise.",)}}[change]
+                    app.continue_session(revised_brief=replace(app.brief, **revision))
+                self.assertEqual("preparation" in app.view().state_refs, change == "preference")
+                self.assertEqual(app.controller.store.read_json(prepared), original)
+                self.assertEqual(app.budget_ledger.remaining("llm_requests"), 9)
+                self.assertFalse(app.budget_ledger.entries)
+                restored = load_session(root / "session")
+                self.assertEqual("preparation" in restored.view().state_refs, change == "preference")
+                self.assertEqual(restored._needs_preparation(), True)
+
     def test_execution_revision_reuses_matching_baseline_and_remeasures_changed_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2285,7 +2393,8 @@ class ResearchApplicationTests(unittest.TestCase):
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=root / "session", services=ResearchApplicationServices(max_results=1,
                 budget_limits={"process_invocations": 0}))
-            view = app.advance(max_actions=6)
+            self.advance_to(app, "report_write")
+            view = app.view()
             self.assertEqual(view.next_action, "report_write")
             app.services = replace(app.services, llm_client=LLMClient(LLMSettings(api_key="fixture")))
 
@@ -2326,7 +2435,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 request_text="Review calibration evidence.", requested_outputs=("report",),
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=root / "session", services=ResearchApplicationServices(max_results=1))
-            app.advance(max_actions=6)
+            self.advance_to(app, "report_write")
             app.services = replace(app.services, llm_client=LLMClient(LLMSettings(api_key="fixture")))
 
             def writer(**kwargs):
@@ -2383,7 +2492,7 @@ class ResearchApplicationTests(unittest.TestCase):
             # Simulate a persisted/legacy selection that contains more papers
             # than a newer delivery bound; the final gate must still enforce it.
             with patch.object(app, "_search_limit", return_value=2):
-                app.advance(max_actions=6)
+                self.advance_to(app, "report_write")
             app.services = replace(app.services, llm_client=LLMClient(LLMSettings(api_key="fixture")))
 
             def overbroad_writer(**kwargs):
@@ -2518,7 +2627,8 @@ class ResearchApplicationTests(unittest.TestCase):
                 ), root=root / "session", services=ResearchApplicationServices(max_results=1,
                     config={"execution": {"dataset": str(data), "timeout_sec": 10}},
                     budget_limits={"process_invocations": 1, "process_wall_seconds": 10}))
-                prepared = app.advance(max_actions=10)
+                self.advance_to(app, "experiment")
+                prepared = app.view()
                 self.assertIn("preparation", prepared.state_refs, prepared.status_reason)
                 self.assertNotIn("experiment", prepared.state_refs)
                 self.assertEqual(app.budget_ledger.remaining("process_invocations"), 1)
@@ -2685,7 +2795,7 @@ class ResearchApplicationTests(unittest.TestCase):
             paper = root / "paper.md"
             paper.write_text("# Evaluation\n\nValidation measures accuracy.\n", encoding="utf-8")
             app = create_session(ResearchBrief(
-                request_text="Evaluate validation.", requested_outputs=("experiment",),
+                request_text="Evaluate validation.", requested_outputs=("experiment", "research_summary"),
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=root / "session", services=ResearchApplicationServices(max_results=1, config={
                 "execution": {"command": [sys.executable, "-c", "from pathlib import Path; Path('ran').touch()"],
@@ -2821,12 +2931,12 @@ class ResearchApplicationTests(unittest.TestCase):
                     (root / "model.py").write_text("def predict():\n    return 1\n", encoding="utf-8")
                     execution["code_task"] = {"code_root": str(root), "allowed_patterns": ["model.py"]}
                 app = create_session(
-                    ResearchBrief(request_text="Study validation for agents", requested_outputs=("research_design",),
+                    ResearchBrief(request_text="Study validation for agents", requested_outputs=("research_design", "research_summary"),
                                   asset_requests=({"locator": str(paper), "role": "paper"},)),
                     root=root / "session", services=ResearchApplicationServices(max_results=1, config={
                         "execution": execution}),
                 )
-                app.advance(max_actions=6)
+                self.advance_to(app, "assess_ideas")
                 synthesis = app.controller.store.read_json(app.view().state_refs["synthesis"])
                 self.assertIn("heldout.csv", synthesis["execution_context"])
                 self.assertIn("Study validation for agents", synthesis["execution_context"])
@@ -3131,7 +3241,7 @@ class ResearchApplicationTests(unittest.TestCase):
             app = create_session(
                 ResearchBrief(
                     request_text="Study reliable agents.",
-                    requested_outputs=("experiment", "report"),
+                    requested_outputs=("experiment", "report", "research_summary"),
                     asset_requests=({"locator": str(paper), "role": "paper"},),
                 ),
                 root=root / "session",
@@ -3166,7 +3276,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 ResearchBrief(request_text="Study reliable agents.", requested_outputs=("experiment", "report"),
                               asset_requests=({"locator": str(paper), "role": "paper"},)),
                 root=root / "session", services=ResearchApplicationServices(max_results=1))
-            app.advance(max_actions=7)
+            self.advance_to(app, "research_design")
             self.assertEqual(app.view().next_action, "research_design")
             retained = {k: app.view().state_refs[k] for k in ("plan", "search", "read", "synthesis")}
             original = app.view().state_refs["assessment"]

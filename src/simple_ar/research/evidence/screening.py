@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import PurePosixPath
 from typing import Any
 
 from simple_ar.integrations.llm import LLMRequest, llm_worker_limit
@@ -130,6 +131,7 @@ def read_paper_notes_with_llm(
     papers: Sequence[Mapping[str, Any]],
     evidence_snippets: str = "",
     evidence_snippets_by_document: Mapping[str, str] | None = None,
+    front_matter_by_document: Mapping[str, Mapping[str, Any]] | None = None,
     revision_context_by_document: Mapping[str, Mapping[str, Any]] | None = None,
     topic: str = "",
     problem_markdown: str = "",
@@ -155,6 +157,8 @@ def read_paper_notes_with_llm(
                 ),
                 topic=topic,
                 problem_markdown=problem_markdown,
+                front_matter_json=json.dumps(front_matter_by_document.get(_paper_id(paper, index), {}), ensure_ascii=False)
+                    if front_matter_by_document is not None else "",
                 revision_context_json=json.dumps(revision_context_by_document.get(_paper_id(paper, index), {}), ensure_ascii=False)
                     if revision_context_by_document is not None else "",
             ),
@@ -409,9 +413,13 @@ def _batched(items: list[dict[str, Any]], batch_size: int) -> list[list[dict[str
 def _paper_screening_record(paper: Mapping[str, Any], index: int) -> dict[str, Any]:
     """Return compact metadata suitable for screening prompts."""
 
+    filename = PurePosixPath(str(paper.get("source_id") or "").replace("\\", "/")).stem.replace("_", " ").replace("-", " ").strip()
+    title_placeholder = (paper.get("source") == "local_files" and bool(filename)
+        and paper.get("title") == filename and not (paper.get("metadata") or {}).get("paper_id"))
     return {
         "paper_id": _paper_id(paper, index),
         "title": _truncate_text(str(paper.get("title") or ""), 240),
+        "title_role": "filename_placeholder_not_publication_title" if title_placeholder else "supplied_metadata",
         "abstract": _truncate_text(str(paper.get("abstract") or ""), 1400),
         "source": str(paper.get("source") or ""),
         "published": paper.get("published"),
@@ -821,6 +829,7 @@ def _normalize_paper_note(
         "limitation": limitation_text or (limitations[0] if limitations else "Not specified."),
         "relevance": _text_field(row, "relevance") or relation or "Not specified.",
         "followup_queries": [query[:500] for query in _string_items(row.get("followup_queries"), limit=2)],
+        "bibliographic_fields": row.get("bibliographic_fields", []) if isinstance(row.get("bibliographic_fields", []), list) else [],
     }
 
 

@@ -22,8 +22,15 @@ claims from local run evidence.
 
 ## Local Setup
 
-Record code source, environment, command, dependency notes, hardware signals,
-seed policy, and timeout.
+Describe code source, environment, dependency notes, seed policy and execution
+limits from their recorded evidence. Attribute producer-reported details rather
+than treating them as independently verified. Distinguish missing evidence from
+details not yet read in a truncated preview.
+
+Keep full commands, absolute paths and run receipts in the existing reproduction
+attachments, with a concise reference in the setup. Include them in the body only
+when the user explicitly asks. The body should explain material method and
+comparison conditions, not reproduce a run log.
 
 ## Reproduction Result
 

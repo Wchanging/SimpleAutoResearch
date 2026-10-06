@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import ast
 import json
+import symtable
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
+
+from simple_ar.code_task.analysis.index import project_python_files
 
 
 def order_file_specs(files: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
@@ -121,13 +124,80 @@ def snippet_api_contract(snippets: Sequence[Mapping[str, Any]]) -> dict[str, lis
     """Build a compact API contract from already-selected prompt snippets."""
 
     result: dict[str, list[str]] = {}
-    for row in snippets:
+    for row in source_snippet_views(snippets):
         path = _safe_path(str(row.get("path", "")))
         text = str(row.get("text", ""))
-        if not path or not path.endswith(".py") or not text:
+        if not path or not path.endswith(".py") or not text or row.get("coverage_conflict"):
             continue
-        result[path] = public_api_from_source(text)
+        result[path] = list(dict.fromkeys([*result.get(path, []), *public_api_from_source(text)]))
     return result
+
+
+def source_snippet_views(snippets: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Join observed contiguous source only; never fill gaps or change permissions.
+
+    This is a prompt projection, not a second source store. Exact matching
+    overlaps can be removed, but conflicting observations remain separate and
+    cannot establish complete coverage. Legacy complete snippets need no migration.
+    """
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for snippet in snippets:
+        row = dict(snippet)
+        groups.setdefault((str(row.get("path", "")), str(row.get("access_role", "editable"))), []).append(row)
+    result: list[dict[str, Any]] = []
+    for rows in groups.values():
+        valid = all(type(row.get("source_offset", 0)) is int and row.get("source_offset", 0) >= 0
+                    and isinstance(row.get("text", ""), str) for row in rows)
+        totals = {row["source_chars"] for row in rows if type(row.get("source_chars")) is int}
+        if valid and not totals and len(rows) == 1 and not rows[0].get("truncated"):
+            totals = {rows[0].get("source_offset", 0) + len(str(rows[0].get("text", "")))}
+        total = next(iter(totals)) if len(totals) == 1 else None
+        joined: list[dict[str, Any]] = []
+        conflict = len(totals) > 1 or not valid or (total is not None and valid and any(
+            row.get("source_offset", 0) + len(row.get("text", "")) > total for row in rows))
+        for observed in sorted(rows, key=lambda item: item.get("source_offset", 0)) if valid else rows:
+            row = dict(observed)
+            row.setdefault("source_offset", 0)
+            row.setdefault("text", "")
+            if joined and not conflict:
+                previous = joined[-1]
+                offset = row["source_offset"] - previous["source_offset"]
+                overlap = len(previous["text"]) - offset
+                if overlap >= 0:
+                    shared = min(overlap, len(row["text"]))
+                    if previous["text"][offset:offset + shared] != row["text"][:shared]:
+                        conflict = True
+                        break
+                    previous["text"] += row["text"][shared:]
+                    continue
+            joined.append(row)
+        if conflict:
+            joined = [dict(row, coverage_conflict=True) for row in rows]
+        for row in joined:
+            offset, text = row.get("source_offset", 0), str(row.get("text", ""))
+            complete = (not conflict and total is not None and offset == 0 and len(text) == total)
+            row.update(source_chars=total, chars=len(text), truncated=not complete)
+            if valid:
+                row["has_unread_tail"] = total is None or offset + len(text) < total
+            if type(row.get("start_line")) is int:
+                row["end_line"] = row["start_line"] + text[:max(0, len(text) - 1)].count("\n")
+            result.append(row)
+    return result
+
+
+def render_source_snippets(snippets: Sequence[Mapping[str, Any]]) -> str:
+    """Present exact observed ranges and whole-file coverage consistently."""
+    blocks = []
+    for row in source_snippet_views(snippets):
+        offset, text = row.get("source_offset", 0), str(row.get("text", ""))
+        span = f"chars [{offset}, {offset + len(text)})" if type(offset) is int else "unknown range"
+        coverage = "partial source" if row["truncated"] else "complete source"
+        if row.get("coverage_conflict"):
+            coverage += "; conflicting observations, do not treat as one file version"
+        blocks.append(f"### {row.get('path', '')} ({row.get('access_role', 'editable')}; "
+                      f"{coverage}; {span}; {row.get('source_chars')} total chars)\n"
+                      f"```text\n{text}\n```")
+    return "\n\n".join(blocks)
 
 
 def project_api_contract(
@@ -140,7 +210,7 @@ def project_api_contract(
     selected = {_safe_path(path) for path in relevant_paths or []}
     return {
         path.relative_to(project_dir).as_posix(): public_api(path)
-        for path in sorted(project_dir.rglob("*.py"))
+        for path in project_python_files(project_dir)
         if not selected or path.relative_to(project_dir).as_posix() in selected
     }
 
@@ -152,26 +222,16 @@ def find_local_api_mismatches(
 ) -> list[dict[str, Any]]:
     """Find references to attributes absent from generated local modules."""
 
-    modules: dict[str, tuple[Path, set[str]]] = {}
-    trees: dict[Path, ast.Module] = {}
+    modules, trees = _project_modules(project_dir)
     open_exports: set[str] = set()
-    for path in sorted(project_dir.rglob("*.py")):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, SyntaxError):
-            continue
-        module = _module_name(project_dir, path)
-        if not module:
-            continue
-        trees[path] = tree
-        modules[module] = (path, _exported_names(tree))
+    for path, tree in trees.items():
         if any(
             isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names)
-            for node in tree.body
-        ):
-            # A star import can re-export names that this file does not define.
+            for node in ast.walk(tree)
+        ) or "__getattr__" in modules[_module_name(project_dir, path)][1]:
+            # Star re-exports and dynamic module attributes have open APIs.
             # Treat its API as open rather than reporting a definite absence.
-            open_exports.add(module)
+            open_exports.add(_module_name(project_dir, path))
 
     findings: list[dict[str, Any]] = []
     seen: set[tuple[str, int, str, str]] = set()
@@ -308,18 +368,25 @@ def find_return_contract_mismatches(project_dir: Path) -> list[dict[str, Any]]:
 def _project_modules(project_dir: Path) -> tuple[dict[str, tuple[Path, set[str]]], dict[Path, ast.Module]]:
     modules: dict[str, tuple[Path, set[str]]] = {}
     trees: dict[Path, ast.Module] = {}
-    for path in sorted(project_dir.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    for path in project_python_files(project_dir):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            exported = _exported_names(tree)
         except (OSError, SyntaxError):
             continue
         module = _module_name(project_dir, path)
         if not module:
             continue
         trees[path] = tree
-        modules[module] = (path, _exported_names(tree))
+        # Source-file module loaders supply these independently of assignments
+        # in the AST. This is not an exemption for arbitrary dunder names.
+        names = exported | {
+            "__name__", "__doc__", "__package__", "__loader__", "__spec__",
+            "__file__", "__cached__", "__builtins__", "__dict__",
+        }
+        if path.name == "__init__.py":
+            names.add("__path__")
+        modules[module] = (path, names)
     return modules, trees
 
 
@@ -517,15 +584,14 @@ def _resolve_import_module(current: str, module: str | None, level: int, is_pack
 
 
 def _exported_names(tree: ast.Module) -> set[str]:
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            names.update(_assignment_names(node))
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            names.update(alias.asname or alias.name.split(".")[-1] for alias in node.names if alias.name != "*")
-    return names
+    """Possible module bindings, not proof that a runtime branch was taken.
+
+    Let Python own lexical scope: conditional imports/assignments and unpacking
+    bind module names; function/class locals do not. Never import user code.
+    """
+    table = symtable.symtable(ast.unparse(tree), "<project-source>", "exec")
+    return {symbol.get_name() for symbol in table.get_symbols()
+            if symbol.is_assigned() or symbol.is_imported() or symbol.is_namespace()}
 
 
 def _assignment_names(node: ast.Assign | ast.AnnAssign) -> list[str]:

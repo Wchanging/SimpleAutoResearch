@@ -222,11 +222,8 @@ def _looks_like_text(path: Path) -> bool:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _summary_for_file(path: Path, kind: str) -> str:
@@ -238,7 +235,7 @@ def _summary_for_file(path: Path, kind: str) -> str:
     except OSError:
         return ""
     if kind == "json":
-        summary = _json_summary(preview)
+        summary = json_summary(preview)
         if summary:
             return summary
     if kind == "python":
@@ -252,7 +249,8 @@ def _summary_for_file(path: Path, kind: str) -> str:
     return ""
 
 
-def _json_summary(text: str) -> str:
+def json_summary(text: str) -> str:
+    """Describe a JSON preview consistently for artifact and code indexes."""
     try:
         data = json.loads(text)
     except json.JSONDecodeError:

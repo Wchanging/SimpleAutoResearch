@@ -15,12 +15,32 @@ MATERIAL_REPORT_TEMPLATE = "material_report"
 BUILTIN_TEMPLATE_NAMES = {"source_review", "survey", "survey_long", "experiment", "reproduction", "analysis_report", MATERIAL_REPORT_TEMPLATE}
 
 
+def is_builtin_template(template: ReportTemplateBundle, config: ReportRuntimeConfig | None) -> bool:
+    return (template.name in BUILTIN_TEMPLATE_NAMES
+        and (config is None or config.template in {"", "auto", *BUILTIN_TEMPLATE_NAMES}))
+
+
+def _intended_use(template: ReportTemplateBundle) -> str:
+    purpose = re.search(r"(?ims)^##\s+Intended Use\s*$\n(.*?)(?=^##\s|\Z)", template.template_markdown)
+    return "## Intended Use\n\n" + purpose.group(1).strip() if purpose else ""
+
+
+def planning_template_guidance(template: ReportTemplateBundle, config: ReportRuntimeConfig) -> str:
+    """Adaptive planning needs genre, not the fallback's chapter assignments.
+
+    Removing a second topology only after planning is too late: the planner
+    can already have copied it. Custom and explicitly fixed templates keep
+    their author's complete structure. Never infer blocks in legacy prose.
+    """
+    if config.outline_strategy == "template" or not is_builtin_template(template, config):
+        return template.template_markdown
+    return _intended_use(template)
+
+
 def _adapted_builtin_plan(
     template: ReportTemplateBundle, memory: ReportMemory, config: ReportRuntimeConfig | None = None,
 ) -> bool:
-    if config is not None and config.template not in {"", "auto", *BUILTIN_TEMPLATE_NAMES}:
-        return False
-    return bool(memory.document_plan is not None and template.name in BUILTIN_TEMPLATE_NAMES
+    return bool(memory.document_plan is not None and is_builtin_template(template, config)
         and memory.outline_planning.get("strategy") in {"evidence_organized_outline", "topic_specific_outline"}
         and memory.outline_planning.get("status") == "adapted")
 
@@ -37,8 +57,7 @@ def drafting_template_guidance(
     """
     if not _adapted_builtin_plan(template, memory, config):
         return template.template_markdown
-    purpose = re.search(r"(?ims)^##\s+Intended Use\s*$\n(.*?)(?=^##\s|\Z)", template.template_markdown)
-    return "## Intended Use\n\n" + purpose.group(1).strip() if purpose else ""
+    return _intended_use(template)
 
 
 def reviewing_template_guidance(

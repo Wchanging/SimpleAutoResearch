@@ -90,6 +90,21 @@ def main(argv: Sequence[str] | None = None) -> None:
     except (OSError, ValueError) as exc:
         raise SystemExit(f"Invalid research configuration: {exc}") from exc
     args = parser.parse_args(arguments)
+    if args.command == "project-info":
+        from simple_ar.core.capabilities import ArtifactStore
+        from simple_ar.research.preparation import inspect_project_preparation, project_preparation_markdown
+        try:
+            if args.output.exists():
+                raise ValueError("Choose a new --output directory; existing preparation notes are not overwritten.")
+            facts = inspect_project_preparation(args.project, data_paths=tuple(args.data_path))
+            store = ArtifactStore(args.output)
+            store.write_json("preparation.json", facts, kind="project_preparation", schema="project_preparation.v1")
+            store.write_text("preparation.md", project_preparation_markdown(facts), kind="project_preparation", schema="markdown.v1")
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"Project inspection failed: {exc}") from exc
+        print_line(f"Preparation notes: {args.output.resolve() / 'preparation.md'}")
+        print_line("Read-only inspection; nothing installed or executed. Use these notes as --material for writing, or choose and confirm a documented reproduction command.")
+        return
     if args.command == "report-export":
         from simple_ar.report.export import export_acm_report
         try:
@@ -104,9 +119,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     if args.command == "start":
         from simple_ar.cli.start import prepare_start
+        from simple_ar.core.locking import SessionLockError
         try:
+            if args.chat or args.resume_setup:
+                from simple_ar.cli.intake_dialogue import discuss_start
+                args._explicit_start_destinations = _explicit_session_option_destinations(parser, arguments, set(), command="start")
+                args = discuss_start(args)
+                if args is None:
+                    return
             config_path = prepare_start(args)
-        except (OSError, ValueError, EOFError, KeyboardInterrupt) as exc:
+        except LLMError as exc:
+            raise SystemExit(f"Setup model call failed; the printed setup draft is retained: {exc}") from exc
+        except (OSError, ValueError, EOFError, KeyboardInterrupt, SessionLockError) as exc:
             raise SystemExit(f"Task setup stopped: {exc}") from exc
         if config_path is not None and not args.prepare_only:
             main(["research-session", "--config", str(config_path)])
@@ -317,11 +341,13 @@ def _print_research_session(args: argparse.Namespace) -> None:
     from simple_ar.app.session_roots import new_research_session_root
     from simple_ar.research.workflow_contracts import ResearchBrief
 
+    saved_outputs = ()
     if getattr(args, "session_root", None) is not None:
         from simple_ar.app.research_application import load_session
 
         try:
             saved_app = load_session(args.session_root)
+            saved_outputs = saved_app.brief.requested_outputs
             if not getattr(args, "topic", None):
                 args.topic = saved_app.brief.objective
             if getattr(args, "task_kind", "auto") == "auto" and saved_app.task_kind == "data_analysis":
@@ -329,9 +355,10 @@ def _print_research_session(args: argparse.Namespace) -> None:
         except (OSError, RuntimeError, ValueError) as exc:
             raise SystemExit(f"Could not restore the saved session goal: {exc}") from exc
 
-    from simple_ar.cli.research_config import validate_session_arguments
+    from simple_ar.cli.research_config import report_settings, validate_session_arguments
 
     inputs = validate_session_arguments(args)
+    report_config = report_settings(args)
     task_kind, command = inputs.task_kind, inputs.command
     execution_details, outputs = inputs.execution_details, inputs.outputs
     materials, data_analysis = inputs.materials, inputs.data_analysis
@@ -383,7 +410,9 @@ def _print_research_session(args: argparse.Namespace) -> None:
         timeout_sec = args.timeout_sec if args.timeout_sec is not None else 300
     if args.with_report and args.no_report:
         raise SystemExit("Use either --with-report or --no-report for research-session, not both.")
-    llm_client = None if task_kind == "data_analysis" else _optional_research_llm_client(args.model, "research session", max_output_tokens=getattr(args, "max_output_tokens", None))
+    analysis_only = task_kind == "data_analysis" and not (args.with_report or
+        ("report" in (outputs if outputs is not None else saved_outputs) and not args.no_report))
+    llm_client = None if analysis_only else _optional_research_llm_client(args.model, "research session", max_output_tokens=getattr(args, "max_output_tokens", None))
     review_model = (getattr(args, "feasibility_review_model", None) or "").strip()
     if review_model and llm_client is None:
         raise SystemExit("--feasibility-review-model requires --model for research design.")
@@ -392,7 +421,10 @@ def _print_research_session(args: argparse.Namespace) -> None:
     )
     if task_kind == "bug_fix" and (args.with_report or (outputs and "report" in outputs)):
         raise SystemExit("Bug-fix tasks produce a patch and validation evidence, not an academic report.")
-    report_requested = False if task_kind in {"bug_fix", "data_analysis"} else bool(task_kind == "writing" or args.with_report or (llm_client is not None and not args.no_report))
+    if task_kind == "data_analysis":
+        report_requested = not analysis_only
+    else:
+        report_requested = task_kind != "bug_fix" and bool(task_kind == "writing" or args.with_report or (llm_client is not None and not args.no_report))
     if outputs is not None:
         report_requested = "report" in outputs
     if report_requested and llm_client is None:
@@ -474,28 +506,12 @@ def _print_research_session(args: argparse.Namespace) -> None:
         request_text += "\n\n## Implementation task\n\n" + task_text.strip()
     from simple_ar.report.templates import MATERIAL_REPORT_TEMPLATE
     writing_template = args.report_template if "report_template" in getattr(args, "_explicit_resume_destinations", set()) else MATERIAL_REPORT_TEMPLATE
-    report_config: dict[str, object] = {
-        "mode": "experiment" if experiment_requested else "research_only",
-        "template": ("reproduction" if task_kind == "reproduction" and args.report_template == "experiment" else args.report_template) if experiment_requested else (
+    report_config.update(
+        mode="experiment" if experiment_requested else "research_only",
+        template=("reproduction" if task_kind == "reproduction" and args.report_template == "experiment" else args.report_template) if experiment_requested else (
             writing_template if task_kind == "writing" else "survey" if args.report_template == "experiment" else args.report_template
         ),
-        "reviewer": args.report_reviewer,
-        "max_review_iterations": args.max_review_iterations,
-    }
-    if getattr(args, "report_document_review", None) is not None:
-        report_config["document_review"] = args.report_document_review
-    if getattr(args, "report_outline_strategy", None) is not None:
-        report_config["outline_strategy"] = args.report_outline_strategy
-    if getattr(args, "report_data_tables", None) is not None:
-        report_config["data_tables"] = args.report_data_tables
-    if getattr(args, "max_section_tokens", None) is not None:
-        if args.max_section_tokens < 0:
-            raise SystemExit("--max-section-tokens cannot be negative; use 0 to omit the cap.")
-        report_config["max_section_tokens"] = args.max_section_tokens
-    if getattr(args, "report_figures", None):
-        report_config["figures"] = args.report_figures
-    if getattr(args, "report_max_cited_sources", None) is not None:
-        report_config["max_cited_sources"] = args.report_max_cited_sources
+    )
     config: dict[str, object] = {
         "research_max_documents": args.max_results,
         "research_max_iterations": args.max_research_iterations,
@@ -543,6 +559,9 @@ def _print_research_session(args: argparse.Namespace) -> None:
     asset_requests.extend({"locator": str(Path(path)), "kind": "file", "role": "material",
                            "mutability": "read_only", "allowed_uses": ["read", "reference"]}
                           for path in materials)
+    asset_requests.extend({"locator": str(Path(path).expanduser().resolve()), "kind": "dataset", "role": "dataset",
+                           "mutability": "read_only", "allowed_uses": ["read"]}
+                          for path in dict.fromkeys(getattr(args, "data_path", [])))
     if data_analysis is not None:
         asset_requests.append({"locator": data_analysis["file"], "kind": "file", "role": "dataset",
                                "mutability": "read_only", "allowed_uses": ["read"]})
@@ -579,7 +598,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         ("bug_fix",) if task_kind == "bug_fix"
         else ("survey",) if task_kind == "survey"
         else ("measurement",) if task_kind == "measurement"
-        else ("data_analysis",) if task_kind == "data_analysis"
+        else (("data_analysis", "report") if report_requested else ("data_analysis",)) if task_kind == "data_analysis"
         else ("research", "experiment") if experiment_requested else ("research",)
     )
     requested_outputs = (
@@ -700,11 +719,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 )
             if decision_requested and getattr(args, "reanalyze", False):
                 raise ResearchApplicationError("A decision reply cannot be combined with --reanalyze.")
-            if getattr(args, "reanalyze", False) and (brief_changed or revised_execution is not None or any((
-                continuation["authorization_id"], continuation["authorization_reason"],
-                continuation["authorize_remaining"], continuation["additional_attempts"],
-                continuation["additional_no_progress"],
-            ))):
+            if getattr(args, "reanalyze", False) and (brief_changed or revised_execution is not None or continuation_requested):
                 raise ResearchApplicationError("--reanalyze cannot be combined with input revisions or continuation allowances.")
             if getattr(args, "recover_interrupted", False):
                 if (getattr(args, "reanalyze", False) or brief_changed
@@ -723,11 +738,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
                     reason="Apply explicit report configuration and rebuild only report deliverables from existing evidence.",
                 )
             elif (brief_changed or revised_execution is not None or interaction_update is not None
-                  or decision_requested or any((
-                continuation["authorization_id"], continuation["authorization_reason"],
-                continuation["authorize_remaining"], continuation["additional_attempts"],
-                continuation["additional_no_progress"],
-            )) or (app.view().status in {"paused", "blocked", "failed"} and not (
+                  or decision_requested or continuation_requested or (app.view().status in {"paused", "blocked", "failed"} and not (
                 has_pending_decision
             ))):
                 app.continue_session(
@@ -1039,40 +1050,13 @@ def _explicit_session_option_destinations(
 
 
 def _report_config_overrides(args: argparse.Namespace, app: Any) -> dict[str, object]:
-    explicit = getattr(args, "_explicit_resume_destinations", set())
-    if args.command == "research-report":
-        fields = {
-            "template": "template",
-            "reviewer": "reviewer",
-            "max_review_iterations": "max_review_iterations",
-            "document_review": "document_review",
-            "outline_strategy": "outline_strategy",
-            "data_tables": "data_tables",
-            "max_section_tokens": "max_section_tokens",
-        }
-    else:
-        fields = {
-            "report_template": "template",
-            "report_reviewer": "reviewer",
-            "max_review_iterations": "max_review_iterations",
-            "report_document_review": "document_review",
-            "report_outline_strategy": "outline_strategy",
-            "report_data_tables": "data_tables",
-            "max_section_tokens": "max_section_tokens",
-            "report_figures": "figures",
-            "report_max_cited_sources": "max_cited_sources",
-        }
-    supplied: dict[str, object] = {}
-    for destination, key in fields.items():
-        if destination not in explicit:
-            continue
-        value = getattr(args, destination, None)
-        if key == "template" and args.command == "research-session":
-            if (value == "experiment" and not app.services.config.get("execution")
-                    and app.services.config.get("research_task_kind") != "writing"):
-                value = "survey"
-        if value is not None:
-            supplied[key] = value
+    from simple_ar.cli.research_config import report_settings
+
+    supplied = report_settings(args, explicit_destinations=getattr(args, "_explicit_resume_destinations", set()))
+    if (args.command == "research-session" and supplied.get("template") == "experiment"
+            and not app.services.config.get("execution")
+            and app.services.config.get("research_task_kind") != "writing"):
+        supplied["template"] = "survey"
     saved = app.services.config.get("report", {})
     saved = saved if isinstance(saved, dict) else {}
     return {key: value for key, value in supplied.items() if saved.get(key) != value}
@@ -1131,8 +1115,8 @@ def _print_research_report(args: argparse.Namespace) -> None:
 
     if args.max_review_iterations < 0:
         raise SystemExit("--max-review-iterations cannot be negative.")
-    if args.max_section_tokens is not None and args.max_section_tokens < 0:
-        raise SystemExit("--max-section-tokens cannot be negative; use 0 to omit the cap.")
+    from simple_ar.cli.research_config import report_settings
+    report_settings(args)
     session_root = Path(args.session_root)
     client = _optional_research_llm_client(args.model, "research report")
     if client is None:

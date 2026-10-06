@@ -1,79 +1,70 @@
-﻿# CLI 参考
+# CLI 参考
 
 [English version](CLI_REFERENCE.md)
 
-文章规划：`research-session --report-outline-strategy auto|template|adaptive`；
-另写报告使用 `research-report --outline-strategy auto|template|adaptive`。
-非综述自适应需显式启用，自定义模板与保存的 checkpoint 计划不变；
-TOML 对应 `[report].outline_strategy`。
-新建 `start --kind writing` 引导任务使用内置模板时保存 `adaptive`；自定义模板和已保存任务保留原结构。
-
-数据展示：`research-session --report-data-tables linked|full` 或
-`research-report --data-tables linked|full`，对应 `[report].data_tables`。
-默认 `linked` 保留完整分析包并链接全部数值记录；`full` 另将逐行表格放入正文。
-有唯一冻结来源归属时图表进入对应章节，否则保留独立数据节，不猜测科学含义。
-
-`start` 提供五类已支持的结构化任务选择；`research-session` 执行/恢复保存任务，
-`report-export` 导出已有报告。下面的底层命令是专家接口，不是每个功能都必须走的步骤。
-最短路径见[使用指南](USAGE_zh.md)，completed/审计的含义见[工作流边界](WORKFLOWS_zh.md)。
-
-## 已有材料直接写作
-
-`simple-ar start --kind writing --goal "写一份诚实的分析报告" --material notes.md`
-使用已有草稿、笔记或结果说明；可重复 `--material`，论文来源另用 `--document`。
-输入支持本地 Markdown、文本及 PDF；`--material` 还可接收已完成的 `table_analysis.v1`
-`analysis.json`（同目录保留数据副本），复算后附带可编辑图；不接受原始表格 JSON。
-默认 `material_report`，用 `--template experiment`
-请求论文体草稿。材料提取后直接写作、审阅、装配和审计，不搜索、不造研究综合、不执行实验。
-用户提供的数字与方法不等于本会话独立验证；审计状态也不等于发表质量。
-高级入口为 `research-session --task-kind writing --topic "说明已有结果" --material PATH --model env`，模板选项为
-`--report-template`。恢复仍使用已打印的 session-root，不重新启动引导。
-`analysis_report` 仍可显式选择，用于目标未达成/不确定的实验分析；材料报告不要求不存在的
-baseline、失败目标或实验继续决策。模型会话的引导续跑提示保留实际选定模型。
-
-`start --fulltext --sources search` 明确允许远程全文抓取与 PDF 下载；不加时使用摘要和已提供的本地材料，启动前会显示该范围。全文获取失败不会冒充全文阅读。
-
-## 已有数据分析（无需 API）
-
-`start --kind data_analysis --goal "描述结果" --data-file results.csv --value-column score --observation-unit "一次运行" --yes`
-明确选数值列。`--group-column method` 可选分组；`--value-column` 可重复，指标分别绘图。
-条形图的 `--data-mode values` 保留已有汇总值，不再次平均，且要求唯一标签；默认 `observations` 做描述统计。
-`--data-plot line|scatter --data-mode values --x-column step` 改为数值坐标图，不设分组列；
-`--x-unit` 记录横轴单位。折线要求 x 唯一、缺失 y 断线，散点保留重复 x，不聚合、不拟合。
-`--series-layout shared` 显式选择共享坐标轴/图例（TOML `analysis.series_layout`）；
-默认 separate。共享图使用共同声明单位，不归一化，所有系列位置共同计入点数上限。
-`--data-max-points 10000` 为每图行数的可调整物理上限，超出不抽样。详见[工作流](WORKFLOWS_zh.md)。
-`--data-missing reject|omit` 默认 reject；`--value-unit` 记录单位；`--figure-width column|wide` 默认 wide。
-物理上限 `--data-max-mb 20`、`--data-max-figures 100`，超出报错而非丢数据，可明确调整。
-高级入口同样支持这些参数及 `--task-kind data_analysis`、输出 `data_analysis`。
-支持 UTF-8 CSV/TSV、同构 JSON records；即便配置了全局模型也不调用 API。
-新引导保存空模型配置，续跑提示不要求 `--model`。按打印的 session-root 恢复；改变已固化的列/聚合设置需要新任务。更多见[工作流](WORKFLOWS_zh.md#已有数据分析与绘图无需模型)。
+本文用于查命令语法与操作效果。首次使用看[使用指南](USAGE_zh.md)，TOML 字段看[配置参考](CONFIG_REFERENCE_zh.md)。`simple-ar --help` 及各命令 `--help` 显示当前安装版本的选项。
 
 ## 引导入口
 
-`simple-ar start` 询问已实现功能（`survey` / `bug_fix` / 准备好的 `reproduction` / `writing` / `data_analysis`）及任务输入，保存普通 TOML，
-再交给 `research-session`。选项：`--kind`、`--goal`、可重复的 `--document`、
-`--sources materials|search`、`--fulltext`、调研可选 `--max-cited-sources N`（最终引用来源上限）、`--project`、`--validate`、可重复的 `--allow`、
-`--model`、`--interaction`、`--output-root`、`--prepare-only`、`--yes`。
-默认值、权限和续跑见[配置说明](CONFIG_REFERENCE_zh.md#引导设置)。不调用外部 Agent。
+```bash
+uv run simple-ar start
+uv run simple-ar start --chat
+uv run simple-ar start --kind writing --material notes.md --model env
+```
 
-固定协议复现还支持 `--hypothesis`、`--dataset`、`--expected-outcome`、可重复的 `--metric`、
-`--cwd`、`--timeout-sec` 和必须放最后的 `--command ARGV...`。需要本地材料和已经准备好的环境；
-不自动寻找实现或安装依赖。其他功能拒绝这些执行选项，避免错误扩大任务范围。
+`start` 准备普通任务，再交给 `research-session` 执行。
 
-本文是 SimpleAutoResearch 的命令速查手册，只关注命令语法、参数、产物和少量边界说明。
+| 选项 | 适用范围 | 用途 |
+| --- | --- | --- |
+| `--kind`、`--goal`、`--output-root` | 全部 | 功能、任务、输出位置 |
+| `--model`、`--interaction` | 模型任务 | 模型连接与参与策略 |
+| `--prepare-only`、`--yes` | 结构化设置 | 仅保存、不执行/API；或确认已提供选择 |
+| `--chat`、`--resume-setup PATH` | 模型辅助设置 | 澄清任务或恢复设置草稿 |
+| `--sources materials\|search`、`--document PATH`、`--fulltext`、`--max-cited-sources N` | 调研 | 来源访问、可重复论文、全文与引用上限 |
+| `--material PATH`、`--template` | 写作 | 可重复笔记/结果与报告形式 |
+| `--project`、`--validate`、`--allow PATTERN`、`--project-python PATH` | 改码 | 项目、验证、可重复范围、已有解释器 |
+| `--data-path PATH` | 改码/复现 | 可重复数据文件/目录，不是表格分析输入 |
+| `--hypothesis`、`--dataset`、`--expected-outcome`、`--metric` | 复现 | 结论、条件、输出指标 |
+| `--cwd`、`--timeout-sec`、`--output-files JSON` | 复现 | 目录、超时、登记输出文件 |
+| `--environment current\|venv`、`--requirements PATH`、`--install-project` | 复现 | 明确依赖准备 |
+| `--command ARGV...` | 复现 | 实际命令，必须最后提供 |
+| `--with-report` | 数据分析 | 附加写作，需要模型 |
 
-普通使用的正式任务入口是 `simple-ar research-session`，它负责有界的综述、改码和显式实验。
-`research-report` 可以为 `--no-report` 创建的 canonical
-session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使用 canonical 的显式重试边界，
-不再回退执行旧 v1 session。旧会话保持只读，可通过 `research-session-migrate` 将证据导入新会话。
-`research-brief`
-是分段、开发或诊断接口。旧 `research-experiment`、`research-code-task` 和 `simple-ar run/resume` 执行命令已退出；
-`status` 和 artifact 工具仍可读取历史产物，不会将旧阶段参数静默映射到新应用。
+功能为 `survey`、`bug_fix`、`reproduction`、`writing`、`data_analysis`。结构化设置在执行前不调用模型；chat 设置本身需模型和终端，不能与 `--prepare-only` 同用。
 
-- 安装和实践流程：[使用与配置](USAGE_zh.md)
-- 工作流概念和产物结构：[工作流与产物](WORKFLOWS_zh.md)
-- TOML 配置规范和示例：[配置参考](CONFIG_REFERENCE_zh.md)
+改码默认当前解释器；`--project-python` 保留已有 venv 入口，不创建或安装环境。复现依赖准备是另一项显式选择。
+
+### 已有数据分析（无需 API）
+
+使用 `start --kind data_analysis`；需要正文再加 `--with-report --model env`。数据参数与 `research-session` 共用：
+
+| 参数组 | 用途 |
+| --- | --- |
+| `--data-file` | 输入表格 |
+| `--group-column`、`--value-column` | 分组和可重复值列 |
+| `--observation-unit`、`--value-unit`、`--data-attribution` | 声明语义 |
+| `--data-mode observations\|values` | 默认聚合逐行观测，或保留已有数值 |
+| `--data-plot bar\|box\|heatmap\|line\|scatter` | 图形类型，默认 `bar` |
+| `--data-missing reject\|omit` | 默认拒绝缺失值，或明确选择遗漏策略 |
+| `--paired-baseline COLUMN` | 与指定基线列计算同一行的配对差值 |
+| `--x-column`、`--x-unit`、`--data-association none\|pearson` | 数值坐标与可选描述性相关，默认 `none` |
+| `--series-layout separate\|shared`、`--figure-width column\|wide` | 坐标轴默认 `separate`，图宽默认 `wide` |
+| `--data-max-mb`、`--data-max-points`、`--data-max-figures` | 输入/图形上限，默认 `20` MiB、`10000` 点和 `100` 图 |
+
+附加报告的上下文在 `start` 中使用 `--material`、`--document`，
+在 `research-session` 中使用 `--material`、`--local-document`；不改变数值变换。
+单独分析忽略模型设置。选项组合要求见[数据字段](CONFIG_REFERENCE_zh.md#已有数据的描述分析)。
+
+## 项目准备
+
+```bash
+uv run simple-ar project-info --project ./project --data-path ./data \
+  --output runs/project-preparation-NEW
+```
+
+保存 `preparation.json` 和 `preparation.md`，含入口候选、依赖声明、摘录和指定数据位置。不执行、安装或下载项目代码/数据；静态依赖观察针对检查解释器，不代表目标环境已解析完成。
+
+使用未占用目录；相对数据路径从项目根解析。说明可复用于写作或复现设置。
 
 ## 命令总览
 
@@ -94,6 +85,24 @@ session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使
 | `simple-ar code-task ...` | 在隔离可编辑 workspace 中处理已有代码项目。 |
 
 ## Research 命令
+
+### 报告控制参数
+
+两个报告入口使用同一套设置，选项前缀不同：
+
+| `research-session` | `research-report` | 用途 |
+| --- | --- | --- |
+| `--report-document-review` / `--no-report-document-review` | `--document-review` / `--no-document-review` | 开启或关闭整稿审阅 |
+| `--report-review-scope section\|document` | `--review-scope section\|document` | 逐节审阅或正文完成后整稿审阅 |
+| `--report-draft-scope section\|document` | `--draft-scope section\|document` | 分节起草或联合起草 |
+| `--report-outline-strategy auto\|template\|adaptive` | `--outline-strategy auto\|template\|adaptive` | 模板或证据驱动的章节规划 |
+| `--report-data-tables linked\|full` | `--data-tables linked\|full` | 链接数据记录，或同时附摘要表 |
+| `--max-document-review-prompt-chars N` | `--max-document-review-prompt-chars N` | 可选的完整审阅请求字符上限 |
+
+省略选项沿用配置或已保存设置。基础默认是分节起草/审阅、关闭整稿审阅、`auto` 规划、
+`linked` 数据表及不额外限制完整审阅请求（`0`）；引导入口可能保存不同选择。
+联合起草要求开启整稿审阅、选择整稿审阅范围和完整来源策略；依赖关系及持久化修订上限
+见[配置参考](CONFIG_REFERENCE_zh.md)。
 
 ### 固定协议复现
 

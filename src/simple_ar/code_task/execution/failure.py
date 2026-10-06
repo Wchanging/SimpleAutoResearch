@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.core.artifacts import read_json, read_text, write_json, write_text
+from simple_ar.code_task.analysis.index import project_python_files
 from simple_ar.code_task.execution.artifact_contract import compact_artifact_scan
 from simple_ar.code_task.execution.failure_graph import build_failure_graph
 from simple_ar.code_task.execution.run_history import archive_failure_artifacts_for_latest_attempt
@@ -494,9 +495,7 @@ def _source_signal_files(workspace_dir: Path, signal_text: str) -> list[str]:
         return []
     ranked: list[tuple[int, str]] = []
     workspace = workspace_dir.resolve()
-    for path in workspace.rglob("*.py"):
-        if not path.is_file():
-            continue
+    for path in project_python_files(workspace):
         try:
             rel = path.resolve().relative_to(workspace).as_posix()
             source = path.read_text(encoding="utf-8", errors="ignore").lower()

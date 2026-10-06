@@ -1,6 +1,7 @@
 # Supplied numerical curves / 已有数值曲线
 
-One complete case, run from the repository root without an API, GPU or plotting library:
+One complete case, run from the repository root without an API or GPU. The plotting
+library is installed with the package and needs no GUI or separate setup:
 
 ```bash
 uv run simple-ar research-session --config examples/data-curves/research.toml
@@ -12,11 +13,11 @@ unit. `loss_b` is missing at step 2: its record remains in `analysis.json`, no z
 is substituted and the line breaks there. Each SVG has its own axis; neither curve
 is smoothed or fitted. Lines order by numeric x and refuse duplicate x rather than
 average replicates. For real coordinate pairs with repeated x, choose `plot = "scatter"`.
-Current coordinate plots use value columns as separate figures, not grouped facets,
-statistical estimates or automatically constructed error bars.
+Value columns have separate axes by default; an explicit grouping column can
+separate category series. Statistical estimates and error bars are not guessed.
 
 Outputs go to `runs/data-curves/`. Copy the printed analysis directory to preserve
-`analysis.json`, `analysis.md`, input bytes and editable SVGs. Rebuild inside that
+`analysis.json`, `analysis.md`, input bytes, editable SVGs, vector PDFs and PNG previews. Rebuild inside that
 directory using the installed package:
 
 ```bash
@@ -32,11 +33,12 @@ Limits are adjustable: `max_mb` for input bytes, `max_figures` for output count,
 
 ## 中文
 
-这个文件夹只是一份完整的曲线案例；上面的仓库根目录命令无需 API/GPU/绘图库。
+这个文件夹只是一份完整的曲线案例；上面的命令无需 API/GPU，绘图库随包安装，无需 GUI。
 CSV 是五个演示坐标，不是实际训练或 benchmark。两列 loss 各自分轴绘图，
 `loss_b` 在 step=2 的缺失保留在记录中，折线断开，不补零、不平滑、不拟合。
 折线按数值 x 排序，重复 x 会拒绝，避免无依据平均；重复坐标对可选 `plot = "scatter"`。
-当前不支持分组多线、自动统计或猜误差条。
+本例两列分轴；自己的数据可用 group_column 明确多组系列，不自动统计或猜误差条。
+图形同时提供可编辑 SVG、矢量 PDF 和 PNG 预览。
 
 产物在 `runs/data-curves/`；复制完整分析目录后可按上述命令重建图，按打印的 session-root
 恢复，不会重读已改变的原始输入。后续写作用 `analysis.json` 作为 `--material`，保留数据副本。

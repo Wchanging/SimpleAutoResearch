@@ -1,6 +1,6 @@
 # SimpleAutoResearch
 
-**A lightweight research assistant: investigate, edit, analyse, and write with inspectable results.**
+**A task-focused research assistant: investigate, edit, analyse, and write with inspectable results.**
 
 [中文](README_zh.md) · [Quick start](#quick-start) · [Examples](#choose-a-case) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
 
@@ -12,18 +12,9 @@ Use individual functions or connect them: **existing data → analysis and plots
 report → optional ACM export**. A code repair need not search papers, and writing from
 existing results need not repeat an experiment.
 
-Material writing defaults to a supplied-evidence report, not a failed-experiment
-analysis. Ask for a paper-style draft explicitly when that is the intended delivery;
-neither format turns unverified material into a validated scientific result.
-
-> **Source-visible preview.** Structured setup and bounded native workflows are
-> available. Free-form conversation, general autonomous reproduction preparation,
-> and integrated external coding Agents are not yet offered. A completed session
-> is not a scientific-correctness or publication-quality certificate. Invalid model
-> reviews can leave required work unresolved; inspect the audit before using a draft.
+> **Source-visible preview.** Guided native workflows are available; general autonomous reproduction and integrated external coding Agents are not. Inspect sources, measurements and audits before relying on a result.
 >
-> A project license has not yet been selected. Public repository access is not
-> an open-source license.
+> Licensing is not yet selected. Public repository access is not an open-source license.
 
 ## What can you do with it?
 
@@ -31,9 +22,9 @@ neither format turns unverified material into a validated scientific result.
 | --- | --- | --- |
 | Research a direction | Question, scope, model API; optional local papers | Sources, reading notes, comparisons and Markdown report. Reading depth depends on available material. |
 | Repair a codebase | Project, allowed edit scope, validation command, model API | Isolated edited workspace, patch/review records and actual validation. Intended for bounded tasks, not arbitrary unattended engineering. |
-| Analyse and plot data | CSV/TSV or JSON records, columns and row/unit meanings | Descriptive statistics or supplied values, editable bar/line/scatter SVGs and rebuilding inputs. No API needed; no inferred uncertainty or automatic scientific validation. |
-| Write from material | Notes, draft or descriptive-analysis package; model API | Reviewed report or evidence-limited paper-style draft, references and reusable figures. No new experiment or online research is implied. |
-| Reproduce a specified conclusion | Local paper, ready project/environment, fixed command and evaluation protocol | Actual measurements and a bounded reproduction report. Preparation is required; this is not arbitrary whole-paper reproduction. |
+| Analyse and plot data | CSV/TSV or JSON records, columns and row/unit meanings | Descriptive statistics, explicitly paired differences or supplied values; editable bar/box/line/scatter/matrix-heatmap SVGs, vector PDFs, PNG previews and rebuilding inputs. No API needed; uncertainty requires matched observation semantics, not guessed significance. |
+| Write from material | Notes, draft, JSON producer records or descriptive-analysis package; model API | Reviewed report or evidence-limited paper-style draft, references and reusable figures. No new experiment or online research is implied. |
+| Reproduce a specified conclusion | Local paper, existing project/data, accepted command and evaluation protocol | Confirm a source-backed command and producer-file contract, optionally prepare a task venv, then deliver measurements and a report draft. Not arbitrary whole-paper reproduction. |
 | Export a saved report | Report artifacts and Pandoc; SVG conversion tools when needed; TeX for optional compilation | Editable ACM acmart demonstration project, bibliography and figures, through separate `report-export`. Compilation and content quality are separate checks. |
 
 The first five tasks have guided `start` entries. Export consumes an existing
@@ -41,6 +32,11 @@ report; it is not a sixth setup choice. Research improvement remains experimenta
 and is described with the prepared cases below.
 
 ### Why use an assistant around these tasks?
+
+For a table-analysis task that also needs a written report, use
+`simple-ar start --kind data_analysis --with-report` (or request it in
+`start --chat`). Analysis, reusable figures and reviewed writing share the
+same saved session. Analysis alone remains zero-API; writing requires a model.
 
 - **Less material handoff.** Saved analysis packages and report artifacts can
   feed the next task instead of becoming disconnected chat answers.
@@ -54,27 +50,6 @@ and is described with the prepared cases below.
 These are intended workflow benefits, not evidence that the assistant outperforms
 a general coding Agent. Cross-task quality and first-time user experience remain
 under validation.
-
-Guided writing from existing evidence uses adaptive article planning with built-in
-templates. Expert TOML tasks can opt in with `report.outline_strategy = "adaptive"`.
-Custom templates and saved tasks keep their structure. See the
-[writing configuration](docs/CONFIG_REFERENCE.md#writing-from-supplied-material).
-This organizes the draft; it does not certify claims or create missing experiments.
-Writing keeps imported analysis packages complete but links full row records by
-default, instead of filling the prose with raw tables. Set `report.data_tables = "full"`
-if row-by-row tables are part of the requested report.
-Experiment reports likewise keep full recorded evidence in a linked, portable
-package by default. This reduces duplicate provenance tables, not required results
-or review; recording evidence does not independently verify scientific claims.
-With adaptive planning, existing data figures can have an explicit owning section
-even when several sections cite the same material; assembly supplies the actual
-registered images rather than relying on model-created file links.
-
-For line/scatter data, axes remain separate by default. Select
-`analysis.series_layout = "shared"` (or `start --series-layout shared`) when the
-columns have a common declared unit. Shared plots preserve every supplied value;
-they do not normalize, sample or infer uncertainty. Analysis packages can be
-moved, rebuilt and supplied directly to writing.
 
 ## Quick start
 
@@ -133,7 +108,20 @@ Select a number or `survey`, `bug_fix`, `reproduction`, `writing` or `data_analy
 The structured guide collects relevant inputs, saves ordinary TOML under
 `runs/assistant/`, and starts the shared session. You do not have to write a task
 file first. `--prepare-only` saves configuration without execution or model calls.
-It is not yet a free-form conversation.
+For code repair, `--project-python PATH` can select an existing project interpreter;
+omit it to use the current environment. It does not create environments or install dependencies.
+For natural-language task clarification, opt in with:
+
+```bash
+uv run simple-ar start --chat
+```
+
+Describe your goal and answer the material questions. The model proposes a function
+and semantic settings; you confirm them before the same ordinary task configuration
+is saved. Execution choices remain explicit. Replies and named asset previews go to
+your configured model, so setup itself incurs API usage. `--resume-setup PATH` resumes
+the saved conversation and its accounting; it is not execution recovery or a general
+coding chat. Use structured setup with `--prepare-only` when you want no API calls.
 
 Or try the supplied model-backed survey:
 
@@ -160,6 +148,7 @@ templates into `runs/` first.
 | --- | --- | --- |
 | [Data curves](examples/data-curves/README.md) | Supplied line/scatter coordinates | No API or training; included demonstration data |
 | [Descriptive analysis](examples/data-analysis/README.md) | Tables, descriptive bars and rebuilding | No API; explicit data/row semantics |
+| [Paired observations](examples/data-paired/README.md) | Matched differences, omissions and standard-error plots | No API; artificial demonstration, not a benchmark |
 | [Literature survey](examples/survey/README.md) | Research report without training | Model API and internet |
 | [Conformal reproduction](examples/conformal_reproduction/README.md) | Bounded, adapted numerical reproduction | Follow the case environment/protocol; not whole-paper or benchmark acceptance |
 | [ICML 2025 RCP subset](examples/rcp_reproduction/README.md) | Fixed author-code-assisted real-data comparison | Prepare pinned code, data, paper and scientific Python; two methods, ten paired seeds. Not whole-paper reproduction; writing quality needs separate review. |
@@ -175,7 +164,7 @@ fresh-checkout quick start. See the [example index](examples/README.md) for scop
 
 | Delivery | Files to inspect | Reuse |
 | --- | --- | --- |
-| Data analysis | `analysis.json`, `analysis.md`, copied input and editable SVGs | Rebuild the package or use its JSON as writing material |
+| Data analysis | `analysis.json`, `analysis.md`, copied input, editable SVGs, vector PDFs and PNG previews | Rebuild the package or use its JSON as writing material |
 | Report | `report.md`, `report_body.md`, `references.bib` and the separately printed audit | Review claims alongside sources; export the report attempt directory |
 | ACM export | `main.tex`, `body.tex`, bibliography, figures and `export.json` | Edit/move the project; inspect `build.log` when compilation is requested |
 | Code/measurement | Edited workspace, actual validation/run logs and saved results | Inspect the actual change and evaluation conditions, not only the final prose |
@@ -203,24 +192,17 @@ PDF or a conference submission. See the [export guide](docs/CLI_REFERENCE.md#sim
 
 ## Bring your own material
 
-Start with the function and desired delivery, not an internal stage sequence:
+Choose the task and intended delivery first:
 
-- **Survey:** question, scope, relevant papers, whether online search is allowed.
-- **Code:** repository, problem, allowed files and an actual validation command.
-- **Data:** input file, selected columns, what each row/value represents and units.
-- **Writing:** source material, report or paper-style draft, optional reference papers.
-- **Reproduction:** specified paper conclusion, prepared execution conditions,
-  fixed evaluation and resource limits.
+- **Survey:** question, scope, source papers and whether online search is allowed.
+- **Code:** repository, reported problem, allowed files and a real validation command.
+- **Data:** table, selected fields, row/value meanings and units.
+- **Writing:** source material, report or paper-style draft, and optional reference papers.
+- **Reproduction:** specified paper conclusion, prepared execution conditions and fixed evaluation.
 
-For writing, provide the completed descriptive-analysis package as material,
-rather than presenting arbitrary JSON as validated experimental results.
-Prepared evaluators can explicitly retain raw text results for report review
-through task-local [`execution.output_files`](docs/CONFIG_REFERENCE.md#research-toml-sections-and-defaults);
-recorded attachments are not automatically certified scientific evidence.
-For a prepared project, put configuration beside the case, use `{config_dir}`
-where supported for case-local paths and explicit paths for machine assets.
-The assistant does not automatically provision environments or download datasets.
-See [usage](docs/USAGE.md) and [guided configuration](docs/CONFIG_REFERENCE.md#guided-setup).
+Guided setup saves editable task configuration. Project paths, data, interpreters
+and task limits belong there, not in `.env`. See [Usage](docs/USAGE.md) for worked
+examples and [Configuration](docs/CONFIG_REFERENCE.md) for expert fields.
 
 ## Inspect and resume
 
@@ -263,22 +245,12 @@ revision and prose revision are different actions—not one generic retry.
 
 ## Current boundaries
 
-- **Reading:** saved-text retrieval and one bounded Reader follow-up can find
-  missed passages. Lexical matches and selected excerpts are not whole-paper
-  semantic verification. Unknowns and unresolved queries must remain visible.
-- **Writing:** review, source backtracking and revision are model-assisted.
-  Citation/metric audits and a compiled PDF do not certify correct claims,
-  complete bibliography, academic style or publication readiness.
-  Check both the final audit and the reader-facing report: a section-level
-  `pass` does not resolve an outstanding whole-document requirement.
-- **Data and figures:** descriptive bars and numeric-coordinate line/scatter
-  plots are supported. Arbitrary statistical inference, heatmaps and free-form
-  scientific illustration are not covered by this guided data path.
-- **Execution:** isolated copies and scoped edits are not an OS sandbox.
-  Prepare dependencies/data; do not expose sensitive files to unfamiliar code.
-- **Services and scope:** provider errors can pause work. Integrated external
-  Agents and general autonomous reproduction preparation remain deferred.
-  No formal PaperBench or ScienceAgentBench result is claimed.
+- **Reading and writing:** models can misread material or leave unresolved claims and incomplete references. Audits and compilation do not certify scientific or publication quality.
+- **Data and figures:** supported descriptive analysis and bar/box/line/scatter/matrix-heatmap plots use declared semantics. General statistical inference and free-form scientific illustration are not provided.
+- **Execution:** workspaces and bounded processes are not an OS sandbox. Prepare the target environment and protect sensitive inputs.
+- **Scope:** general autonomous provisioning, integrated external Agents and formal PaperBench/ScienceAgentBench results are not claimed.
+
+See [workflows](docs/WORKFLOWS.md) for evidence and recovery boundaries.
 
 ## Documentation
 

@@ -12,7 +12,7 @@ from simple_ar.report.audit import (
     ReportAuditCapabilityRequest,
     run_report_audit_capability,
 )
-from simple_ar.report.capability import ReportAssemblyRequest, run_report_capability, assemble_report_document
+from simple_ar.report.capability import ReportAssemblyRequest, run_report_capability, assemble_report_document, preview_report_document
 from simple_ar.report.figures import ReportFigureRecord, ReportFigureResult
 from simple_ar.report.schema import (
     ReportContext,
@@ -236,7 +236,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                     title="Offline report",
                     template_name="paper",
                     config=ReportRuntimeConfig(
-                        figures=ReportFigureConfig(enabled=True, max_figures=1)
+                        figures=ReportFigureConfig(enabled=True)
                     ),
                     document_plan=ReportDocumentPlan(
                         sections=[
@@ -336,6 +336,23 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             result = assemble_report_document(request, report_dir=root)
             self.assertTrue(result.report_markdown.startswith("# A bounded observation\n"))
             self.assertTrue(result.report_body_markdown.startswith("# A bounded observation\n"))
+            # Mapping inputs, typed inputs, preview and actual assembly use
+            # one request normalization boundary; explicit false/zero survive.
+            config = {'figures': {'enabled': False}, 'max_section_tokens': 0}
+            section_row = section.model_dump(mode='json')
+            plan_row = request.document_plan.model_dump(mode='json')
+            mapped = replace(request, sections=(section_row,), config=config, document_plan=plan_row)
+            self.assertIsInstance(mapped.sections[0], ReportSectionDraft)
+            self.assertIsInstance(mapped.config, ReportRuntimeConfig)
+            self.assertIsInstance(mapped.document_plan, ReportDocumentPlan)
+            rendered = assemble_report_document(mapped, report_dir=root)
+            self.assertEqual(preview_report_document(mapped), rendered)
+            self.assertEqual(mapped.config.max_section_tokens, 0)
+            self.assertFalse(mapped.config.figures.enabled)
+            self.assertEqual(config, {'figures': {'enabled': False}, 'max_section_tokens': 0})
+            self.assertEqual(section_row, section.model_dump(mode='json'))
+            self.assertEqual(plan_row, request.document_plan.model_dump(mode='json'))
+            self.assertIs(replace(mapped, title='Another title').config, mapped.config)
             for plan in (None, ReportDocumentPlan.model_validate({"schema_version": "report_document_plan.v1"})):
                 legacy = assemble_report_document(replace(request, document_plan=plan), report_dir=root)
                 self.assertTrue(legacy.report_markdown.startswith("# Long task instructions, not an article title\n"))

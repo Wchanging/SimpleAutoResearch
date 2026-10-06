@@ -33,12 +33,14 @@ def analysis_delivery_block(
     section_ids: Sequence[str],
 ) -> dict[str, Any]:
     """Build the exact attachment prose, without files, rendering or mutations."""
-    from simple_ar.result_analysis.table import table_values_markdown
+    from simple_ar.result_analysis.table import data_attribution_markdown, table_values_markdown
 
     prefix = f"analyses/analysis-{index:03d}"
-    blocks = [f"[Rechecked descriptive data and editable figures]({prefix}/analysis.md).",
-              "Arithmetic was checked against copied user data; collection and scientific validity were not verified.",
-              f"All {result['row_count']} input rows and rechecked values are retained in the copied package; no rows were sampled."]
+    blocks = [f"Descriptive analysis of {result['row_count']} supplied rows; "
+              f"[copied data, numerical records and editable figures]({prefix}/analysis.md).",
+              "Arithmetic was rechecked; data collection and scientific validity were not independently verified."]
+    if attribution := data_attribution_markdown(dict(result)):
+        blocks.append(attribution)
     if config.data_tables == "full":
         blocks.extend(["", table_values_markdown(dict(result))])
     else:

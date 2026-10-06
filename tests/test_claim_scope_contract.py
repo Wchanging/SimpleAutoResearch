@@ -127,7 +127,8 @@ class ClaimScopeTests(unittest.TestCase):
         draft = ReportSectionDraft(section_id="findings", heading="Findings", draft_markdown=text)
         view = narrative_context(ReportMemory(section_plan=[plan]), plan, [draft])
         adopted = view["adopted_sections"][0]
-        self.assertNotIn("0.42", json.dumps(adopted["prose_windows"]))
+        for window in adopted["prose_windows"]:
+            self.assertEqual(window["text"], text[window["start"]:window["end"]])
         table = adopted["table_excerpt"]
         self.assertIn("0.42", json.dumps(table))
         for window in table["windows"]:

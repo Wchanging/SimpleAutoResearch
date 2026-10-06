@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterable
 
 from simple_ar.research.contracts import DocumentRecord, DocumentSection
+from simple_ar.research.documents.ports import MATERIAL_TEXT_SUFFIXES
 
 
 HEADING_PATTERN = re.compile(
@@ -18,9 +19,18 @@ HEADING_PATTERN = re.compile(
 # PDF text extraction often inserts a space after a drop-cap ("1 I NTRODUCTION")
 # or uses a descriptive numbered heading ("3.3 A RCHITECTURE"). Keep this
 # conservative: a table row or numbered sentence is not a section boundary.
-NUMBERED_UPPER_HEADING = re.compile(
+NUMBERED_HEADING = re.compile(
     r"^(?:[1-9]\d?(?:\.\d{1,2})*|[A-Z])[.)]?\s+([A-Z][^\n]{2,90})$"
 )
+
+# Letter-numbered appendices are often mixed case, unlike extracted main
+# headings. Do not let the References section swallow their experiments/proofs.
+APPENDIX_HEADING = re.compile(
+    r"^(?:#{1,6}\s+)?(?:Appendix|Appendices|Supplementary (?:Material|Information))"
+    r"(?:\s+[A-Z0-9](?:\.\d+)*)?(?:[.:]?\s+(?P<title>[^\n]{1,80}?))?\s*:?$",
+    re.IGNORECASE,
+)
+LETTER_HEADING = re.compile(r"^[A-Z](?:\.\d{1,2})*[.)]?\s+([A-Z][^\n]{2,90})$")
 
 SECTION_ALIASES = {
     "abstract": "abstract",
@@ -44,7 +54,25 @@ SECTION_ALIASES = {
     "bibliography": "references",
 }
 
-TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
+
+
+def abstract_excerpt(text: str, *, limit: int = 1200) -> str:
+    """Use an explicit abstract heading, never a byline/preamble as an abstract.
+
+    This is a literal excerpt, not a generated summary. Unheaded notes retain
+    their full body through document sections/chunks rather than a false label.
+    """
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        heading = _heading_for_line(line)
+        if heading is None:
+            continue
+        if start is not None:
+            return " ".join("\n".join(lines[start:index]).split())[:limit]
+        if _normalize_section(heading) == "abstract":
+            start = index + 1
+    return " ".join("\n".join(lines[start:]).split())[:limit] if start is not None else ""
 
 
 def build_document_sections(records: Iterable[DocumentRecord]) -> list[DocumentSection]:
@@ -65,7 +93,9 @@ def build_document_sections(records: Iterable[DocumentRecord]) -> list[DocumentS
         text = text.strip()
         if not text:
             continue
-        raw_sections = _split_sections(text)
+        raw_sections = (_split_sections(text) if record.extraction_status == "parsed" else
+                        [{"section": "abstract", "heading": "Abstract", "text": text,
+                          "line_start": 1, "line_end": len(text.splitlines()) or 1}])
         for index, row in enumerate(raw_sections, start=1):
             section_text = row["text"].strip()
             if not section_text:
@@ -97,7 +127,7 @@ def build_document_sections(records: Iterable[DocumentRecord]) -> list[DocumentS
 def _record_text(record: DocumentRecord) -> tuple[str, str | None]:
     if record.extraction_status == "parsed" and record.local_path:
         path = Path(record.local_path)
-        if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES:
+        if path.is_file() and path.suffix.lower() in MATERIAL_TEXT_SUFFIXES:
             return _read_text(path), str(path)
     return record.abstract or "", record.local_path or record.url
 
@@ -105,7 +135,17 @@ def _record_text(record: DocumentRecord) -> tuple[str, str | None]:
 def _split_sections(text: str) -> list[dict[str, object]]:
     lines = text.splitlines()
     heading_rows: list[tuple[int, str, str]] = []
+    fence_char, fence_size = '', 0
     for index, line in enumerate(lines):
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if fence_char:
+            if (fence and fence.group(1)[0] == fence_char and len(fence.group(1)) >= fence_size
+                    and not line[fence.end():].strip()):
+                fence_char, fence_size = '', 0
+            continue
+        if fence:
+            fence_char, fence_size = fence.group(1)[0], len(fence.group(1))
+            continue
         heading = _heading_for_line(line)
         if heading is None:
             continue
@@ -147,7 +187,7 @@ def _split_sections(text: str) -> list[dict[str, object]]:
 
 def _fallback_section(text: str, lines: list[str]) -> dict[str, object]:
     compact = _strip_leading_title(text).strip()
-    section = "abstract" if len(compact) <= 1800 else "body"
+    section = "body"
     return {
         "section": section,
         "heading": section.title(),
@@ -175,14 +215,44 @@ def _heading_for_line(line: str) -> str | None:
     match = HEADING_PATTERN.match(stripped)
     if match:
         return match.group(1).strip()
-    numbered = NUMBERED_UPPER_HEADING.match(stripped)
+    # HTML heading tags and Markdown ATX headings carry explicit structure;
+    # prose/PDF heuristics below must not discard sentence-case section names.
+    explicit = re.fullmatch(r"#{2,6}\s+(.+?)(?:\s+#+)?", stripped)
+    if explicit:
+        stripped = explicit.group(1).strip()
+    appendix = APPENDIX_HEADING.fullmatch(stripped)
+    if appendix is not None:
+        title = appendix.group("title")
+        # A prose cross-reference such as "Appendix A.2 discusses ..." is
+        # not a heading. Preserve original case when testing the title.
+        if title is None or (title[0].isupper()
+                             and re.search(r"[,;!?]|\.(?:\s|$)", title) is None):
+            return stripped.lstrip('#').strip()
+    letter = LETTER_HEADING.fullmatch(stripped)
+    if letter is not None:
+        title = letter.group(1).strip()
+        # Citation initials, author lists, table values and complete prose
+        # sentences are not an appendix heading merely because they start A/B.
+        if (len([char for char in title if char.isalpha()]) >= 4
+                and len(title.split()) <= 15
+                and re.search(r"[,;!?]|\.(?:\s|$)", title) is None
+                and re.search(r"\s\d+\.\d+(?:\s|$)", title) is None):
+            return title
+    numbered = NUMBERED_HEADING.match(stripped)
     if numbered is None:
-        return None
+        return stripped if explicit else None
     title = numbered.group(1).strip()
+    if explicit:
+        return title
     letters = [char for char in title if char.isalpha()]
     if len(letters) < 4 or len(title.split()) > 15:
         return None
-    if sum(char.isupper() for char in letters) / len(letters) < 0.8:
+    words = re.findall(r"[^\W\d_]+", title)
+    title_case = all(word[0].isupper() or word.lower() in {
+        "a", "an", "the", "and", "or", "of", "in", "on", "for", "to", "with", "without", "under", "by"
+    } for word in words)
+    if (re.search(r"[,;!?]|\.(?:\s|$)|\s\d+\.\d+(?:\s|$)", title)
+            or (sum(char.isupper() for char in letters) / len(letters) < 0.8 and not title_case)):
         return None
     return title
 
@@ -194,6 +264,7 @@ def _normalize_section(heading: str) -> str:
     compact = re.sub(r"[^a-z]", "", heading.lower())
     for term, section in (
         ("references", "references"), ("bibliography", "references"),
+        ("appendix", "body"), ("appendices", "body"), ("supplementary", "body"),
         ("abstract", "abstract"), ("relatedwork", "related_work"),
         ("background", "related_work"), ("introduction", "introduction"),
         ("evaluation", "experiments"), ("evaluating", "experiments"),

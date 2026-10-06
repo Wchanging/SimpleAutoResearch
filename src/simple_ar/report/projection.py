@@ -30,7 +30,8 @@ from simple_ar.report.schema import (
 from simple_ar.research.design import ResearchDesignResult
 from simple_ar.research.contracts import ResearchExperimentContract
 from simple_ar.research.documents.ingest import DocumentBundle
-from simple_ar.research.evidence.reader import select_representative_chunks
+from simple_ar.research.evidence.reader import reading_followup_context, select_representative_chunks
+from simple_ar.research.evidence.bibliography import apply_bibliographic_note, local_citation_fields_to_fill
 from simple_ar.research.sources import SearchResult
 from simple_ar.research.synthesis import SynthesisResult
 from simple_ar.result_analysis.schema import AnalysisResult
@@ -47,7 +48,7 @@ _RESEARCH_CONTEXT_FIELDS = (
 )
 
 
-def _qualified_outputs(result: Mapping[str, Any], ref: ArtifactRef) -> list[dict[str, Any]]:
+def _qualified_outputs(result: Mapping[str, Any], ref: ArtifactRef, store: ArtifactStore | None = None) -> list[dict[str, Any]]:
     """Qualify attempt-local producer attachments against their result owner."""
     rows = result.get("output_evidence", [])
     qualified = []
@@ -59,6 +60,15 @@ def _qualified_outputs(result: Mapping[str, Any], ref: ArtifactRef) -> list[dict
             local = ArtifactRef(path=str(item["artifact"]))
             item["artifact"] = str(PurePosixPath(ref.path).parent / local.path)
             item["handle"] = f"output:{item['artifact']}"
+            if store is not None and item.get("status") == "available":
+                from simple_ar.experiment.execution.outputs import read_output_window, PREVIEW_CHARACTERS
+                try:
+                    item["preview"] = read_output_window(store.root, store.resolve(item["artifact"]),
+                        limit=PREVIEW_CHARACTERS, overview=True)
+                except (OSError, ValueError, UnicodeError) as exc:
+                    # Retain the saved observation, but disclose that the
+                    # attachment is no longer available for a fresh reading.
+                    item["preview_refresh_error"] = str(exc)
         item["measurement_artifact"] = ref.path
         qualified.append(item)
     return qualified
@@ -248,6 +258,7 @@ def build_research_report_inputs(
         topic=topic,
         report_mode="experiment",
         synthesis_markdown=_synthesis_markdown(brief),
+        source_comparisons=[dict(row) for row in getattr(brief, "comparisons", ())],
         hypothesis_markdown=contract.hypothesis,
         evidence_summary=evidence_summary,
         execution_context=brief.execution_context,
@@ -297,10 +308,23 @@ def build_material_report_inputs(
     independent experiment or a semantic verification of those assertions.
     """
     from simple_ar.research.sources.capability import provided_materials_result
+    from simple_ar.research.store.retrieval import material_overview_views
+    from simple_ar.research.documents.extractors import document_extraction_limitations
+    from dataclasses import replace
 
     roles = {str(Path(asset.locator).resolve()): asset.role for asset in assets}
     paper_records = [record for record in documents.records
                      if roles.get(str(Path(record.source_id).resolve())) in {"paper", "reference"}]
+    # Old bundles may still have stored a front-matter prefix as "abstract".
+    # Prefer the retained abstract section without changing the old artifact
+    # or inferring authors, publication date or any external identity.
+    parsed_ids = {record.document_id for record in paper_records if record.extraction_status == "parsed"}
+    abstracts = {section.document_id: section for section in documents.sections if section.section == "abstract"
+                 and not (section.document_id in parsed_ids and section.line_start == 1)}
+    paper_records = [replace(record, abstract=" ".join(abstracts[record.document_id].text.split())[:1200])
+                     if record.document_id in abstracts else
+                     replace(record, abstract="") if record.document_id in parsed_ids else record
+                     for record in paper_records]
     search = provided_materials_result(paper_records)
     paper_handles = {handle.paper_id: handle for handle in _paper_source_handles(search)}
     chunks_by_document: dict[str, list[Any]] = {}
@@ -309,24 +333,23 @@ def build_material_report_inputs(
     handles = []
     for record in documents.records:
         chunks = chunks_by_document.get(record.document_id, [])
-        # Spread bounded excerpts across the retained text rather than showing
-        # only the beginning. Full retained chunks stay available through tools.
-        count = min(6, len(chunks))
-        indices = [round(index * (len(chunks) - 1) / max(1, count - 1)) for index in range(count)]
+        passages = material_overview_views(chunks, topic)
         handle = paper_handles.get(record.document_id) or SourceHandle(
             handle=f"material:{record.document_id}", kind="material", title=record.title,
             paper_id=record.document_id,
         )
         metadata = {**handle.metadata, "document_id": record.document_id,
                     "extraction_status": record.extraction_status,
+                    "extraction_coverage": dict(record.metadata.get("fulltext_extraction", {}).get("coverage", {})),
                     "evidence_role": record.metadata.get("evidence_role") or ("bibliographic_source_not_independently_verified" if record.document_id in paper_handles else "user_supplied_unverified"),
                     "document_chunk_count": len(chunks),
-                    "evidence_passages": [{"chunk_id": chunks[index].chunk_id,
-                        "text": chunks[index].text[:1200], "truncated": len(chunks[index].text) > 1200}
-                        for index in indices],
-                    "evidence_passages_truncated": len(chunks) > count}
+                    "evidence_passages": passages,
+                    "evidence_passages_truncated": (len({row["chunk_id"] for row in passages}) < len(chunks)
+                                                     or any(row["truncated"] for row in passages)),
+                    "evidence_selection": "structured_overview_and_task_lexical_matches"}
         handles.append(handle.model_copy(update={"artifact": documents_ref.path,
-            "chunk_id": chunks[0].chunk_id if chunks else "", "summary": record.abstract,
+            "chunk_id": passages[0]["chunk_id"] if passages else "",
+            "summary": paper_handles[record.document_id].summary if record.document_id in paper_handles else record.abstract,
             "metadata": metadata}))
     if not any(handle.metadata["document_chunk_count"] for handle in handles):
         raise ReportProjectionError("Supplied writing material contains no readable text; inspect extraction diagnostics.")
@@ -338,10 +361,11 @@ def build_material_report_inputs(
         limitations.append("Unavailable material text: " + ", ".join(unavailable))
     if paper_records:
         limitations.append("Local source bibliographic metadata may be incomplete; do not invent authors, dates or publication venues.")
+    limitations.extend(document_extraction_limitations(documents.records))
     context = ReportContext(topic=topic, report_mode="supplied_materials", source_handles=handles,
         papers=[paper.to_row() for paper in search.selected_papers],
         citation_key_map=_citation_key_map(search.selected_papers),
-        evidence_summary=" ".join(limitations),
+        evidence_summary=f"Retained source passages from {sum(bool(chunks_by_document.get(record.document_id)) for record in documents.records)} of {len(documents.records)} supplied materials. Method and result assertions remain source-reported.",
         results={"evidence_origin": "user_supplied_unverified", "session_execution": "not_requested"})
     analyses = []
     for record in documents.records:
@@ -352,9 +376,9 @@ def build_material_report_inputs(
     if analyses:
         context.results["supplied_analyses"] = analyses
         limitations.append("Descriptive values were recomputed from the copied input. This checks arithmetic, not data collection, semantics, significance or an independently repeated experiment.")
-        context.evidence_summary = " ".join(limitations)
-    return context, ReportMemory(objective=topic, report_mode=context.report_mode,
-                                 source_handles=handles, limitations=limitations)
+        context.evidence_summary += f" {len(analyses)} supplied analysis package(s) were recomputed from copied inputs; recorded values, input-use counts and figure encodings are available in results."
+    return apply_report_bibliography(context, ReportMemory(objective=topic, report_mode=context.report_mode,
+                                 source_handles=handles, limitations=limitations), documents=documents, notes=[])
 
 
 def build_literature_report_inputs(
@@ -380,6 +404,7 @@ def build_literature_report_inputs(
         topic=topic,
         report_mode="research_only",
         synthesis_markdown=_synthesis_markdown(brief),
+        source_comparisons=[dict(row) for row in getattr(brief, "comparisons", ())],
         evidence_summary=(
             f"Search retained {len(search.selected_papers)} selected papers; "
             f"ingest retained {len(documents.records)} documents and "
@@ -508,6 +533,7 @@ def attach_experiment_history(
     *,
     current_ref: ArtifactRef,
     include_prior_metrics: bool = True,
+    output_store: ArtifactStore | None = None,
 ) -> tuple[ReportContext, ReportMemory]:
     """Keep every accepted-plan observation visible, without pooling revisions.
 
@@ -533,7 +559,7 @@ def attach_experiment_history(
             "metrics": dict(measured) if isinstance(measured, Mapping) else {},
             "implementation_ref": result.get("implementation_ref"),
             "execution_record": execution_record(result),
-            "output_evidence": _qualified_outputs(result, ref),
+            "output_evidence": _qualified_outputs(result, ref, output_store),
             "measurement": {
                 key: value for key in ("condition_id", "protocol_fingerprint", "seed", "source_kind")
                 if isinstance(result.get("measurement"), Mapping)
@@ -554,6 +580,9 @@ def attach_experiment_history(
             }) for metric in metric_sources_from_execution(result, artifact=ref.path)
                 if metric.label == "candidate")
     context.results = {**context.results, "measurement_history": history}
+    current = next((row for row in history if row["artifact"] == current_ref.path), None)
+    if current is not None:
+        context.results["output_evidence"] = current["output_evidence"]
     context.source_handles = handles
     memory.source_handles = list(handles)
     context.metric_sources = metrics
@@ -566,6 +595,74 @@ def attach_experiment_history(
     return context, memory
 
 
+def apply_report_bibliography(
+    context: ReportContext, memory: ReportMemory, *, documents: DocumentBundle,
+    notes: Sequence[Mapping[str, Any]],
+) -> tuple[ReportContext, ReportMemory]:
+    """One source-matched citation projection for reading and material writing.
+
+    Proposals are derived outputs, not changes to frozen input or publication
+    identity. The existing bibliography owner decides which fields to accept.
+    """
+    records = {record.document_id: record for record in documents.records}
+    for record in documents.records:
+        if record.metadata.get("paper_id"):
+            records.setdefault(str(record.metadata["paper_id"]), record)
+    fronts = {section.document_id: section for section in documents.sections if section.section == "front_matter"}
+    by_id = {str(note.get("paper_id")): note for note in notes if isinstance(note, Mapping)}
+    rows, origins_by_id = [], {}
+    for original in context.papers:
+        record = records.get(original["id"])
+        row = dict(original)
+        if record is not None:
+            row, origins = apply_bibliographic_note(row, record, fronts.get(record.document_id), by_id.get(record.document_id))
+            if origins:
+                origins_by_id[row["id"]] = origins
+        rows.append(row)
+    papers = {row["id"]: row for row in rows}
+    handles = []
+    for handle in context.source_handles:
+        if handle.paper_id not in origins_by_id:
+            handles.append(handle)
+            continue
+        origins = origins_by_id[handle.paper_id]
+        metadata = {**handle.metadata, "bibliographic_sources": origins,
+                    **{field: papers[handle.paper_id].get(field) for field in ("authors", "published", "doi", "url")},
+                    "bibliography": bibliographic_details(Paper.from_row(papers[handle.paper_id]))}
+        if "title" in origins:
+            metadata["title_source"] = origins["title"]
+        handles.append(handle.model_copy(update={"title": papers[handle.paper_id]["title"], "metadata": metadata}))
+    handles_by_id = {handle.handle: handle for handle in handles}
+    memory_ids = {handle.handle for handle in memory.source_handles}
+    memory_handles = [handles_by_id.get(handle.handle, handle) for handle in memory.source_handles]
+    memory_handles.extend(handle for handle in handles if handle.handle not in memory_ids)
+    return (context.model_copy(update={"papers": rows, "source_handles": handles}),
+            memory.model_copy(update={"source_handles": memory_handles}))
+
+
+def bibliography_planning_views(context: ReportContext, documents: DocumentBundle | None) -> list[dict[str, Any]]:
+    """Bounded existing front matter for missing local citation fields only."""
+    if documents is None:
+        return []
+    from simple_ar.research.evidence.bibliography import FRONT_MATTER_CHARS
+    records = {record.document_id: record for record in documents.records}
+    fronts = {section.document_id: section for section in documents.sections if section.section == "front_matter"}
+    candidates = [(row, records[row["id"]], fronts[row["id"]], fields) for row in context.papers
+                  if row["id"] in records and row["id"] in fronts
+                  and (fields := local_citation_fields_to_fill(row, records[row["id"]]))]
+    views = []
+    remaining = FRONT_MATTER_CHARS
+    for index, (paper, record, section, fields) in enumerate(candidates):
+        size = remaining // (len(candidates) - index)
+        text = section.text[:size]
+        remaining -= len(text)
+        views.append({"paper_id": record.document_id, "section_id": section.section_id,
+                      "recorded_title": paper["title"], "missing_fields": fields,
+                      "text": text, "truncated": len(text) < len(section.text),
+                      "scope": "supplied source front matter, not publication identity verification"})
+    return views
+
+
 def attach_report_read_evidence(
     context: ReportContext,
     memory: ReportMemory,
@@ -575,6 +672,11 @@ def attach_report_read_evidence(
     read_ref: ArtifactRef,
 ) -> tuple[ReportContext, ReportMemory]:
     """Join reading notes by document identity, not title or position."""
+
+    from simple_ar.research.documents.extractors import document_extraction_limitations
+    for limitation in document_extraction_limitations(documents.records):
+        if limitation not in memory.limitations:
+            memory.limitations.append(limitation)
 
     # Local papers use document_id as their citable identity; retrieved papers
     # may additionally carry the original connector's paper_id. Neither titles
@@ -589,28 +691,8 @@ def attach_report_read_evidence(
     # proposal only when it occurs verbatim (apart from whitespace) in that
     # same source's front matter. Do not overwrite provider/user metadata or
     # infer dates/bylines from PDF creation properties.
-    front_matter = {section.document_id: section for section in documents.sections
-                    if section.section == "front_matter"}
-    paper_rows = []
-    title_sources = {}
-    for row in context.papers:
-        paper = dict(row)
-        record = by_paper.get(paper["id"])
-        note = notes.get(record.document_id) if record is not None else None
-        front = front_matter.get(record.document_id) if record is not None else None
-        proposed = " ".join(str(note.get("title") or "").split()) if note is not None else ""
-        source_id = record.source_id if record is not None else ""
-        filename_title = PurePosixPath(str(source_id or "").replace("\\", "/")).stem.replace("_", " ").replace("-", " ").strip()
-        if (record is not None and record.source == "local_files" and not record.metadata.get("paper_id")
-                and source_id and paper.get("title") == filename_title and front is not None
-                and 0 < len(proposed) <= 240 and proposed != filename_title
-                and proposed in " ".join(front.text[:2400].split())):
-            paper["title"] = proposed
-            paper["bibliographic_notes"] = [*(paper.get("bibliographic_notes") or []),
-                "Title proposed by reading and present in supplied front matter; source identity and publication metadata are not independently verified."]
-            title_sources[paper["id"]] = {"section_id": front.section_id, "quote": proposed,
-                "scope": "same_source_front_matter_text_match_not_identity_verification"}
-        paper_rows.append(paper)
+    context, memory = apply_report_bibliography(context, memory, documents=documents, notes=read.paper_notes)
+    paper_rows = context.papers
     papers_by_id = {row["id"]: row for row in paper_rows}
     chunks = {chunk.chunk_id: chunk for chunk in documents.chunks}
     statuses = [record.extraction_status for record in documents.records]
@@ -636,12 +718,10 @@ def attach_report_read_evidence(
         metadata.update(
             document_id=record.document_id,
             extraction_status=record.extraction_status,
+            extraction_coverage=dict(record.metadata.get("fulltext_extraction", {}).get("coverage", {})),
             reading_artifact=read_ref.path,
             reading_state="bounded_model_note" if note is not None else "no_model_note",
         )
-        if handle.paper_id in title_sources:
-            metadata["title_source"] = title_sources[handle.paper_id]
-            metadata["bibliography"] = bibliographic_details(Paper.from_row(papers_by_id[handle.paper_id]))
         if note is not None:
             metadata["reading_notes"] = {
                 key: note[key]
@@ -652,10 +732,7 @@ def attach_report_read_evidence(
             metadata["reading_notes_kind"] = "model_interpretation_not_source_text"
             followup = note.get("reading_followup", {})
             if isinstance(followup, Mapping):
-                metadata["reading_notes"]["reading_followup"] = {
-                    key: followup[key] for key in ("lookups", "pending_queries", "revision_performed", "scope")
-                    if key in followup
-                }
+                metadata["reading_notes"]["reading_followup"] = reading_followup_context(followup)
             refs = list(note.get("evidence_refs", []))
             # Claim-local references are also original-source locations. They
             # need not be repeated in the note's global reference list.

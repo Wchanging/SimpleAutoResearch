@@ -8,10 +8,166 @@ from pathlib import Path
 from unittest.mock import patch
 
 from simple_ar.cli.parser import build_parser
-from simple_ar.cli.research_config import research_defaults
+from simple_ar.cli.research_config import FIELDS, report_settings, research_defaults
+
+
+class ReportDocumentArgumentsTests(unittest.TestCase):
+    def test_report_projection_uses_existing_field_owner_for_both_commands(self):
+        from argparse import Namespace
+
+        values = {"template": "analysis_report", "reviewer": "llm", "outline_strategy": "adaptive",
+                  "data_tables": "full", "max_review_iterations": 0, "document_review": False,
+                  "review_scope": "section", "draft_scope": "section",
+                  "max_document_review_prompt_chars": 0, "max_section_tokens": 0,
+                  "max_cited_sources": 0, "figures": {}}
+        for command in ("research-session", "research-report"):
+            with self.subTest(command=command):
+                destinations = {key if command == "research-report" else destination: values[key]
+                    for key, (destination, _) in FIELDS["report"].items()}
+                args = Namespace(command=command, **destinations)
+                original = vars(args).copy()
+                self.assertEqual(report_settings(args), values)
+                self.assertEqual(report_settings(args, explicit_destinations=set()), {})
+                self.assertEqual(report_settings(args, explicit_destinations=set(destinations)), values)
+                self.assertEqual(vars(args), original)
+
+    def test_report_resume_does_not_promote_defaults_or_omit_explicit_false_and_zero(self):
+        from types import SimpleNamespace
+        from simple_ar.cli.main import _report_config_overrides
+
+        args = SimpleNamespace(command="research-session", report_template="experiment",
+            report_document_review=False, max_review_iterations=0, max_section_tokens=0,
+            report_max_cited_sources=0, report_figures={},
+            _explicit_resume_destinations={"report_document_review", "max_section_tokens", "report_figures"})
+        saved = {"template": "analysis_report", "document_review": True, "max_review_iterations": 2,
+                 "max_section_tokens": 2000, "figures": {"enabled": True}}
+        app = SimpleNamespace(services=SimpleNamespace(config={"report": saved.copy()}))
+        self.assertEqual(_report_config_overrides(args, app),
+                         {"document_review": False, "max_section_tokens": 0, "figures": {}})
+        self.assertEqual(app.services.config["report"], saved)
+
+    def test_report_projection_ignores_missing_or_none_but_rejects_negative_caps(self):
+        from argparse import Namespace
+
+        self.assertEqual(report_settings(Namespace(command="research-report", template=None)), {})
+        for command in ("research-session", "research-report"):
+            for key in ("max_section_tokens", "max_document_review_prompt_chars"):
+                with self.subTest(command=command, key=key):
+                    args = Namespace(command=command, **{key: -1})
+                    with self.assertRaisesRegex(SystemExit, "cannot be negative"):
+                        report_settings(args)
+                    self.assertEqual(report_settings(args, explicit_destinations=set()), {})
+
+    def test_negative_report_cap_is_rejected_before_model_setup_or_session_writes(self):
+        from simple_ar.cli.main import main
+
+        for command, required in (("research-session", ["--topic", "Scope", "--model", "fixture"]),
+                                  ("research-report", ["--session-root", "unused", "--model", "fixture"])):
+            with self.subTest(command=command), \
+                 patch("simple_ar.cli.main._optional_research_llm_client") as setup, \
+                 patch("simple_ar.app.research_application.create_session") as create:
+                with self.assertRaisesRegex(SystemExit, "cannot be negative"):
+                    main([command, *required, "--max-section-tokens", "-1"])
+                setup.assert_not_called()
+                create.assert_not_called()
+
+    def test_shared_controls_keep_defaults_names_and_explicit_disable(self):
+        parser = build_parser()
+        for command, prefix, required in (("research-session", "report-", ["--topic", "test"]),
+                                         ("research-report", "", ["--session-root", "run", "--model", "fixture"])):
+            with self.subTest(command=command):
+                argv = [command, *required]
+                defaults = vars(parser.parse_args(argv))
+                for name in ("document_review", "review_scope", "draft_scope", "outline_strategy", "data_tables"):
+                    self.assertIsNone(defaults[prefix.replace("-", "_") + name])
+                self.assertIsNone(defaults["max_document_review_prompt_chars"])
+                args = vars(parser.parse_args([*argv, f"--no-{prefix}document-review",
+                    f"--{prefix}review-scope", "document", f"--{prefix}draft-scope", "document",
+                    f"--{prefix}outline-strategy", "adaptive", f"--{prefix}data-tables", "full",
+                    "--max-document-review-prompt-chars", "0"]))
+                self.assertIs(args[prefix.replace("-", "_") + "document_review"], False)
+                for name, expected in (("review_scope", "document"), ("draft_scope", "document"),
+                                       ("outline_strategy", "adaptive"), ("data_tables", "full")):
+                    self.assertEqual(args[prefix.replace("-", "_") + name], expected)
+                self.assertEqual(args["max_document_review_prompt_chars"], 0)
+
+
+class DocumentReviewCapacityConfigTests(unittest.TestCase):
+    def test_capacity_roundtrips_task_config_cli_and_resume(self):
+        from simple_ar.cli.main import _report_config_overrides
+        from types import SimpleNamespace
+        from simple_ar.report.schema import ReportRuntimeConfig
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.toml"
+            path.write_text('[task]\ngoal="Review supplied materials"\n[report]\nmax_document_review_prompt_chars=0\n')
+            argv = ["research-session", "--config", str(path)]
+            explicit = set()
+            defaults = research_defaults(argv, explicit_destinations=explicit)
+            parser = build_parser(research_defaults=defaults)
+            args = parser.parse_args(argv)
+            args._explicit_resume_destinations = explicit
+            app = SimpleNamespace(services=SimpleNamespace(config={"report_config": {}}))
+            self.assertEqual(_report_config_overrides(args, app)["max_document_review_prompt_chars"], 0)
+            self.assertEqual(parser.parse_args([*argv, "--max-document-review-prompt-chars", "120000"]).max_document_review_prompt_chars, 120000)
+            report_args = parser.parse_args(["research-report", "--session-root", "run", "--model", "fixture", "--max-document-review-prompt-chars", "100000"])
+            report_args._explicit_resume_destinations = {"max_document_review_prompt_chars"}
+            self.assertEqual(_report_config_overrides(report_args, app)["max_document_review_prompt_chars"], 100000)
+            path.write_text(path.read_text().replace("=0", "=-1"))
+            with self.assertRaisesRegex(ValueError, "max_document_review_prompt_chars"):
+                research_defaults(argv)
+        self.assertEqual(ReportRuntimeConfig.model_validate({}).max_document_review_prompt_chars, 0)
 
 
 class ResearchConfigTests(unittest.TestCase):
+    def test_named_experiment_data_resolves_relative_config_paths_and_explicit_cli_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / 'research.toml'
+            config.write_text('[task]\ngoal="Check result"\nkind="reproduction"\noutputs=["experiments"]\n'
+                              '[assets]\ndata=["shared/train.npz", "shared/test"]\n')
+            argv = ['research-session', '--config', str(config)]
+            defaults = research_defaults(argv)
+            self.assertEqual(defaults['data_path'], [str((root / 'shared/train.npz').resolve()), str((root / 'shared/test').resolve())])
+            args = build_parser(research_defaults=defaults).parse_args(argv)
+            self.assertEqual([str(path) for path in args.data_path], defaults['data_path'])
+            overridden = research_defaults([*argv, '--data-path', 'other.npz'])
+            self.assertNotIn('data_path', overridden)
+            config.write_text('[task]\ngoal="Survey"\nkind="survey"\n[assets]\ndata=["shared"]\n')
+            args = build_parser(research_defaults=research_defaults(argv)).parse_args(argv)
+            from simple_ar.cli.research_config import validate_session_arguments
+            with self.assertRaisesRegex(SystemExit, 'belongs to experiment inputs'):
+                validate_session_arguments(args)
+
+    def test_review_scope_roundtrips_config_session_and_report_resume(self):
+        from simple_ar.cli.main import _report_config_overrides
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.toml"
+            path.write_text('[task]\ngoal="Organize supplied evidence"\n[report]\ndocument_review=true\nreview_scope="document"\n')
+            argv = ["research-session", "--config", str(path)]
+            explicit = set()
+            defaults = research_defaults(argv, explicit_destinations=explicit)
+            parser = build_parser(research_defaults=defaults)
+            args = parser.parse_args(argv)
+            args._explicit_resume_destinations = explicit
+            app = SimpleNamespace(services=SimpleNamespace(config={"report": {}}))
+            self.assertEqual(_report_config_overrides(args, app)["review_scope"], "document")
+            self.assertEqual(parser.parse_args([*argv, "--report-review-scope", "section"]).report_review_scope, "section")
+            report = parser.parse_args(["research-report", "--session-root", "run", "--model", "fixture",
+                "--document-review", "--review-scope", "document"])
+            report._explicit_resume_destinations = {"document_review", "review_scope"}
+            self.assertEqual(_report_config_overrides(report, app), {"document_review": True, "review_scope": "document"})
+            path.write_text(path.read_text().replace('"document"', '"unknown"'))
+            with self.assertRaisesRegex(ValueError, "review_scope"):
+                research_defaults(argv)
+
+    def test_invalid_document_first_combination_fails_before_model_setup(self):
+        from simple_ar.cli.research_config import validate_session_arguments
+        args = build_parser().parse_args(["research-session", "--topic", "Explain supplied material",
+            "--report-review-scope", "document"])
+        with self.assertRaisesRegex(SystemExit, "requires report.document_review"):
+            validate_session_arguments(args)
+
     def test_data_tables_share_toml_cli_and_resume_override(self):
         from simple_ar.cli.main import _report_config_overrides
         from types import SimpleNamespace

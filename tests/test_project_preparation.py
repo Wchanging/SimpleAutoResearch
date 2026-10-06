@@ -1,0 +1,487 @@
+import contextlib
+import io
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+from importlib.metadata import PackageNotFoundError
+
+from simple_ar.cli.main import main
+from simple_ar.research.preparation import inspect_execution_entry, inspect_project_preparation, project_preparation_markdown
+from simple_ar.research.preparation import _dependency_probe
+
+
+class ProjectPreparationTests(unittest.TestCase):
+    def test_standard_venv_marker_prunes_arbitrary_dependency_directory_not_source_name(self):
+        from simple_ar.code_task.analysis.index import build_codebase_index
+        from simple_ar.code_task.review_pipeline import build_review_index
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            dependency = root / 'previous-attempt/generated-runtime'
+            dependency.mkdir(parents=True)
+            (dependency / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+            (dependency / 'third_party.py').write_text('raise RuntimeError("not project code")\n')
+            source = root / 'environment'
+            source.mkdir()
+            (source / 'domain.py').write_text('VALUE = 1\n')
+            (root / 'run.py').write_text('if __name__ == "__main__":\n    print("METRIC score=1")\n')
+            for builder in (build_codebase_index, build_review_index, source_file_inventory):
+                paths = {row['path'] for row in builder(root)['files']}
+                self.assertIn('environment/domain.py', paths)
+                self.assertIn('run.py', paths)
+                self.assertNotIn('previous-attempt/generated-runtime/third_party.py', paths)
+                self.assertNotIn('previous-attempt/generated-runtime/pyvenv.cfg', paths)
+            facts = inspect_project_preparation(root)
+            self.assertIn('environment/domain.py', facts['source_file_paths'])
+            self.assertFalse(any('generated-runtime/' in path for path in facts['source_file_paths']))
+
+    def test_probe_distinguishes_versions_markers_urls_extras_and_unknowns(self):
+        def version(name):
+            if name == "absent":
+                raise PackageNotFoundError(name)
+            return "2.0"
+        requirements = ["present>=1", "present>=3", "absent", "unused; python_version<'1'",
+                        "present[feature]>=1", "present @ https://example.org/source.whl", "not a valid requirement"]
+        with patch("simple_ar.research.preparation.metadata.version", side_effect=version) as lookup:
+            probe = _dependency_probe({"requires-python": ">=1", "dependencies": requirements})
+        self.assertEqual([row["status"] for row in probe["packages"]], ["version_matches", "version_mismatch",
+            "distribution_not_found_here", "marker_not_applicable_here", "version_matches",
+            "installed_source_not_verified", "unresolved_declaration"])
+        self.assertEqual(probe["packages"][4]["unverified_extras"], ["feature"])
+        self.assertTrue(probe["python_requirement"]["matches_inspecting_python"])
+        self.assertNotIn("unused", [call.args[0] for call in lookup.call_args_list])
+        self.assertFalse(probe["project_imported"])
+
+    def test_probe_never_infers_dynamic_or_malformed_dependencies_as_ready(self):
+        self.assertEqual(_dependency_probe({})["status"], "no_static_dependency_list")
+        result = _dependency_probe({"requires-python": "not a specifier", "dependencies": [None]})
+        self.assertEqual(result["python_requirement"]["status"], "invalid_declaration")
+        self.assertEqual(result["packages"][0]["status"], "unresolved_declaration")
+
+    def test_requirement_files_keep_line_identity_and_leave_installer_operations_unresolved(self):
+        text = ('# heading\npresent>=1, \\\n <3 # compatible\n'
+                'unused; python_version < "1"\n'
+                'present @ https://example.org/pkg.whl#archive-fragment\n'
+                '-r ../private.txt\n-c https://example.org/constraints.txt\n-e .\n'
+                '--index-url https://example.org\n'
+                'present @ https://example.org/${TOKEN}/pkg.whl\n'
+                'present==2 --hash=sha256:unverified\n./local.whl\n')
+        with patch('simple_ar.research.preparation.metadata.version', return_value='2.0') as lookup:
+            result = _dependency_probe({}, requirements_excerpts=({'path': 'requirements.txt',
+                'text': text, 'truncated': False},))
+        self.assertEqual(result['status'], 'metadata_inspected')
+        rows = result['packages']
+        self.assertEqual(rows[0]['source_lines'], [2, 3])
+        self.assertEqual(rows[0]['status'], 'version_matches')
+        self.assertEqual(rows[1]['status'], 'marker_not_applicable_here')
+        self.assertEqual(rows[2]['status'], 'installed_source_not_verified')
+        self.assertTrue(rows[2]['declared'].endswith('#archive-fragment'))
+        self.assertEqual([row['status'] for row in rows[3:7]], ['pip_directive_not_processed'] * 4)
+        self.assertEqual(rows[7]['status'], 'environment_reference_not_expanded')
+        self.assertEqual([row['status'] for row in rows[8:]], ['unresolved_declaration'] * 2)
+        self.assertEqual(lookup.call_count, 2)
+
+    def test_requirement_tail_never_becomes_a_complete_version_requirement(self):
+        for text in ('present>=', 'present>=1, \\\n', 'present>=1, \\\n <'):
+            with self.subTest(text=text), patch('simple_ar.research.preparation.metadata.version',
+                    side_effect=AssertionError('partial line must not be inspected')):
+                result = _dependency_probe({}, requirements_excerpts=({'path': 'requirements.txt',
+                    'text': text, 'truncated': True},))
+                self.assertEqual(result['packages'][0]['status'], 'incomplete_requirement_line')
+        with patch('simple_ar.research.preparation.metadata.version', return_value='2.0'):
+            result = _dependency_probe({}, requirements_excerpts=({'path': 'requirements.txt',
+                'text': 'present>=1\n', 'truncated': True},))
+        self.assertEqual(result['packages'][0]['status'], 'version_matches')
+        self.assertTrue(result['requirements_sources'][0]['truncated'])
+
+    def test_preparation_observes_separate_requirements_sources_without_following_includes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            (root / 'requirements.txt').write_text('present>=1\n-r /private/deps.txt\n')
+            (root / 'requirements-dev.txt').write_text('present>=3\n')
+            with patch('subprocess.run', side_effect=AssertionError('read only')), \
+                    patch('simple_ar.research.preparation.metadata.version', return_value='2.0'):
+                facts = inspect_project_preparation(root)
+            rows = facts['dependency_probe']['packages']
+            self.assertEqual(rows[0]['source_path'], 'pyproject.toml')
+            versions = [row for row in rows if row.get('name') == 'present']
+            self.assertEqual({row['source_path']: row['status'] for row in versions},
+                {'requirements.txt': 'version_matches', 'requirements-dev.txt': 'version_mismatch'})
+            self.assertEqual(next(row for row in rows if row['declared'].startswith('-r'))['status'],
+                'pip_directive_not_processed')
+            self.assertIn('requirements.txt:1–1', project_preparation_markdown(facts))
+
+    def project(self, root):
+        (root / 'README.md').write_text('# Setup\nRun python main.py --data input.csv.\n')
+        (root / 'main.py').write_text('if __name__ == "__main__":\n    raise RuntimeError("must not execute")\n')
+        (root / 'pyproject.toml').write_text('[project]\nname="demo"\nrequires-python=">=3.11"\ndependencies=["numpy"]\n[project.scripts]\ndemo="main:main"\n')
+        (root / 'uv.lock').write_text('lock body must not enter model preparation context')
+
+    def test_readonly_inventory_has_provenance_and_declared_not_installed_dependencies(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            with patch('subprocess.run', side_effect=AssertionError('must not execute')):
+                facts = inspect_project_preparation(root, data_paths=(Path('missing.csv'),))
+            self.assertEqual(facts['declared_project']['dependencies'], ['numpy'])
+            self.assertIn('main.py', facts['entrypoint_candidates'])
+            self.assertFalse(facts['data_paths'][0]['available'])
+            self.assertIn('uv.lock', facts['document_paths'])
+            self.assertFalse(any(row['path'] == 'uv.lock' for row in facts['excerpts']))
+            self.assertIn('project-authored', project_preparation_markdown(facts))
+            self.assertIn('> Run python main.py', project_preparation_markdown(facts))
+            self.assertNotIn('installed_dependencies', facts)
+
+    def test_declared_console_entry_reads_src_layout_without_main_guard_or_import(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'pyproject.toml').write_text('[project.scripts]\nsimulate="study.cli:main"\n')
+            (root / 'src/study').mkdir(parents=True)
+            source = root / 'src/study/cli.py'
+            source.write_text('raise RuntimeError("must not import")\n'
+                              'def main():\n    print("METRIC score=1")\n')
+            with patch('subprocess.run', side_effect=AssertionError('read only')):
+                facts = inspect_project_preparation(root)
+            self.assertIn('src/study/cli.py', facts['entrypoint_candidates'])
+            self.assertEqual(facts['declared_entrypoints'][0]['source_candidates'], ['src/study/cli.py'])
+            self.assertEqual(next(row['text'] for row in facts['excerpts']
+                                  if row['path'] == 'src/study/cli.py'), source.read_text())
+            self.assertIn('bindings and callables unverified', project_preparation_markdown(facts))
+
+    def test_console_source_ambiguity_and_invalid_references_do_not_invent_bindings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'pyproject.toml').write_text('[project.scripts]\nrun="study:main"\n'
+                'external="unavailable.cli:main"\nbad="../outside:main"\nmalformed=42\n')
+            (root / 'study.py').write_text('def main():\n    pass\n')
+            (root / 'src/study').mkdir(parents=True)
+            (root / 'src/study/__init__.py').write_text('def main():\n    pass\n')
+            facts = inspect_project_preparation(root)
+            entries = {row['name']: row for row in facts['declared_entrypoints']}
+            self.assertEqual(entries['run']['source_candidates'], ['study.py', 'src/study/__init__.py'])
+            for key in ('external', 'bad', 'malformed'):
+                self.assertEqual(entries[key]['source_candidates'], [])
+            self.assertTrue(all(path in facts['source_file_paths'] for path in facts['entrypoint_candidates']))
+
+    def test_declared_entries_share_existing_read_allowance_and_dependency_exclusions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'pyproject.toml').write_text('[project.scripts]\n' +
+                ''.join(f'job{i}="job{i}:main"\n' for i in range(8)))
+            for i in range(8):
+                (root / f'job{i}.py').write_text('def main():\n    pass\n')
+            facts = inspect_project_preparation(root)
+            self.assertEqual(len(facts['entrypoint_candidates']), 8)
+            self.assertEqual(len([row for row in facts['excerpts'] if row['role'] == 'entry_source']), 5)
+            self.assertNotIn('job7.py', facts['reading_coverage'])
+            extra = inspect_project_preparation(root, read_paths=('job7.py',))
+            self.assertIn('job7.py', extra['reading_coverage'])
+
+    def test_review_api_uses_observed_source_without_second_file_read(self):
+        from simple_ar.code_task.review_pipeline import build_review_index
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'module.py').write_text('def visible(value):\n    return value\n')
+            original = Path.read_text
+            reads = []
+            def observe(path, *args, **kwargs):
+                reads.append(path)
+                return original(path, *args, **kwargs)
+            with patch.object(Path, 'read_text', observe):
+                index = build_review_index(root)
+            self.assertEqual(reads, [root / 'module.py'])
+            self.assertIn('def visible(value)', index['files'][0]['public_api'])
+
+    def test_root_manifest_retains_priority_with_many_readmes_in_same_document_allowance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for i in range(20):
+                (root / f'README-{i:02d}.md').write_text('Project documentation\n')
+            (root / 'pyproject.toml').write_text('[project.scripts]\nrun="study:main"\n')
+            (root / 'study.py').write_text('def main():\n    pass\n')
+            facts = inspect_project_preparation(root, read_paths=('pyproject.toml',))
+            self.assertIn('study.py', facts['entrypoint_candidates'])
+            documents = [row for row in facts['excerpts'] if row['role'] in
+                         {'dependency_declaration', 'project_instructions'}]
+            self.assertEqual(len(documents), 12)
+            self.assertEqual(sum(row['path'] == 'pyproject.toml' for row in facts['excerpts']), 1)
+
+    def test_design_entry_uses_the_same_fact_owner_without_new_authority(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            facts = inspect_execution_entry({'code_task': {'code_root': str(root)}})
+            self.assertEqual(facts['preparation']['project'], str(root.resolve()))
+            self.assertFalse(any('pip' in prefix for prefix in facts['authorized_argv_prefixes']))
+
+    def test_cli_emits_reusable_notes_and_does_not_overwrite(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            output = root / 'inspection'
+            arguments = ['project-info', '--project', str(root), '--data-path', 'missing.csv', '--output', str(output)]
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(arguments)
+            self.assertTrue((output / 'preparation.md').is_file())
+            self.assertEqual(json.loads((output / 'preparation.json').read_text())['schema_version'], 'project_preparation.v1')
+            with self.assertRaisesRegex(SystemExit, 'not overwritten'):
+                main(arguments)
+
+    def test_long_or_invalid_manifest_preserves_unread_or_unparsed_status(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            (root / 'README.md').write_text('a' * 18000)
+            (root / 'pyproject.toml').write_text('[invalid')
+            facts = inspect_project_preparation(root)
+            self.assertTrue(next(row for row in facts['excerpts'] if row['path'] == 'README.md')['truncated'])
+            self.assertEqual(facts['declared_project'], {})
+            self.assertTrue(any('could not be parsed' in note for note in facts['notes']))
+
+    def test_valid_toml_with_invalid_project_shape_preserves_other_preparation_inputs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            (root / 'pyproject.toml').write_text('project = 42\n')
+            (root / 'requirements.txt').write_text('present>=1\n')
+            with patch('simple_ar.research.preparation.metadata.version', return_value='2.0'):
+                facts = inspect_project_preparation(root)
+            self.assertEqual(facts['declared_project'], {})
+            self.assertTrue(any('not a table' in note for note in facts['notes']))
+            self.assertEqual(facts['dependency_probe']['packages'][0]['status'], 'version_matches')
+
+    def test_legacy_saved_probe_without_source_path_is_still_readable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            facts = inspect_project_preparation(root)
+            for row in facts['dependency_probe']['packages']:
+                row.pop('source_path', None)
+            self.assertIn('declaration', project_preparation_markdown(facts))
+
+    def test_notebook_candidates_reuse_index_without_reading_outputs_or_dependency_trees(self):
+        from simple_ar.code_task.review_pipeline import _project_files, _read_text
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            notebook = root / 'experiment.ipynb'
+            notebook.write_text('untrusted saved outputs' * 60000)
+            dependency = root / '.venv' / 'large-library'
+            dependency.mkdir(parents=True)
+            (dependency / 'main.py').write_text('not project code')
+            checkpoint = root / '.ipynb_checkpoints'
+            checkpoint.mkdir()
+            (checkpoint / 'copy.ipynb').write_text('old outputs')
+            visited = list(_project_files(root))
+            self.assertNotIn(dependency / 'main.py', visited)
+            with patch('simple_ar.code_task.review_pipeline._read_text', wraps=_read_text) as read:
+                facts = inspect_project_preparation(root)
+            self.assertFalse(any(call.args[0] == notebook for call in read.call_args_list))
+            self.assertEqual([row['path'] for row in facts['notebook_candidates']], ['experiment.ipynb'])
+            self.assertEqual(facts['notebook_candidates'][0]['inspection'], 'path_only_cells_and_outputs_unread')
+            self.assertIn('Notebook candidates', project_preparation_markdown(facts))
+            self.assertNotIn('experiment.ipynb', facts['entrypoint_candidates'])
+
+    def test_entry_detection_is_python_structure_not_one_quote_style_or_documentation_text(self):
+        from simple_ar.code_task.review_pipeline import _is_entrypoint_candidate
+        self.assertTrue(_is_entrypoint_candidate('run.py', "if __name__ == '__main__':\n    main()\n"))
+        self.assertTrue(_is_entrypoint_candidate('run.py', 'if "__main__" == __name__ and ready:\n    main()\n'))
+        self.assertFalse(_is_entrypoint_candidate('notes.py', '\'\'\'Example: if __name__ == "__main__"\'\'\'\n'))
+        self.assertFalse(_is_entrypoint_candidate('library.py', "if __name__ != '__main__':\n    imported()\n"))
+
+    def test_requested_configuration_is_readonly_bounded_and_uses_review_index(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            (root / 'configuration.py').write_text('value = 1\n' * 2000)
+            with patch('subprocess.run', side_effect=AssertionError('read only')):
+                facts = inspect_project_preparation(root, read_paths=('configuration.py',))
+            row = next(row for row in facts['excerpts'] if row['path'] == 'configuration.py')
+            self.assertEqual(len(row['text']), 8000)
+            self.assertTrue(row['truncated'])
+            self.assertIn('configuration.py', facts['source_file_paths'])
+            self.assertIn('up to 8000 characters', project_preparation_markdown(facts))
+            with self.assertRaisesRegex(ValueError, 'indexed'):
+                inspect_project_preparation(root, read_paths=('../outside.py',))
+
+    def test_preparation_continues_entry_tail_even_when_only_one_character_is_unread(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.project(root)
+            (root / 'main.py').write_text('#' + 'x' * 7999 + '\n')
+            initial = inspect_project_preparation(root)
+            self.assertTrue(next(row for row in initial['excerpts'] if row['path'] == 'main.py')['has_unread_tail'])
+            facts = inspect_project_preparation(root, read_paths=('main.py',))
+            rows = [row for row in facts['excerpts'] if row['path'] == 'main.py']
+            self.assertEqual(len(rows), 2)
+            self.assertFalse(rows[-1]['has_unread_tail'])
+            self.assertTrue(rows[-1]['text'].endswith('\n'))
+            self.assertFalse(facts['reading_coverage']['main.py']['has_unread_tail'])
+
+
+class ProjectDataPreparationTests(unittest.TestCase):
+    def initialize(self, root, **kwargs):
+        from simple_ar.code_task.orchestration.workflow import initialize_code_task
+        task = root / 'task.md'
+        task.write_text('Check project behavior')
+        return initialize_code_task(run_dir=root / 'run', code_root=root / 'project', task_file=task, **kwargs)
+
+    def test_large_named_inputs_are_copied_and_edit_protected_without_broadening_discovery(self):
+        from simple_ar.code_task.editing.scope import is_edit_allowed_path
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            project = root / 'project'
+            (project / 'data').mkdir(parents=True)
+            (project / 'main.py').write_text('VALUE = 1\n')
+            data = project / 'data/input[1].bin'
+            data.write_bytes(b'x' * 2_000_001)
+            (project / 'unrelated.bin').write_bytes(b'y' * 2_000_001)
+            initialized = self.initialize(root, data_inputs=('data/input[1].bin',))
+            copied = initialized.workspace_dir / 'data/input[1].bin'
+            self.assertEqual(copied.read_bytes(), data.read_bytes())
+            self.assertFalse((initialized.workspace_dir / 'unrelated.bin').exists())
+            manifest = json.loads(initialized.manifest_path.read_text())
+            self.assertFalse(is_edit_allowed_path('data/input[1].bin',
+                protected_patterns=manifest['edit_scope']['protected_patterns']))
+            skipped = {row['path'] for row in initialized.copy_report.skipped}
+            self.assertNotIn('data/input[1].bin', skipped)
+            self.assertIn('unrelated.bin', skipped)
+            copied.write_bytes(b'changed only in the copy')
+            self.assertEqual(data.stat().st_size, 2_000_001)
+
+    def test_explicit_directory_retains_relative_paths_but_does_not_copy_secrets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data = root / 'project/data/nested'
+            data.mkdir(parents=True)
+            (data / 'observations.csv').write_text('value\n7\n')
+            (data / '.env').write_text('private')
+            initialized = self.initialize(root, max_file_bytes=1, data_inputs=('data', 'data/nested/observations.csv'))
+            self.assertTrue((initialized.workspace_dir / 'data/nested/observations.csv').is_file())
+            self.assertFalse((initialized.workspace_dir / 'data/nested/.env').exists())
+            self.assertEqual(initialized.copy_report.files_copied, 1)
+
+    def test_restored_input_updates_total_even_when_skip_details_were_capped(self):
+        from simple_ar.code_task.workspace.copy import CopyReport, copy_workspace_inputs
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            workspace = root / 'workspace'
+            workspace.mkdir()
+            (root / 'data.csv').write_text('value\n7\n')
+            report = CopyReport(1, 10, 300, ({'path': 'other.bin', 'kind': 'file', 'reason': 'file_too_large'},))
+            updated = copy_workspace_inputs(root, workspace, ('data.csv',), report)
+            self.assertEqual(updated.skipped_count, 299)
+            self.assertEqual(updated.files_copied, 2)
+            self.assertEqual(updated.skipped, report.skipped)
+
+    def test_declared_input_cannot_bypass_secret_or_path_boundaries(self):
+        from simple_ar.code_task.workspace.copy import copy_workspace_inputs, empty_copy_report
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            workspace = root / 'workspace'
+            workspace.mkdir()
+            (root / '.env').write_text('private')
+            for name in ('.env', '../outside', str(root / '.env'), '.'):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    copy_workspace_inputs(root, workspace, (name,), empty_copy_report())
+            self.assertEqual(list(workspace.iterdir()), [])
+
+    def test_insufficient_disk_capacity_is_checked_before_any_data_overlay(self):
+        from simple_ar.code_task.workspace.copy import copy_workspace_inputs, empty_copy_report
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            workspace = root / 'workspace'
+            workspace.mkdir()
+            (root / 'data.csv').write_text('value\n7\n')
+            with patch('simple_ar.code_task.workspace.copy.shutil.disk_usage', return_value=SimpleNamespace(free=0)):
+                with self.assertRaises(OSError):
+                    copy_workspace_inputs(root, workspace, ('data.csv',), empty_copy_report())
+            self.assertEqual(list(workspace.iterdir()), [])
+
+    def test_source_and_destination_symlinks_are_not_followed(self):
+        from simple_ar.code_task.workspace.copy import copy_workspace_inputs, empty_copy_report
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source, workspace = root / 'source', root / 'workspace'
+            source.mkdir()
+            workspace.mkdir()
+            (source / 'data.csv').write_text('value\n7\n')
+            outside = root / 'outside.csv'
+            outside.write_text('unchanged')
+            try:
+                (source / 'linked.csv').symlink_to(outside)
+                (workspace / 'data.csv').symlink_to(outside)
+            except OSError:
+                self.skipTest('symlinks unavailable')
+            for name in ('linked.csv', 'data.csv'):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    copy_workspace_inputs(source, workspace, (name,), empty_copy_report())
+            self.assertEqual(outside.read_text(), 'unchanged')
+
+    def test_worktree_can_materialize_untracked_named_data(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            project = root / 'project'
+            project.mkdir()
+            (project / 'main.py').write_text('VALUE = 1\n')
+            subprocess.run(['git', 'init', '-q', str(project)], check=True)
+            subprocess.run(['git', '-C', str(project), 'add', 'main.py'], check=True)
+            subprocess.run(['git', '-C', str(project), '-c', 'user.email=fixture@example.org',
+                            '-c', 'user.name=Fixture', 'commit', '-qm', 'baseline'], check=True)
+            (project / 'data.csv').write_text('value\n7\n')
+            initialized = self.initialize(root, workspace_mode='git_worktree', data_inputs=('data.csv',))
+            self.assertEqual(initialized.workspace.selected_mode, 'git_worktree')
+            self.assertEqual((initialized.workspace_dir / 'data.csv').read_text(), 'value\n7\n')
+
+    def test_preparation_maps_original_data_into_candidate_revision_without_reimporting_original(self):
+        from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
+        from simple_ar.experiment.execution.backend import RunRequest
+        from simple_ar.research.preparation import PreparationRequest, run_preparation_capability
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            original, candidate = root / 'original', root / 'candidate'
+            original.mkdir()
+            candidate.mkdir()
+            (original / 'data.csv').write_text('original')
+            (candidate / 'data.csv').write_text('accepted candidate input')
+            (candidate / 'main.py').write_text('VALUE = 1\n')
+            external = root / 'external.csv'
+            external.write_text('external')
+            context = CapabilityContext(ArtifactStore(root / 'attempt'), AttemptManifest('prepare-1'))
+            config = {'code_task': {'code_root': str(candidate), 'approval_note': 'isolated edits'}}
+            result = run_preparation_capability(context=context, request=PreparationRequest(config, 'Check data',
+                RunRequest(['python', 'main.py'], candidate, timeout_sec=5), source_project=original / '../original',
+                data_paths=(original / 'data.csv', external)))
+            self.assertEqual(result.status, 'completed')
+            payload = context.store.read_json('execution.json')
+            workspace = Path(payload['workspace'])
+            self.assertEqual((workspace / 'data.csv').read_text(), 'accepted candidate input')
+            self.assertFalse((workspace / 'external.csv').exists())
+            self.assertEqual(payload['workspace_info']['patterns']['data_inputs'], ['data.csv'])
+            self.assertEqual((original / 'data.csv').read_text(), 'original')
+
+    def test_guided_code_fix_serializes_data_through_existing_assets(self):
+        from simple_ar.cli.parser import build_parser
+        from simple_ar.cli.start import prepare_start
+        from simple_ar.cli.research_config import research_defaults
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            project = root / 'project'
+            project.mkdir()
+            data = project / 'data.csv'
+            data.write_text('value\n7\n')
+            args = build_parser().parse_args(['start', '--kind', 'bug_fix', '--goal', 'Fix data loading',
+                '--project', str(project), '--validate', 'python main.py', '--allow', '*.py',
+                '--data-path', str(data), '--prepare-only', '--output-root', str(root / 'tasks')])
+            with patch('simple_ar.cli.start.print_line'):
+                config = prepare_start(args)
+            self.assertEqual(research_defaults(['research-session', '--config', str(config)])['data_path'], [str(data)])
+
+
+if __name__ == '__main__':
+    unittest.main()

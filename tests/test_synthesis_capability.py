@@ -80,7 +80,11 @@ class SynthesisCapabilityTests(unittest.TestCase):
             self.assertIsNone(result.experiment_contract)
             self.assertEqual(result.hypothesis_markdown, "")
             self.assertTrue(result.synthesis_markdown)
+            self.assertNotIn("Runnable code links", result.gap_summary)
+            self.assertNotIn("Dataset and metric evidence is sparse", result.gap_summary)
         self.assertIn("actual reported empirical evidence", client.prompt)
+        research = synthesize_evidence(SynthesisRequest(evidence_pack=_pack()))
+        self.assertIn("Runnable code links", research.gap_summary)
 
     def test_compact_handoff_keeps_constraints_and_reading_caveats(self):
         import json
@@ -90,6 +94,7 @@ class SynthesisCapabilityTests(unittest.TestCase):
         pack["execution_context"] = constraint
         pack["limitations"] = ["Only abstracts were obtained."]
         pack["paper_notes"] = [{"paper_id": "paper-1", "method": "Method detail. " * 40,
+            "datasets": ["Reported subset A"], "metrics": ["Paired accuracy"],
             "key_claims": ["Coverage under exchangeability"],
             "limitations": ["Does not guarantee conditional coverage."],
             "open_questions": ["No evidence under distribution shift."], "confidence": "low",
@@ -97,10 +102,23 @@ class SynthesisCapabilityTests(unittest.TestCase):
         payload = json.loads(_bounded_pack_json(pack))
         self.assertEqual(payload["execution_context"], constraint)
         self.assertEqual(payload["limitations"], pack["limitations"])
+        self.assertEqual(payload["paper_notes"][0]["datasets"], ["Reported subset A"])
+        self.assertEqual(payload["paper_notes"][0]["metrics"], ["Paired accuracy"])
         notes = _evidence_notes_markdown(pack)
         for text in ("Do not change the held-out evaluation split.", "Does not guarantee conditional coverage.",
-                     "No evidence under distribution shift.", "confidence: low", "evidence_refs"):
+                     "No evidence under distribution shift.", "confidence: low", "evidence_refs",
+                     "Reported subset A", "Paired accuracy"):
             self.assertIn(text, notes)
+        class Client:
+            def ask_json(self, system, user, *, label=""):
+                self.prompt = user
+                return {"synthesis_markdown": "A scoped observation."}
+        client = Client()
+        synthesize_evidence(SynthesisRequest(evidence_pack=pack, purpose="evidence_review",
+                                            use_llm=True, llm_client=client))
+        self.assertEqual(client.prompt.count(constraint), 1)
+        self.assertEqual(client.prompt.count("Reported subset A"), 1)
+        self.assertNotIn("# Evidence Notes", client.prompt)
 
     def test_bounded_handoff_exposes_omitted_card_rows(self):
         import json
@@ -110,6 +128,39 @@ class SynthesisCapabilityTests(unittest.TestCase):
         payload = json.loads(_bounded_pack_json(pack))
         self.assertEqual(payload["context_selection"]["paper_cards"], {"included": 24, "available": 25})
         self.assertIn("1 paper_cards rows omitted", _evidence_notes_markdown(pack))
+
+    def test_synthesis_uses_adopted_note_not_superseded_lookup_history(self):
+        import copy
+        from simple_ar.research.synthesis import _evidence_notes_markdown
+
+        for revised in (False, True):
+            pack = _pack()
+            followup = {"revision_performed": revised, "pending_queries": ["Unresolved condition?"],
+                "scope": "retained_text_only_no_absence_or_support_certification",
+                "lookups": [{"query": "Limited comparison", "status": "matches", "omitted_window_count": 2}],
+                "passages": [{"chunk_id": "paper-1#chunk-1", "text": "The comparison concerns subgroup A."}],
+                "prior_note": {"key_claims": ["SUPERSEDED: every subgroup was compared."],
+                               "reading_followup": {"prior_note": {"method": "old " * 1000}}}}
+            pack["paper_notes"] = [{"paper_id": "paper-1", "key_claims": ["Only subgroup A was compared."],
+                "claim_scopes": [{"object": "subgroup A", "conditions": ["Under the recorded budget"]}],
+                "limitations": ["No supported conclusion for subgroup B."], "reading_followup": followup}]
+            before = copy.deepcopy(pack)
+            notes = _evidence_notes_markdown(pack)
+            for retained in ("Only subgroup A", "Under the recorded budget", "subgroup B", "Unresolved condition?",
+                             "omitted_window_count", "The comparison concerns subgroup A."):
+                self.assertIn(retained, notes)
+            self.assertNotIn("SUPERSEDED", notes)
+            self.assertNotIn("prior_note", notes)
+            payload = _bounded_pack_json(pack)
+            self.assertIn("The comparison concerns subgroup A.", payload)
+            self.assertNotIn("SUPERSEDED", payload)
+            self.assertNotIn("prior_note", payload)
+            from simple_ar.research.evidence.reader import reading_followup_context
+            self.assertNotIn("passages", reading_followup_context(followup))
+            self.assertEqual(reading_followup_context(followup, include_passages=True)["passages"], followup["passages"])
+            self.assertEqual(pack, before)
+        self.assertEqual(reading_followup_context(None), {})
+        self.assertEqual(reading_followup_context({"prior_note": {"method": "old"}}), {})
 
     def test_correction_is_bounded_and_retains_rejected_output(self):
         for corrected in (True, False):

@@ -14,6 +14,7 @@ from typing import Any
 
 from simple_ar.report.schema import (
     ReportDocumentPlan,
+    ReportArgumentPlan,
     ReportContext,
     ReportRuntimeConfig,
     ReportSectionPlan,
@@ -21,17 +22,22 @@ from simple_ar.report.schema import (
 )
 
 LENGTH_REQUEST_SCHEMA = {
-    "unit": "words", "scope": "whole_document",
+    "unit": "words", "scope": "whole_document|manuscript_body",
     "request_quote": "exact task quotation, or return null instead of this object",
-    "min_words": 0, "max_words": 0, "target_words": 0,
+    "constraint": "bounds|target",
+    "min_words": "integer for bounds; null for target", "max_words": "integer for bounds; null for target", "target_words": 0,
 }
 LENGTH_REQUEST_RULE = (
-    "For an explicit whole-document word limit/range, return length_request with the exact original task quotation "
-    "and numeric bounds (an exact count uses equal min/max; an upper limit uses min=0). Choose a target within it. "
+    "For an explicit word request, return length_request with the exact original task quotation. "
+    "Use constraint=bounds for a hard word limit/range (an exact count uses equal min/max; an upper limit uses min=0). "
+    "Choose a target within those bounds. For a soft or approximate word target, use constraint=target with "
+    "target_words copied from the request and min_words/max_words=null. Do not convert an approximate target "
+    "into an exact count or invent tolerance bounds. Interpret the original wording, not just its number. "
     "Section target_words are relative body shares: the controller reserves known title/headings/attachments before "
     "freezing. References and future generated visuals can add unresolved cost; final delivery must be checked. "
-    "Return null if no such request, or if the request uses pages, characters or exclusions; do not convert units "
-    "or silently infer exclusions."
+    "Use whole_document for the complete delivered Markdown, or manuscript_body only when the task explicitly "
+    "excludes title, headings and references. manuscript_body still includes prose, tables, captions and appended "
+    "body material. Return null for pages, characters or other/custom exclusions; do not convert units or infer exclusions."
 )
 
 
@@ -41,6 +47,108 @@ _RENDERABLE_FIGURE_VIEWS = {
     "evaluation-landscape",
     "challenge-roadmap",
 }
+
+ARGUMENT_PLAN_SCHEMA = {
+    "question": "The reader's actual research or analysis question",
+    "answer": "The strongest answer these inputs support, including an inconclusive answer",
+    "document_kind": "Requested genre; a reproduction is not a new algorithm",
+    "points": [{"claim": "One substantive comparison or conclusion",
+        "section_key": "Exact short key of the owning section in this response",
+        "evidence_handles": ["supplied supporting handle"], "metric_ids": [],
+        "reasoning": "How this evidence answers the question, not just a list of numbers",
+        "qualifications": ["Conditions that change this conclusion"],
+        "counterevidence_handles": []}],
+    "unresolved_questions": ["A concrete question the material cannot answer"],
+    "scope_section_key": "Exact key of the primary home for shared scope and limitations",
+    "technical_details_placement": "appendix|body|linked_artifacts",
+}
+
+ARGUMENT_PLANNING_RULES = (
+    "Return argument_plan alongside the sections: a question, evidence-supported answer, and reasoning steps with primary owning section keys. A list of topics or cautious summaries is not an argument.",
+    "For each substantive point distinguish what the evidence shows from your interpretation, conditions that matter, and counterevidence. Explain why the comparison is meaningful; incompatible settings do not prove a contradiction. Do not manufacture points or consensus when the sources are insufficient.",
+    "Give every section and planned figure a distinct argumentative job. Put shared scope in one primary section; repeat a qualification elsewhere only when necessary to interpret that local assertion. Use direct supported statements rather than generic disclaimers in every paragraph.",
+    "Place full commands, absolute paths and run receipts in existing reproduction attachments, unless the task explicitly requests them in the body. Keep scientific methods, comparison conditions and necessary parameters in the main text.",
+    "Give each section a distinct short section_key (letters, digits, hyphens or underscores, starting with a letter). Bind every argument point, scope_section_key and visual intent by copying that key, not by rewriting its display heading. metric_ids are exact recorded identifiers, not display names, abbreviations or newly constructed statistics. Use [] when no recorded metric supports a point; explain qualitative reasoning without inventing a measurement.",
+)
+
+
+def normalize_section_heading(text: str) -> str:
+    """One presentation normalization for headings and their exact references."""
+    heading = " ".join(text.strip().strip("#").strip().split())
+    return re.sub(r"^\d+(?:\.\d+)*\s+", "", heading)[:100]
+
+
+def outline_section_keys(value: Any, sections: Sequence[ReportSectionPlan]) -> dict[str, str]:
+    """Bind explicit proposal keys to the existing normalized plan, never guess."""
+    headings = {normalize_section_heading(row.heading): row.section_id for row in sections}
+    keys = {}
+    for row in value if isinstance(value, list) else []:
+        if not isinstance(row, Mapping) or "section_key" not in row:
+            continue  # Old responses keep exact heading references.
+        key = row["section_key"]
+        heading = normalize_section_heading(str(row.get("heading") or ""))
+        if not isinstance(key, str) or re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", key) is None:
+            raise ValueError("section_key must be a short literal identifier starting with a letter")
+        if key in keys or heading not in headings or headings[heading] in keys.values():
+            raise ValueError("section keys must be distinct and bind to a current planned section")
+        keys[key] = headings[heading]
+    return keys
+
+
+def resolve_argument_plan(value: Any, *, sections: Sequence[ReportSectionPlan],
+                          evidence_handles: Sequence[str], metric_ids: Sequence[str],
+                          section_keys: Mapping[str, str] | None = None) -> ReportArgumentPlan | None:
+    """Bind proposed arguments to current owners; do not certify their semantics.
+
+    Missing plans remain missing for old responses/checkpoints. No new model call,
+    summary database, or guessed evidence is introduced by normalization.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("argument_plan must be an object or null")
+    headings = {normalize_section_heading(section.heading): section.section_id for section in sections}
+    if len(headings) != len(sections):
+        raise ValueError("argument ownership requires distinct section headings")
+    keys = section_keys or {}
+    def owner(row: dict[str, Any], prefix: str = "", *, required: bool = True) -> str:
+        key = row.pop(prefix + "section_key", None)
+        heading = row.pop(prefix + "section_heading", "")
+        if not isinstance(heading, str):
+            raise ValueError("argument section heading must be text")
+        heading = normalize_section_heading(heading)
+        if key is not None:
+            if not isinstance(key, str) or key not in keys:
+                raise ValueError(f"argument requires an exact planned section key; got {key!r}; available: {list(keys)!r}")
+            if heading and headings.get(heading) != keys[key]:
+                raise ValueError("argument section key and heading refer to different owners")
+            return keys[key]
+        if heading not in headings and (heading or required):
+            raise ValueError(f"argument requires an exact planned section heading; got {heading!r}; available: {list(headings)!r}")
+        return headings.get(heading, "")
+    data = dict(value)
+    data["scope_section_id"] = owner(data, "scope_", required=False)
+    points = data.get("points", [])
+    if not isinstance(points, list) or any(not isinstance(row, Mapping) for row in points):
+        raise ValueError("argument points must be a list of objects")
+    normalized = []
+    for point in points:
+        row = dict(point)
+        row["section_id"] = owner(row)
+        normalized.append(row)
+    data["points"] = normalized
+    argument = ReportArgumentPlan.model_validate(data)
+    if not argument.question.strip() or not argument.answer.strip():
+        raise ValueError("argument plan requires a substantive question and scoped answer")
+    available, metrics = set(evidence_handles), set(metric_ids)
+    for point in argument.points:
+        if not point.claim.strip():
+            raise ValueError("argument point requires a claim")
+        if set([*point.evidence_handles, *point.counterevidence_handles]) - available:
+            raise ValueError(f"argument point refers to unknown evidence handles: {sorted(set([*point.evidence_handles, *point.counterevidence_handles]) - available)!r}")
+        if set(point.metric_ids) - metrics:
+            raise ValueError(f"argument point refers to unknown recorded metric ids: {sorted(set(point.metric_ids) - metrics)!r}; copy metric_id from recorded_metrics, not the metric name")
+    return argument
 
 
 def resolve_document_plan(
@@ -52,6 +160,7 @@ def resolve_document_plan(
     status: str = "resolved",
     title: str = "",
     supplied_figure_handles: Sequence[str] = (),
+    argument_plan: ReportArgumentPlan | None = None,
 ) -> ReportDocumentPlan:
     """Freeze sections, budgets, and feasible visual intents in one artifact.
 
@@ -63,8 +172,9 @@ def resolve_document_plan(
     visual_budget = {
         "tables": _visual_budget(contract, "tables", int(config.longform.target_tables or 0)),
         "figures": (
-            _visual_budget(contract, "figures", int(config.figures.max_figures or 0))
-            if config.figures.enabled
+            _visual_budget(contract, "figures", int(config.figures.max_figures or 0),
+                           automatic=len(_RENDERABLE_FIGURE_VIEWS))
+            if config.figures.enabled and config.figures.mode != "off"
             else 0
         ),
     }
@@ -82,6 +192,7 @@ def resolve_document_plan(
         target_words=_target_words(contract),
         visual_budget=visual_budget,
         visual_intents=intents,
+        argument_plan=argument_plan,
         notes=[
             "DocumentPlan is frozen after outline resolution; downstream report components consume this artifact only.",
             "Visual budgets are upper bounds. Missing intents are not synthesized from fixed section templates.",
@@ -126,21 +237,44 @@ def validate_length_request(value: Any, *, objective: str) -> dict[str, Any]:
         return {}
     if not isinstance(value, Mapping):
         raise ValueError("length_request must be null or an explicit whole-document word request")
-    if value.get("unit") != "words" or value.get("scope") != "whole_document":
-        raise ValueError("length_request supports only explicit whole-document words; do not convert pages, characters or excluded-body scopes")
+    if value.get("unit") != "words" or value.get("scope") not in {"whole_document", "manuscript_body"}:
+        raise ValueError("length_request supports only explicit whole-document or manuscript-body words; do not convert pages, characters or custom exclusions")
     quote = value.get("request_quote")
     if not isinstance(quote, str) or not quote.strip() or quote.strip() not in objective:
         raise ValueError("length_request requires an exact quotation from the original task")
+    constraint = value.get("constraint", "bounds")
+    if not isinstance(constraint, str) or constraint not in {"bounds", "target"}:
+        raise ValueError("length_request.constraint must be bounds or target")
+    quoted_numbers = {int(number.replace(",", "")) for number in re.findall(r"\d+(?:,\d{3})*", quote)}
+    if constraint == "target":
+        target = value.get("target_words")
+        if type(target) is not int or not 1 <= target <= 50000 or target not in quoted_numbers:
+            raise ValueError("A soft word target must be a positive integer from its original task quotation")
+        if value.get("min_words") is not None or value.get("max_words") is not None:
+            raise ValueError("A soft word target cannot carry invented hard bounds; use null min_words/max_words")
+        return {"unit": "words", "scope": value["scope"], "request_quote": quote.strip(),
+                "constraint": "target", "target_words": target, "min_words": None, "max_words": None}
     counts = {key: value.get(key) for key in ("min_words", "max_words", "target_words")}
     if any(type(number) is not int for number in counts.values()):
         raise ValueError("length_request word bounds and target must be integers")
     minimum, maximum, target = (counts[key] for key in ("min_words", "max_words", "target_words"))
     if not 0 <= minimum <= target <= maximum <= 50000 or target < 1:
         raise ValueError("length_request requires 0 <= min <= target <= max <= 50000 and a positive target")
-    quoted_numbers = {int(number.replace(",", "")) for number in re.findall(r"\d+(?:,\d{3})*", quote)}
     if maximum not in quoted_numbers or (minimum and minimum not in quoted_numbers):
         raise ValueError("length_request bounds must occur in its original task quotation")
-    return {"unit": "words", "scope": "whole_document", "request_quote": quote.strip(), **counts}
+    return {"unit": "words", "scope": value["scope"], "request_quote": quote.strip(), **counts,
+            **({"constraint": "bounds"} if "constraint" in value else {})}
+
+
+def manuscript_body_tokens(markdown: str) -> int:
+    """Count canonical body Markdown, excluding ATX headings, not references.
+
+    The caller supplies the canonical *body*, before appended bibliography.
+    Tables, captions and attachments remain in scope. This is a transparent
+    whitespace-token aid, not a language-independent natural-word counter.
+    """
+    return sum(len(line.split()) for line in markdown.splitlines()
+               if not re.match(r"^\s{0,3}#{1,6}(?:\s|$)", line))
 
 
 def check_document_length(budget: Mapping[str, Any], *, objective: str, token_count: int | None) -> dict[str, Any]:
@@ -157,6 +291,10 @@ def check_document_length(budget: Mapping[str, Any], *, objective: str, token_co
         return {"status": "invalid_contract", "reason": str(exc)}
     if type(token_count) is not int or token_count < 0:
         return {"status": "unavailable", **request}
+    if request.get("constraint") == "target":
+        return {"status": "target_only", **request, "markdown_token_count": token_count,
+                "target_difference": token_count - request["target_words"],
+                "guidance": "Soft target, not a hard range or semantic adequacy verdict. Review the original request and content; do not invent a tolerance or reject solely for count deviation."}
     status = ("below_range" if token_count < request["min_words"] else
               "above_range" if token_count > request["max_words"] else "within_range")
     return {"status": status, **request, "markdown_token_count": token_count}
@@ -177,6 +315,8 @@ def reserve_document_words(
     if forecast.get("status") != "known_assembly_forecast" or type(fixed) is not int or fixed < 0:
         raise ValueError("Cannot allocate whole-document words without a known assembly forecast")
     remaining = request["target_words"] - fixed
+    if request.get("constraint") == "target" and plan.sections:
+        remaining = max(len(plan.sections), remaining)
     if not plan.sections or remaining < len(plan.sections):
         raise ValueError("Known assembly text leaves insufficient prose for the proposed sections; revise organization or clarify the length request, not drop registered evidence")
     # Give each nonempty planned section one word, then distribute its share.
@@ -191,12 +331,14 @@ def reserve_document_words(
         "sections": [section.model_copy(update={"target_words": words}) for section, words in zip(plan.sections, allocation)],
         "length_budget": {**request, **forecast, "model_body_target_words": remaining,
             "interpretation_status": "planner_interpretation_anchored_to_task_not_semantically_verified",
-            "guidance": "The original request governs. Section shares are approximate, not minima. Known assembly text is reserved; unresolved future costs are not zero. Recheck the complete delivery, and trim redundancy rather than necessary evidence."},
+            "guidance": "The original request governs. Section shares are approximate, not minima. Known assembly text in the selected scope is reserved; unresolved future costs are not zero. Recheck the final selected scope, and trim redundancy rather than necessary evidence."
+                + (" This is a soft target, not a hard quota. If known assembly costs exceed it, retain required evidence and review substantive adequacy instead of rejecting on count alone."
+                   if request.get("constraint") == "target" else "")},
     })
 
 
 def supplied_figure_sources(context: ReportContext | None) -> list[dict[str, Any]]:
-    """Identify existing analysis figures by registered document identity only."""
+    """Identify packages for placement; results owns the shared figure details."""
     if context is None:
         return []
     analyses = context.results.get("supplied_analyses", [])
@@ -206,9 +348,8 @@ def supplied_figure_sources(context: ReportContext | None) -> list[dict[str, Any
                    if isinstance(row, Mapping) and row.get("document_id")
                    and isinstance(row.get("figures"), list) and row["figures"]}
     return [{"handle": handle.handle, "title": handle.title,
-             "figure_count": len(by_document[str(handle.metadata["document_id"])]["figures"]),
-             "captions": [row.get("caption", "") for row in
-                          by_document[str(handle.metadata["document_id"])]["figures"]]}
+             "document_id": str(handle.metadata["document_id"]),
+             "figure_count": len(by_document[str(handle.metadata["document_id"])]["figures"])}
             for handle in context.source_handles
             if str(handle.metadata.get("document_id")) in by_document]
 
@@ -233,11 +374,14 @@ def _target_words(contract: Mapping[str, Any] | None) -> int:
         return 0
 
 
-def _visual_budget(contract: Mapping[str, Any] | None, kind: str, configured: int) -> int:
+def _visual_budget(contract: Mapping[str, Any] | None, kind: str, configured: int,
+                   *, automatic: int = 0) -> int:
     if configured > 0:
         return configured
     budget = contract.get("visual_budget") if isinstance(contract, Mapping) else None
-    raw = budget.get(kind) if isinstance(budget, Mapping) else 0
+    # Absence selects automatic planning; an explicit zero disables generation.
+    # Only proposed, evidence-bound intents can consume this allowance.
+    raw = budget.get(kind, automatic) if isinstance(budget, Mapping) else automatic
     try:
         return max(0, min(12, int(raw or 0)))
     except (TypeError, ValueError):

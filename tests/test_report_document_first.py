@@ -1,0 +1,777 @@
+"""Whole-document composition, review, joint edits and recovery behavior."""
+import copy
+import hashlib
+import json
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+from pydantic import ValidationError
+from simple_ar.cli.parser import build_parser
+from simple_ar.cli.research_config import research_defaults, validate_session_arguments
+from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
+from simple_ar.integrations.llm import LLMError
+from simple_ar.report.agent import run_report_agent
+from simple_ar.report.editor import edit_joint_document
+from simple_ar.report.schema import (
+    ReportContext, ReportMemory, ReportRuntimeConfig, ReportSectionPlan,
+    ReportSectionDraft, ReportSectionReview, ReviewerFinding, ReportIterationRecord,
+    SourceHandle, ReportToolResult, ReportDocumentPlan, ReportVisualIntent,
+)
+from simple_ar.report.templates import load_report_template_bundle
+from simple_ar.report.tool_gateway import ReportToolGateway
+from simple_ar.report.writing import ReportWritingRequest, run_report_writing_capability
+from simple_ar.research.contracts import TextChunk
+from simple_ar.research.documents.ingest import DocumentBundle
+from tests.report_review_fixtures import draft_quotes
+
+
+class DocumentFirstTests(unittest.TestCase):
+    def inputs(self, count=2, scope="document", **updates):
+        context = ReportContext(topic="A bounded account", report_mode="supplied_materials")
+        memory = ReportMemory(section_plan=[ReportSectionPlan(section_id=sid, heading=sid,
+            goal="Explain the evidence", draft_order=i, final_order=i)
+            for i, sid in enumerate(("results", "limits")[:count], 1)])
+        config = ReportRuntimeConfig(outline_strategy="template", document_review=True,
+            review_scope=scope, max_review_iterations=1, **updates)
+        return dict(context=context, memory=memory, config=config,
+            template=load_report_template_bundle(report_mode=context.report_mode, config=config),
+            gateway=ReportToolGateway(context))
+
+    def client(self, labels, *, revise=False, fail=False):
+        class Client:
+            def ask_json(self, system, prompt, *, label="", **unused):
+                labels.append(label)
+                view = json.JSONDecoder().raw_decode(prompt[prompt.index("{"):])[0]
+                if label == "report-document-reviewer":
+                    if fail:
+                        raise LLMError("Document review unavailable")
+                    if revise:
+                        return {"section_reviews": [{"section_id": "results", "verdict": "revise_required",
+                            "revision_instructions": ["Remove the repeated explanation."], "findings": [{
+                                "finding_id": "repeat", "type": "style", "severity": "major",
+                                "required_action": "revise", "section_id": "results",
+                                "message": "Repeated explanation.", "draft_quotes": draft_quotes(prompt, "results")}]}]}
+                    return {"section_reviews": []}
+                if label == "report-document-verifier":
+                    return {"section_reviews": []}
+                if "reviewer" in label or "verifier" in label:
+                    return {"verdict": "pass"}
+                if label == "report-writer-document":
+                    return {"sections": [{"section_id": row["section"]["section_id"],
+                        "heading": row["section"]["heading"], "draft_markdown": "A bounded observation."}
+                        for row in view["sections"]]}
+                sid = view["section"]["section_id"]
+                return {"section_id": sid, "heading": sid,
+                    "draft_markdown": "Revised bounded result." if "reviser" in label else "Only recorded observations are described."}
+        return Client()
+
+    def test_complete_body_precedes_review_and_finished_resume_spends_nothing(self):
+        kwargs, labels, saved = self.inputs(), [], []
+        client = self.client(labels)
+        result = run_report_agent(**kwargs, client=client, checkpoint_sink=saved.append)
+        self.assertEqual(labels, ["report-writer-results", "report-writer-limits", "report-document-reviewer"])
+        self.assertFalse(any(row.action in {"review", "review_revision"} for row in result.iterations))
+        self.assertTrue(saved[-1]["document_review_done"])
+        resumed = run_report_agent(**kwargs, client=client, completed_checkpoint=saved[-1])
+        self.assertEqual(result.report_body, resumed.report_body)
+        self.assertEqual(len(labels), 3)
+
+    def test_interrupted_drafting_keeps_completed_prefix_and_waits_for_whole_body(self):
+        kwargs, labels, saved = self.inputs(), [], []
+        def interrupt(row):
+            saved.append(row)
+            if len(row["sections"]) == 1:
+                raise RuntimeError("Stopped after first draft")
+        client = self.client(labels)
+        with self.assertRaisesRegex(RuntimeError, "first draft"):
+            run_report_agent(**kwargs, client=client, checkpoint_sink=interrupt)
+        before = copy.deepcopy(saved[-1])
+        self.assertIsNone(before["pending_draft"])
+        self.assertFalse(before["document_review_done"])
+        result = run_report_agent(**kwargs, client=client, completed_checkpoint=saved[-1])
+        self.assertEqual(saved[-1], before)
+        self.assertEqual(labels, ["report-writer-results", "report-writer-limits", "report-document-reviewer"])
+        self.assertEqual(len(result.sections), 2)
+
+    def test_first_writer_failure_keeps_plan_without_claiming_any_review_or_replanning(self):
+        for scope in ("section", "document"):
+            with self.subTest(scope=scope):
+                kwargs, saved = self.inputs(scope=scope), []
+                from unittest.mock import Mock
+                client = Mock()
+                client.ask_json.side_effect = LLMError("Provider unavailable before first section")
+                with patch("simple_ar.report.agent._maybe_adapt_outline", side_effect=lambda **values: values["memory"]) as planner:
+                    with self.assertRaisesRegex(LLMError, "Provider unavailable"):
+                        run_report_agent(**kwargs, client=client, checkpoint_sink=saved.append)
+                self.assertEqual(planner.call_count, 1)
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(saved[0]["sections"], [])
+                self.assertEqual(saved[0]["iterations"], [])
+                self.assertEqual(saved[0]["reviewer_findings"], [])
+                self.assertFalse(saved[0]["document_review_done"])
+                labels = []
+                with patch("simple_ar.report.agent._maybe_adapt_outline", side_effect=AssertionError("Do not bill a second plan")):
+                    result = run_report_agent(**kwargs, client=self.client(labels), completed_checkpoint=saved[0])
+                self.assertEqual(len(result.sections), 2)
+                self.assertEqual(labels[0], "report-writer-results")
+
+    def test_document_issue_still_runs_real_revision_and_verification(self):
+        labels, saved = [], []
+        result = run_report_agent(**self.inputs(), client=self.client(labels, revise=True), checkpoint_sink=saved.append)
+        self.assertTrue(any("document-reviser" in label for label in labels))
+        self.assertTrue(any("document-verifier" in label for label in labels))
+        self.assertTrue(any(row.action == "document_revise" and row.adopted for row in result.iterations))
+        self.assertIn("Revised bounded result", result.report_body)
+
+    def test_normal_revision_recheck_and_finished_resume_share_current_reference_owner(self):
+        from simple_ar.report.narrative import delivery_text_observation
+        from simple_ar.report.capability import ReportAssemblyRequest, preview_report_document
+        kwargs, saved, views = self.inputs(), [], []
+        kwargs["context"].papers = [{"id": "first", "title": "Original cited source"},
+                                    {"id": "second", "title": "Replacement cited source"}]
+        kwargs["context"].citation_key_map = {"P1": "first", "P2": "second"}
+        class Client:
+            def ask_json(self, system, prompt, *, label="", **unused):
+                view = json.JSONDecoder().raw_decode(prompt[prompt.index("{"):])[0]
+                views.append((label, view))
+                if label == "report-document-reviewer":
+                    return {"section_reviews": [{"section_id": "results", "verdict": "revise_required",
+                        "revision_instructions": ["Use the replacement source."], "findings": [{
+                            "finding_id": "attribution", "type": "style", "severity": "major",
+                            "required_action": "revise", "section_id": "results", "message": "Revise the attribution."}]}]}
+                if "reviewer" in label or "verifier" in label:
+                    return {"section_reviews": []} if "section" not in view else {"verdict": "pass"}
+                sid = view["section"]["section_id"]
+                text = "Revised statement [@P2]." if "reviser" in label else (
+                    "Initial statement [@P1]." if sid == "results" else "A bounded limitation.")
+                return {"section_id": sid, "heading": sid, "draft_markdown": text}
+        client = Client()
+        result = run_report_agent(**kwargs, client=client, checkpoint_sink=saved.append)
+        inspected = [view for label, view in views if label in {"report-document-reviewer", "report-document-verifier"}]
+        self.assertEqual(inspected[0]["delivery_text_observation"]["references"]["citation_numbers"], {"first": 1})
+        self.assertEqual(inspected[-1]["delivery_text_observation"]["references"]["citation_numbers"], {"second": 1})
+        observed = delivery_text_observation(kwargs["context"], result.memory, result.sections, kwargs["config"])
+        canonical = preview_report_document(ReportAssemblyRequest(title=kwargs["context"].topic,
+            sections=tuple(result.sections), config=kwargs["config"], document_plan=result.memory.document_plan,
+            papers=tuple(kwargs["context"].papers), citation_key_map=kwargs["context"].citation_key_map))
+        self.assertEqual(observed["references"]["markdown"], canonical.references_markdown)
+        before = copy.deepcopy(saved[-1])
+        call_count = len(views)
+        restored = run_report_agent(**kwargs, client=client, completed_checkpoint=saved[-1])
+        self.assertEqual(restored.report_body, result.report_body)
+        self.assertEqual(len(views), call_count)
+        self.assertEqual(saved[-1], before)
+
+    def test_document_failure_is_a_finding_not_a_fabricated_pass(self):
+        result = run_report_agent(**self.inputs(), client=self.client([], fail=True))
+        self.assertTrue(any(row.type == "document_review_unavailable" for row in result.memory.reviewer_findings))
+
+    def test_single_section_and_legacy_default_keep_section_review(self):
+        for count, scope, draft_scope in ((1, "document", "section"),
+                                          (1, "document", "document"), (2, "section", "section")):
+            with self.subTest(count=count, scope=scope, draft_scope=draft_scope):
+                labels = []
+                run_report_agent(**self.inputs(count=count, scope=scope, draft_scope=draft_scope), client=self.client(labels))
+                self.assertIn("report-reviewer-results", labels)
+        self.assertEqual(ReportRuntimeConfig().review_scope, "section")
+
+    def test_document_scope_without_document_review_is_rejected(self):
+        with self.assertRaisesRegex(ValidationError, "requires document_review"):
+            ReportRuntimeConfig(review_scope="document")
+
+    def test_pre_option_checkpoint_identity_survives_default_but_not_scope_change(self):
+        objects = self.inputs(scope="section")
+        request = ReportWritingRequest(objects["context"], objects["memory"], objects["config"], objects["template"], object())
+        saved = {"sections": [{"section_id": "results", "draft_markdown": "Saved draft."}]}
+        def interrupted(**kwargs):
+            kwargs["checkpoint_sink"](saved)
+            return None
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory))
+            first = CapabilityContext(store=store, attempt=AttemptManifest("write-1"))
+            with patch("simple_ar.report.writing.run_report_agent", side_effect=interrupted):
+                result = run_report_writing_capability(context=first, request=request)
+            snapshot = store.read_json("report_inputs.json")
+            identity = {key: value for key, value in snapshot.items() if key != "snapshot_id"}
+            identity["template"] = {key: value for key, value in identity["template"].items() if key not in {"template_path", "criteria_path"}}
+            identity["config"] = {key: value for key, value in identity["config"].items() if key not in {"review_scope", "draft_scope"}}
+            old_identity = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            self.assertEqual(snapshot["snapshot_id"], old_identity)
+            checkpoint = next(ref for ref in result.artifacts if ref.kind == "report_checkpoint")
+            for scope in ("section", "document"):
+                with self.subTest(scope=scope):
+                    retry = CapabilityContext(store=ArtifactStore(Path(directory) / scope),
+                        attempt=AttemptManifest("write-2"), inputs=(checkpoint,), input_store=store)
+                    resumed = replace(request, config=request.config.model_copy(update={"review_scope": scope}), resume_ref=checkpoint)
+                    with patch("simple_ar.report.writing.run_report_agent", side_effect=interrupted) as writer:
+                        run_report_writing_capability(context=retry, request=resumed)
+                    self.assertEqual(writer.call_args.kwargs["completed_checkpoint"], saved if scope == "section" else None)
+
+
+class JointDraftingTests(unittest.TestCase):
+    def inputs(self):
+        context = ReportContext(topic='A scientific comparison', report_mode='supplied_materials',
+            goal_markdown='Write a coherent account using all supplied evidence, with conditions and limitations.')
+        plans = [ReportSectionPlan(section_id=sid, heading=sid.title(), goal='Answer a distinct part of the question',
+            evidence_handles=[f'material:{sid}'], draft_order=i, final_order=i, target_words=100)
+            for i, sid in enumerate(('comparison', 'interpretation', 'scope'), 1)]
+        memory = ReportMemory(section_plan=plans, source_handles=[SourceHandle(handle=f'material:{row.section_id}',
+            kind='material', title=row.heading, summary=f'Original evidence for {row.section_id}') for row in plans])
+        config = ReportRuntimeConfig(outline_strategy='template', document_review=True, review_scope='document',
+            draft_scope='document', max_review_iterations=0)
+        return dict(context=context, memory=memory, config=config,
+            template=load_report_template_bundle(report_mode=context.report_mode, config=config), gateway=ReportToolGateway(context))
+
+    def client(self, labels, requests, *, bad=None):
+        class Client:
+            def ask_json(self, system, prompt, *, label='', **kwargs):
+                labels.append(label)
+                view = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                requests.append(view)
+                if label == 'report-document-reviewer':
+                    return {'section_reviews': []}
+                if label == 'report-writer-document' and bad:
+                    return bad
+                sections = [row['section'] for row in view['sections']]
+                return {'sections': [{'section_id': row['section_id'], 'heading': row['heading'],
+                    'draft_markdown': f"Distinct bounded account for {row['section_id']}.",
+                    'used_sources': row['evidence_handles']} for row in reversed(sections)]}
+        return Client()
+
+    def test_one_composition_contains_all_owners_then_independent_review(self):
+        kwargs, labels, requests, saved = self.inputs(), [], [], []
+        original = kwargs['memory'].model_dump(mode='json')
+        result = run_report_agent(**kwargs, client=self.client(labels, requests), checkpoint_sink=saved.append)
+        self.assertEqual(labels, ['report-writer-document', 'report-document-reviewer'])
+        self.assertEqual([row.section_id for row in result.sections], ['comparison', 'interpretation', 'scope'])
+        writer = requests[0]
+        self.assertNotIn('section', writer)
+        self.assertNotIn('narrative_context', writer)  # No competing single-section edit scope.
+        self.assertEqual(writer['document_plan']['interpretation_rules'],
+            requests[1]['document_plan']['interpretation_rules'])
+        self.assertIn('Correct or omit', ' '.join(writer['document_plan']['interpretation_rules']))
+        self.assertEqual({row['handle'] for row in writer['source_handles']},
+            {'material:comparison', 'material:interpretation', 'material:scope'})
+        self.assertIn('shared limitations', ' '.join(writer['response_rules']))
+        self.assertNotIn('Return the outer section object', ' '.join(writer['style_rules']))
+        self.assertEqual(kwargs['memory'].model_dump(mode='json'), original)
+        self.assertEqual([len(row['sections']) for row in saved[:2]], [0, 3])
+        self.assertFalse(any(row.action in {'review', 'review_revision'} for row in result.iterations))
+        self.assertTrue(saved[-1]['document_review_done'])
+
+    def test_missing_or_duplicate_set_is_corrected_without_partial_adoption(self):
+        for bad in ({'sections': [{'section_id': 'comparison', 'draft_markdown': 'Partial'}]},
+                    {'sections': [{'section_id': 'comparison'}, {'section_id': 'comparison'}]},
+                    {'sections': [{'section_id': 'another'}]}):
+            with self.subTest(bad=bad):
+                labels, requests, saved = [], [], []
+                run_report_agent(**self.inputs(), client=self.client(labels, requests, bad=bad), checkpoint_sink=saved.append)
+                self.assertEqual(labels[:2], ['report-writer-document', 'report-writer-document-retry'])
+                self.assertEqual(len(saved[0]['sections']), 0)
+                self.assertEqual(len(saved[1]['sections']), 3)
+                self.assertIn('rejected_response', requests[1])
+
+    def test_joint_scope_is_built_without_single_section_projection_or_table_leakage(self):
+        kwargs, labels, requests = self.inputs(), [], []
+        kwargs['memory'].document_plan = ReportDocumentPlan(sections=kwargs['memory'].section_plan,
+            visual_intents=[ReportVisualIntent(visual_id='comparison-table', kind='table',
+                title='Supported comparison', purpose='Compare the supplied evidence', section_id='comparison')])
+        with patch('simple_ar.report.agent.narrative_context', side_effect=AssertionError('Joint calls have no single-section scope')):
+            run_report_agent(**kwargs, client=self.client(labels, requests))
+        writer = requests[0]
+        self.assertNotIn('visual_requirements', writer)
+        self.assertTrue(writer['sections'][0]['visual_requirements']['tables'])
+        self.assertFalse(writer['sections'][1]['visual_requirements']['tables'])
+        rules = ' '.join(writer['style_rules'])
+        self.assertIn('designated section', rules)
+        self.assertNotIn('table in this section', rules)
+        self.assertNotIn('long survey', rules)
+        self.assertNotIn('construction, applications', rules)
+
+    def test_argument_plan_is_shared_fallible_intent_not_a_requirement_to_assert(self):
+        from simple_ar.report.schema import ReportArgumentPlan, ReportArgumentPoint
+        kwargs, labels, requests = self.inputs(), [], []
+        argument = ReportArgumentPlan(question='Does the evidence justify the proposed explanation?',
+            answer='A provisional explanation that primary evidence may contradict.',
+            points=[ReportArgumentPoint(claim='An unconfirmed mechanism', section_id='interpretation')])
+        kwargs['memory'].document_plan = ReportDocumentPlan(sections=kwargs['memory'].section_plan,
+            argument_plan=argument)
+        before = kwargs['memory'].model_dump(mode='json')
+        run_report_agent(**kwargs, client=self.client(labels, requests))
+        self.assertEqual(requests[0]['document_plan']['argument_plan'], argument.model_dump(mode='json'))
+        self.assertNotIn('argument_plan', requests[1]['document_plan'])
+        self.assertNotIn(argument.answer, json.dumps(requests[1]))
+        for view in requests:
+            self.assertEqual(view['document_plan']['planning_status']['independent_verification'], 'not_performed')
+            self.assertIn('not scientific truth', ' '.join(view['document_plan']['interpretation_rules']))
+        self.assertEqual(requests[0]['document_plan']['interpretation_rules'],
+            requests[1]['document_plan']['interpretation_rules'])
+        self.assertEqual(kwargs['memory'].model_dump(mode='json'), before)
+
+    def test_genre_rules_follow_template_without_rewriting_custom_guidance(self):
+        from simple_ar.report.agent import _writer_payload, _reviewer_context
+        from simple_ar.report.schema import ReportSectionDraft
+        for name in ('material_report', 'reproduction', 'survey', 'survey_long', 'custom', 'custom-survey-name'):
+            with self.subTest(template=name):
+                kwargs = self.inputs()
+                template = kwargs['template'].model_copy(update={'name': 'survey_long' if name == 'custom-survey-name' else name,
+                    'template_markdown': 'Custom authored content and structure.'})
+                if name == 'custom-survey-name':
+                    kwargs['config'] = kwargs['config'].model_copy(update={'template': 'user/survey_long.md'})
+                for section, selected in ((kwargs['memory'].section_plan[0], None), (None, kwargs['memory'].section_plan)):
+                    view = _writer_payload(context=kwargs['context'], memory=kwargs['memory'], template=template,
+                        section=section, document_sections=selected, config=kwargs['config'], extra_context=[],
+                        previous_draft=None, review=None, source_batch_index=1, source_batch_count=1,
+                        include_previous_draft=False, draft_mode='document' if selected else 'section')
+                    rules = ' '.join(view['style_rules'])
+                    self.assertEqual('Synthesize the source set' in rules, name in {'survey', 'survey_long'})
+                    self.assertEqual('construction, applications' in rules, name == 'survey_long')
+                    self.assertEqual(view['template_markdown'], template.template_markdown)
+                    self.assertIn('not an observation', rules)
+                plan = kwargs['memory'].section_plan[0]
+                review = _reviewer_context(context=kwargs['context'], memory=kwargs['memory'], template=template,
+                    section=plan, draft=ReportSectionDraft(section_id=plan.section_id, heading=plan.heading,
+                        draft_markdown='Bounded scientific explanation.'), config=kwargs['config'])
+                self.assertEqual('Does the survey synthesize' in ' '.join(review['review_focus']), name in {'survey', 'survey_long'})
+                self.assertEqual('does the long survey cover' in ' '.join(review['review_focus']), name == 'survey_long')
+
+    def test_transport_failure_does_not_retry_or_adopt_partial_text(self):
+        kwargs, saved = self.inputs(), []
+        class Client:
+            def ask_json(self, *args, **kwargs):
+                raise LLMError('Provider unavailable')
+        with self.assertRaisesRegex(LLMError, 'Provider unavailable'):
+            run_report_agent(**kwargs, client=Client(), checkpoint_sink=saved.append)
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]['sections'], [])
+
+    def test_saved_joint_body_resumes_review_without_writing_again(self):
+        kwargs, labels, requests, saved = self.inputs(), [], [], []
+        client = self.client(labels, requests)
+        def stop(row):
+            saved.append(row)
+            if len(row['sections']) == 3:
+                raise RuntimeError('Saved entire joint body')
+        with self.assertRaisesRegex(RuntimeError, 'entire joint body'):
+            run_report_agent(**kwargs, client=client, checkpoint_sink=stop)
+        prior = copy.deepcopy(saved[-1])
+        result = run_report_agent(**kwargs, client=client, completed_checkpoint=prior)
+        self.assertEqual(labels, ['report-writer-document', 'report-document-reviewer'])
+        self.assertEqual(prior, saved[-1])
+        complete = {**prior, 'memory': result.memory.model_dump(mode='json'), 'document_review_done': True}
+        class Offline:
+            def ask_json(self, *args, **kwargs):
+                raise AssertionError('No model on completed restore')
+        self.assertEqual(run_report_agent(**kwargs, client=Offline(), completed_checkpoint=complete).report_body, result.report_body)
+
+    def test_configuration_and_preflight_share_explicit_scope(self):
+        with self.assertRaisesRegex(ValueError, 'requires review_scope'):
+            ReportRuntimeConfig(draft_scope='document')
+        with self.assertRaisesRegex(ValueError, 'source_strategy'):
+            ReportRuntimeConfig(draft_scope='document', review_scope='document', document_review=True, source_strategy='batch_refine')
+        args = build_parser().parse_args(['research-session', '--topic', 'topic', '--report-draft-scope', 'document'])
+        with self.assertRaisesRegex(SystemExit, 'requires report.review_scope'):
+            validate_session_arguments(args)
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'task.toml'
+            config.write_text('[report]\ndraft_scope="document"\nreview_scope="document"\ndocument_review=true\n')
+            defaults = research_defaults(['research-session', '--config', str(config)])
+            self.assertEqual(defaults['report_draft_scope'], 'document')
+            args = build_parser().parse_args(['research-report', '--session-root', 'session', '--model', 'env', '--draft-scope', 'document'])
+            self.assertEqual(args.draft_scope, 'document')
+
+    def test_writer_reads_before_composing_and_keeps_one_shared_trace(self):
+        kwargs, labels, prompts, saved = self.inputs(), [], [], []
+        regular = self.client(labels, prompts)
+        call = {'tool_name': 'search_source_chunks', 'arguments': {'handle': 'material:comparison', 'query': 'ranking conditions'}}
+        class Reader:
+            def ask_json(self, system, prompt, *, label='', **options):
+                payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                if label == 'report-writer-document' and payload['source_reading']['available']:
+                    self.payload = payload
+                    return {'context_requests': [call]}
+                return regular.ask_json(system, prompt, label=label, **options)
+        client = Reader()
+        evidence = ReportToolResult(tool_name=call['tool_name'], status='ok', content={'text': 'Actual ranking condition'})
+        with patch.object(kwargs['gateway'], 'call', return_value=evidence) as read:
+            result = run_report_agent(**kwargs, client=client, checkpoint_sink=lambda row: saved.append(copy.deepcopy(row)))
+        read.assert_called_once()
+        self.assertTrue(client.payload['source_reading']['available'])
+        writer = prompts[0]
+        self.assertEqual(labels, ['report-writer-document-evidence', 'report-document-reviewer'])
+        self.assertFalse(writer['source_reading']['available'])
+        self.assertEqual(writer['extra_tool_context'][0]['content']['text'], 'Actual ranking condition')
+        self.assertEqual(len(result.tool_results), 1)
+        event = next(row for row in result.iterations if row.action == 'writer_context')
+        self.assertEqual(event.tool_requests[0].arguments, call['arguments'])
+        self.assertTrue(any(row['iterations'][-1].get('tool_results', [{}])[0].get('metadata', {}).get('lookup_state') == 'allocated'
+                            for row in saved if row['iterations'] and row['iterations'][-1]['action'] == 'writer_context'
+                            and row['iterations'][-1]['tool_results']))
+
+    def planning_inputs(self, *, scope='document'):
+        kwargs = self.inputs()
+        kwargs['config'] = kwargs['config'].model_copy(update={'outline_strategy': 'adaptive', 'draft_scope': scope})
+        kwargs['memory'].source_handles[0].metadata['document_id'] = 'measurement'
+        kwargs['context'].source_handles = kwargs['memory'].source_handles
+        bundle = DocumentBundle(records=[], sections=[], fulltext_manifest={}, fulltext_extraction={}, chunks=[
+            TextChunk(chunk_id='definition', document_id='measurement', text='The calibrated rate equals raw counts divided by exposure time. Density normalization instead divides by bin width.',
+                source_path='measurement.txt', line_start=12)])
+        kwargs['gateway'] = ReportToolGateway(kwargs['context'], documents=bundle)
+        plan = {'sections': [{'heading': row.heading, 'goal': row.goal, 'evidence_handles': row.evidence_handles,
+                              'target_words': row.target_words} for row in kwargs['memory'].section_plan],
+                'context_requests': [{'tool_name': 'search_source_chunks', 'arguments': {
+                    'handle': 'material:comparison', 'query': 'calibrated rate counts exposure density normalization'}}]}
+        return kwargs, plan
+
+    def planned_client(self, plan, labels, prompts, *, fail=False):
+        class Client:
+            def ask_json(self, system, prompt, *, label='', **unused):
+                labels.append(label)
+                payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                prompts.append(payload)
+                if label.startswith('report-outline-planner'):
+                    return plan
+                if fail:
+                    raise LLMError('Writer transport stopped after planning reads')
+                if label == 'report-document-reviewer':
+                    return {'section_reviews': []}
+                rows = [row['section'] for row in payload['sections']] if 'sections' in payload else [payload['section']]
+                drafts = [{'section_id': row['section_id'], 'heading': row['heading'],
+                           'draft_markdown': 'Counts and rate are different quantities.', 'used_sources': row['evidence_handles']} for row in rows]
+                return {'sections': drafts} if 'sections' in payload else drafts[0]
+        return Client()
+
+    def test_planned_definition_reads_reach_both_draft_scopes_and_document_review(self):
+        for scope in ('document', 'section'):
+            with self.subTest(scope=scope):
+                kwargs, plan = self.planning_inputs(scope=scope)
+                labels, prompts, saved = [], [], []
+                original = copy.deepcopy(kwargs['gateway'].documents.to_handoff_dict())
+                result = run_report_agent(**kwargs, client=self.planned_client(plan, labels, prompts),
+                    checkpoint_sink=lambda row: saved.append(copy.deepcopy(row)))
+                self.assertIn('context_requests', prompts[0]['output_schema'])
+                self.assertEqual(labels.count('report-outline-planner'), 1)
+                self.assertEqual(kwargs['gateway'].call_counts['search_source_chunks'], 1)
+                self.assertEqual(len(result.tool_results), 1)
+                for payload in prompts[1:-1]:
+                    self.assertIn('divided by exposure time', json.dumps(payload['extra_tool_context']))
+                self.assertIn('divided by exposure time', json.dumps(prompts[-1]['supplementary_evidence']))
+                self.assertFalse(prompts[1].get('source_reading', {}).get('available', False))
+                self.assertEqual(kwargs['gateway'].documents.to_handoff_dict(), original)
+                self.assertTrue(saved[0]['memory']['outline_planning']['context_requests'])
+                self.assertEqual(saved[0]['tool_results'], [])
+
+    def test_planned_read_failure_restore_uses_same_plan_and_confirmed_results(self):
+        kwargs, plan = self.planning_inputs()
+        labels, prompts, saved = [], [], []
+        with self.assertRaisesRegex(LLMError, 'after planning reads'):
+            run_report_agent(**kwargs, client=self.planned_client(plan, labels, prompts, fail=True),
+                checkpoint_sink=lambda row: saved.append(copy.deepcopy(row)))
+        self.assertEqual(kwargs['gateway'].call_counts['search_source_chunks'], 1)
+        labels, prompts = [], []
+        with patch.object(kwargs['gateway'], 'call', side_effect=AssertionError('Do not replay confirmed reads')):
+            result = run_report_agent(**kwargs, client=self.planned_client(plan, labels, prompts), completed_checkpoint=saved[-1])
+        self.assertNotIn('report-outline-planner', labels)
+        self.assertIn('divided by exposure time', json.dumps(prompts[0]['extra_tool_context']))
+        self.assertEqual(len(result.tool_results), 1)
+
+    def test_planned_read_allocation_interruption_does_not_replan_or_replay(self):
+        kwargs, plan = self.planning_inputs()
+        saved = []
+        class Stop(BaseException):
+            pass
+        def checkpoint(row):
+            saved.append(copy.deepcopy(row))
+            if row['tool_results']:
+                raise Stop()
+        with patch.object(kwargs['gateway'], 'call') as read:
+            with self.assertRaises(Stop):
+                run_report_agent(**kwargs, client=self.planned_client(plan, [], []), checkpoint_sink=checkpoint)
+            read.assert_not_called()
+        labels, prompts = [], []
+        with patch.object(kwargs['gateway'], 'call', side_effect=AssertionError('Allocated read must not replay')):
+            result = run_report_agent(**kwargs, client=self.planned_client(plan, labels, prompts), completed_checkpoint=saved[-1])
+        self.assertNotIn('report-outline-planner', labels)
+        self.assertEqual(result.tool_results[0].status, 'blocked')
+        self.assertFalse(prompts[0]['source_reading']['available'])
+        self.assertIn('not source evidence', result.tool_results[0].summary)
+
+    def test_disabled_or_unregistered_planning_reads_stay_in_existing_correction_allowance(self):
+        from simple_ar.report.agent import _validated_outline_delivery
+        for requests, disabled in (([{'tool_name': 'shell', 'arguments': {}}], False),
+                                   ([{'tool_name': 'get_paper_brief'}] * 7, False),
+                                   ([{'tool_name': 'get_paper_brief'}], True)):
+            kwargs, plan = self.planning_inputs()
+            kwargs['config'] = kwargs['config'].model_copy(update={'allow_source_backtracking': not disabled})
+            plan['context_requests'] = requests
+            with self.assertRaises(ValueError):
+                _validated_outline_delivery(plan, sections=kwargs['memory'].section_plan, context=kwargs['context'],
+                    memory=kwargs['memory'], config=kwargs['config'])
+
+    def test_post_read_transport_failure_resumes_without_replay_or_replanning(self):
+        kwargs, saved = self.inputs(), []
+        class Interrupted:
+            def ask_json(self, system, prompt, *, label='', **options):
+                if label == 'report-writer-document':
+                    return {'context_requests': [{'tool_name': 'search_source_chunks', 'arguments': {'handle': 'material:comparison', 'query': 'measurement'}}]}
+                raise LLMError('transport stopped after confirmed read')
+        evidence = ReportToolResult(tool_name='search_source_chunks', status='not_found', summary='Retained text has no lexical match, not source absence.')
+        with patch.object(kwargs['gateway'], 'call', return_value=evidence) as read:
+            with self.assertRaises(LLMError):
+                run_report_agent(**kwargs, client=Interrupted(), checkpoint_sink=lambda row: saved.append(copy.deepcopy(row)))
+            read.assert_called_once()
+        labels, prompts = [], []
+        with patch.object(kwargs['gateway'], 'call', side_effect=AssertionError('Must not replay retained read')):
+            result = run_report_agent(**kwargs, client=self.client(labels, prompts), completed_checkpoint=saved[-1])
+        self.assertEqual(labels, ['report-writer-document', 'report-document-reviewer'])
+        self.assertFalse(prompts[0]['source_reading']['available'])
+        self.assertEqual(prompts[0]['extra_tool_context'][0]['status'], 'not_found')
+        self.assertEqual(len(result.tool_results), 1)
+
+    def test_interruption_after_allocation_retains_unconfirmed_read_as_unavailable(self):
+        kwargs, saved = self.inputs(), []
+        class Stop(BaseException):
+            pass
+        regular = self.client([], [])
+        class Reader:
+            def ask_json(self, system, prompt, *, label='', **options):
+                if label == 'report-writer-document':
+                    return {'context_requests': [{'tool_name': 'get_paper_brief', 'arguments': {'handle': 'material:comparison'}}]}
+                return regular.ask_json(system, prompt, label=label, **options)
+        def checkpoint(row):
+            saved.append(copy.deepcopy(row))
+            if row['tool_results']:
+                raise Stop()
+        with patch.object(kwargs['gateway'], 'call') as read:
+            with self.assertRaises(Stop):
+                run_report_agent(**kwargs, client=Reader(), checkpoint_sink=checkpoint)
+            read.assert_not_called()
+        labels, prompts = [], []
+        with patch.object(kwargs['gateway'], 'call', side_effect=AssertionError('Allocated read cannot be replayed')):
+            result = run_report_agent(**kwargs, client=self.client(labels, prompts), completed_checkpoint=saved[-1])
+        self.assertEqual(result.tool_results[0].status, 'blocked')
+        self.assertFalse(prompts[0]['source_reading']['available'])
+        self.assertIn('not source evidence', result.tool_results[0].summary.lower())
+
+    def test_invalid_read_scope_never_executes_tools_and_can_correct_format_once(self):
+        for invalid in ({'context_requests': [{'tool_name': 'shell', 'arguments': {}}]},
+                        {'context_requests': [{'tool_name': 'get_paper_brief'}] * 7},
+                        {'context_requests': [{'tool_name': 'get_paper_brief'}], 'sections': [{}]}):
+            with self.subTest(invalid=invalid):
+                kwargs, labels, prompts = self.inputs(), [], []
+                with patch.object(kwargs['gateway'], 'call') as read:
+                    result = run_report_agent(**kwargs, client=self.client(labels, prompts, bad=invalid))
+                    read.assert_not_called()
+                self.assertEqual(len(result.sections), 3)
+                self.assertEqual(labels, ['report-writer-document', 'report-writer-document-retry', 'report-document-reviewer'])
+        kwargs = self.inputs()
+        kwargs['config'] = kwargs['config'].model_copy(update={'allow_source_backtracking': False})
+        labels, prompts = [], []
+        result = run_report_agent(**kwargs, client=self.client(labels, prompts))
+        self.assertFalse(prompts[0]['source_reading']['available'])
+        self.assertNotIn('context_requests', prompts[0]['output_schema'])
+
+
+class JointRevisionTests(unittest.TestCase):
+    def inputs(self):
+        context = ReportContext(topic='Supported scientific interpretation', report_mode='supplied_materials')
+        memory = ReportMemory(section_plan=[ReportSectionPlan(section_id=sid, heading=sid,
+            goal='Own a distinct argumentative step', draft_order=i, final_order=i)
+            for i, sid in enumerate(('method', 'result', 'scope'), 1)])
+        config = ReportRuntimeConfig(outline_strategy='template', document_review=True,
+            review_scope='document', draft_scope='document', max_review_iterations=2)
+        return dict(context=context, memory=memory, config=config,
+            template=load_report_template_bundle(report_mode=context.report_mode, config=config),
+            gateway=ReportToolGateway(context))
+
+    def client(self, labels, *, reject=False):
+        class Client:
+            def ask_json(self, system, prompt, *, label='', **unused):
+                labels.append(label)
+                view = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                assert view['document_plan']['planning_status']['scope'] == 'organizational_intent_not_current_prose_or_scientific_support'
+                assert 'Correct or omit' in ' '.join(view['document_plan']['interpretation_rules'])
+                if label == 'report-writer-document':
+                    return {'sections': [{'section_id': row['section']['section_id'],
+                        'heading': row['section']['heading'], 'draft_markdown': 'Original ' + row['section']['section_id']}
+                        for row in view['sections']]}
+                if label == 'report-document-reviewer':
+                    assert '3 frozen target sections' in ' '.join(view['focus'])
+                    return {'section_reviews': [{'section_id': sid, 'verdict': 'revise_required',
+                        'revision_instructions': ['Reconcile explanation and interpretation.'],
+                        'findings': [{'finding_id': sid + '-repeat', 'type': 'style', 'severity': 'major',
+                            'required_action': 'revise', 'message': 'Substantive cross-section repetition.',
+                            'draft_quotes': draft_quotes(prompt, sid)}]} for sid in ('method', 'result')]}
+                if label.startswith('report-document-joint-reviser'):
+                    assert view['task'] == 'jointly_revise_report_sections'
+                    assert {row['section']['section_id'] for row in view['sections']} == {'method', 'result'}
+                    assert all(row['previous_draft']['draft_markdown'] for row in view['sections'])
+                    assert all(row['revision_request']['findings'] for row in view['sections'])
+                    return {'sections': [{'section_id': row['section']['section_id'], 'heading': row['section']['heading'],
+                        'draft_markdown': 'Reconciled ' + row['section']['section_id']}
+                        for row in view['sections']]}
+                if label == 'report-document-finding-checker':
+                    assert [row['markdown'] for row in view['sections']] == ['Reconciled method', 'Reconciled result', 'Original scope']
+                    checks = {}
+                    for row in view['historical_findings_to_check']:
+                        checks.setdefault(row['section_id'], []).append({'finding_id': row['finding_id'], 'status': 'resolved',
+                            'explanation': 'Current candidate separates responsibilities.',
+                            'draft_quotes': draft_quotes(prompt, row['section_id'])})
+                    return {'section_reviews': [{'section_id': sid, 'verdict': 'pass', 'finding_checks': rows}
+                        for sid, rows in checks.items()]}
+                if label == 'report-document-verifier':
+                    assert [row['markdown'] for row in view['sections']] == ['Reconciled method', 'Reconciled result', 'Original scope']
+                    return {'section_reviews': [{'section_id': 'result', 'verdict': 'revise_required',
+                        'findings': [{'finding_id': 'new-defect', 'type': 'style', 'severity': 'major',
+                            'message': 'Candidate introduced an inconsistent transition.',
+                            'draft_quotes': draft_quotes(prompt, 'result')}]}]} if reject else {'section_reviews': []}
+                raise AssertionError(label)
+        return Client()
+
+    def test_both_sections_adopt_only_after_whole_candidate_checks(self):
+        labels, saved = [], []
+        result = run_report_agent(**self.inputs(), client=self.client(labels), checkpoint_sink=lambda row: saved.append(copy.deepcopy(row)))
+        self.assertEqual(labels, ['report-writer-document', 'report-document-reviewer',
+            'report-document-joint-reviser', 'report-document-finding-checker', 'report-document-verifier'])
+        candidate = next(row for row in saved if any(event.get('drafts') for event in row['iterations']))
+        self.assertEqual([row['draft_markdown'] for row in candidate['sections']], ['Original method', 'Original result', 'Original scope'])
+        self.assertEqual([row.draft_markdown for row in result.sections], ['Reconciled method', 'Reconciled result', 'Original scope'])
+        self.assertTrue(next(row for row in result.iterations if row.action == 'document_joint_revise').adopted)
+        self.assertFalse(result.memory.reviewer_findings)
+
+    def test_unquoted_or_nonediting_neighbors_do_not_expand_joint_targets(self):
+        for action, target, quote in (
+            ('advisory', 'method', 'Original method'), ('verify', 'method', 'Original method'),
+            ('revise', 'unknown', 'Original method'), ('revise', 'method', 'Absent text'),
+        ):
+            with self.subTest(action=action, target=target):
+                sections = [ReportSectionDraft(section_id=sid, heading=sid, draft_markdown='Original ' + sid)
+                            for sid in ('method', 'result')]
+                finding = ReviewerFinding(finding_id='shared', section_id='result', type='style',
+                    severity='minor', required_action=action, message='Review the shared explanation.',
+                    draft_quotes=[{'section_id': target, 'quote': quote}])
+                seen = []
+
+                def draft(event, baseline):
+                    seen.append({row.section_id for row in event.section_reviews})
+                    return [sections[1].model_copy(update={'draft_markdown': 'Candidate result'})]
+
+                edit_joint_document(memory=ReportMemory(), config=ReportRuntimeConfig(max_review_iterations=1),
+                    sections=sections, iterations=[], all_findings=[], checkpoint=lambda: None,
+                    reviews=[ReportSectionReview(section_id='result', verdict='revise_required', findings=[finding])],
+                    draft=draft, inspect=lambda *args: [])
+                self.assertEqual(seen, [{'result'}])
+
+    def test_cross_section_opinion_edits_quoted_neighbor_without_cloning_the_opinion(self):
+        labels = []
+        client = self.client(labels)
+        original_ask = client.ask_json
+
+        def ask(system, prompt, *, label='', **kwargs):
+            view = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+            if label.startswith('report-document-joint-reviser'):
+                labels.append(label)
+                targets = {row['section']['section_id']: row for row in view['sections']}
+                self.assertEqual(set(targets), {'method', 'result'})
+                self.assertFalse(targets['method']['revision_request']['findings'])
+                self.assertTrue(targets['method']['revision_request']['revision_instructions'])
+                return {'sections': [{'section_id': sid, 'heading': row['section']['heading'],
+                    'draft_markdown': 'Reconciled ' + sid} for sid, row in targets.items()]}
+            response = original_ask(system, prompt, label=label, **kwargs)
+            if label == 'report-document-reviewer':
+                response['section_reviews'] = response['section_reviews'][1:]
+                opinion = response['section_reviews'][0]['findings'][0]
+                opinion['draft_quotes'].extend(draft_quotes(prompt, 'method'))
+            if label == 'report-document-finding-checker':
+                self.assertEqual(len(view['historical_findings_to_check']), 1)
+                self.assertEqual(view['historical_findings_to_check'][0]['section_id'], 'result')
+            return response
+
+        client.ask_json = ask
+        result = run_report_agent(**self.inputs(), client=client)
+        self.assertEqual([row.draft_markdown for row in result.sections],
+                         ['Reconciled method', 'Reconciled result', 'Original scope'])
+        self.assertFalse(result.memory.reviewer_findings)
+
+    def test_interrupted_candidate_recovers_without_redrafting_or_partial_adoption(self):
+        labels, saved = [], []
+        def interrupt(row):
+            saved.append(copy.deepcopy(row))
+            if any(event.get('drafts') for event in row['iterations']):
+                raise RuntimeError('Saved complete joint candidate')
+        with self.assertRaisesRegex(RuntimeError, 'complete joint candidate'):
+            run_report_agent(**self.inputs(), client=self.client(labels), checkpoint_sink=interrupt)
+        prior = copy.deepcopy(saved[-1])
+        result = run_report_agent(**self.inputs(), client=self.client(labels), completed_checkpoint=prior)
+        self.assertEqual(labels.count('report-document-joint-reviser'), 1)
+        self.assertEqual(labels.count('report-document-reviewer'), 1)
+        self.assertEqual([row.draft_markdown for row in result.sections], ['Reconciled method', 'Reconciled result', 'Original scope'])
+        self.assertEqual(prior, saved[-1])
+
+    def test_second_verification_resume_reuses_completed_old_opinion_check(self):
+        for action in ('document_joint_finding_check', 'document_joint_verify'):
+            with self.subTest(action=action):
+                labels, saved = [], []
+                def interrupt(row):
+                    saved.append(copy.deepcopy(row))
+                    if any(event['action'] == action for event in row['iterations']):
+                        raise RuntimeError('Saved completed check')
+                with self.assertRaisesRegex(RuntimeError, 'completed check'):
+                    run_report_agent(**self.inputs(), client=self.client(labels), checkpoint_sink=interrupt)
+                run_report_agent(**self.inputs(), client=self.client(labels), completed_checkpoint=saved[-1])
+                self.assertEqual(labels.count('report-document-joint-reviser'), 1)
+                self.assertEqual(labels.count('report-document-finding-checker'), 1)
+                self.assertEqual(labels.count('report-document-verifier'), 1)
+
+    def test_unaccepted_candidates_do_not_mix_or_reset_round_allowance(self):
+        labels = []
+        result = run_report_agent(**self.inputs(), client=self.client(labels, reject=True))
+        self.assertEqual(labels.count('report-document-joint-reviser'), 2)
+        self.assertEqual([row.draft_markdown for row in result.sections], ['Original method', 'Original result', 'Original scope'])
+        self.assertTrue(all(not row.adopted for row in result.iterations if row.action == 'document_joint_revise'))
+        self.assertIn('joint-revision-unresolved', [row.finding_id for row in result.memory.reviewer_findings])
+
+    def test_failed_generation_uses_a_round_and_keeps_original(self):
+        sections = [ReportSectionDraft(section_id='method', heading='method', draft_markdown='Original method')]
+        review = ReportSectionReview(section_id='method', verdict='revise_required', findings=[ReviewerFinding(
+            finding_id='rewrite', type='style', severity='major', section_id='method', message='Revise organization.')])
+        iterations, saved = [], []
+        config = ReportRuntimeConfig(max_review_iterations=1)
+        memory = ReportMemory()
+        def unavailable(event, baseline):
+            raise LLMError('Provider unavailable')
+        values = dict(memory=memory, config=config, sections=sections, iterations=iterations, reviews=[review],
+            all_findings=[], checkpoint=lambda: saved.append(copy.deepcopy(iterations)), draft=unavailable,
+            inspect=lambda *args: (_ for _ in ()).throw(AssertionError('No inspection of missing draft')))
+        edit_joint_document(**values)
+        edit_joint_document(**values)
+        self.assertEqual(len([row for row in iterations if row.action == 'document_joint_revise']), 1)
+        self.assertEqual(sections[0].draft_markdown, 'Original method')
+        self.assertEqual(iterations[0].status, 'unavailable')
+
+    def test_legacy_rounds_and_unchecked_old_findings_are_not_erased(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                sections = [ReportSectionDraft(section_id='method', heading='method', draft_markdown='Original')]
+                review = ReportSectionReview(section_id='method', verdict='revise_required', findings=[ReviewerFinding(
+                    finding_id='required', type='style', severity='major', section_id='method', message='Required correction.')])
+                iterations = [ReportIterationRecord(iteration=1, section_id='method', action='document_revise', status='rejected')] if legacy else []
+                calls = []
+                def draft(event, baseline):
+                    calls.append('draft')
+                    return [ReportSectionDraft(section_id='method', heading='method', draft_markdown='Candidate')]
+                def inspect(candidate, prior):
+                    calls.append('inspect')
+                    return []  # Omission is not proof the historical allegation was fixed.
+                edit_joint_document(memory=ReportMemory(), config=ReportRuntimeConfig(max_review_iterations=1),
+                    sections=sections, iterations=iterations, reviews=[review], all_findings=[],
+                    checkpoint=lambda: None, draft=draft, inspect=inspect)
+                self.assertEqual(sections[0].draft_markdown, 'Original')
+                self.assertEqual(calls, [] if legacy else ['draft', 'inspect'])
+
+
+if __name__ == "__main__":
+    unittest.main()

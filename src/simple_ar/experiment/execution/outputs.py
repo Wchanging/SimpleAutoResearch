@@ -31,7 +31,7 @@ def output_files(schema: Mapping) -> dict[str, str]:
 
 def read_output_window(root: Path, path: Path, *, offset: int = 0,
                        limit: int = WINDOW_CHARACTERS, query: str = "",
-                       record_match: Mapping | None = None) -> dict:
+                       record_match: Mapping | None = None, overview: bool = False) -> dict:
     """Bounded UTF-8 read of an explicitly registered file, with coverage."""
     if type(offset) is not int or not 0 <= offset <= MAX_OUTPUT_BYTES:
         raise ValueError("Output offset is outside the bounded character range.")
@@ -72,6 +72,33 @@ def read_output_window(root: Path, path: Path, *, offset: int = 0,
     text = raw.decode("utf-8-sig")
     if "\x00" in text:
         raise ValueError("Output attachment is not UTF-8 text.")
+    overview_structure = {}
+    if overview and not offset and not query and not selector and path.suffix.lower() == ".json":
+        # Small producer objects often place runtime/protocol after a long
+        # pretty-printed metrics block. Show the entire object when lossless
+        # whitespace removal fits one existing tool window, not selected keys.
+        def unique_object(pairs):
+            result = dict(pairs)
+            if len(result) != len(pairs):
+                raise ValueError("Duplicate JSON keys cannot be compacted losslessly.")
+            return result
+        try:
+            value = json.loads(text, object_pairs_hook=unique_object)
+            compact = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        except (ValueError, RecursionError):
+            pass  # Malformed/ambiguous JSON remains an ordinary raw preview.
+        else:
+            if isinstance(value, dict):
+                keys = list(value)
+                overview_structure = {"object_fields": keys[:64], "object_fields_omitted": max(0, len(keys) - 64),
+                    "structure_scope": "top_level_keys_only_not_field_contents"}
+            if isinstance(value, dict) and len(compact) <= WINDOW_CHARACTERS:
+                return {"text": compact, "offset": 0, "next_offset": len(text),
+                        "total_characters": len(text), "bytes": len(raw),
+                        "rendered_characters": len(compact), "truncated": False, "has_more": False,
+                        "query": "", "query_matched": None, "search_scope": "registered_utf8_file",
+                        "view_kind": "complete_json_object_whitespace_compacted",
+                        "verification": "producer_output_not_independently_verified"}
     selection = {}
     if selector:
         csv_source = path.suffix.lower() in {".csv", ".tsv"}
@@ -103,7 +130,7 @@ def read_output_window(root: Path, path: Path, *, offset: int = 0,
             "has_more": end < len(text), "query": query,
             "query_matched": bool(match) if query else None,
             "search_scope": "registered_record_array" if selector else "registered_utf8_file" if query else "character_window",
-            "verification": "producer_output_not_independently_verified", **selection}
+            "verification": "producer_output_not_independently_verified", **overview_structure, **selection}
 
 
 def capture_outputs(store: ArtifactStore, directory: Path | None, files: Mapping[str, str]):
@@ -116,7 +143,7 @@ def capture_outputs(store: ArtifactStore, directory: Path | None, files: Mapping
             continue
         path = directory / filename
         try:
-            preview = read_output_window(store.root, path, limit=PREVIEW_CHARACTERS)
+            preview = read_output_window(store.root, path, limit=PREVIEW_CHARACTERS, overview=True)
             ref = store.ref(path, kind="experiment_output", schema="text.v1", producer="research.experiment")
         except (OSError, ValueError, UnicodeError) as exc:
             rows.append({**row, "status": "missing" if isinstance(exc, FileNotFoundError) else "unreadable",

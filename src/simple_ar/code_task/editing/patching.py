@@ -6,7 +6,6 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,22 +21,29 @@ from simple_ar.code_task.editing.scope import (
     editable_context_files as _editable_context_files,
     edit_scope_rejection_reason,
     is_edit_allowed_path,
-    is_protected_edit_path,
     protected_patterns_from_manifest,
+    prompt_file_inventory,
 )
 from simple_ar.code_task.editing.snapshots import FileSnapshotSet, create_file_snapshot_set
-from simple_ar.code_task.runtime.state import code_task_paths
+from simple_ar.code_task.runtime.state import (
+    code_task_paths, read_required_json as _read_required_json,
+    utcnow_iso as _utcnow_iso, workspace_file as _workspace_file,
+)
+from simple_ar.code_task.editing.actions import looks_like_diff_fragment as _looks_like_diff_fragment
 from simple_ar.code_task.analysis.context import (
     LoadedCodeTaskContextPack,
+    clip_source_snippet,
     load_latest_code_task_context_pack,
+    planned_context_paths,
+    read_source_snippets,
 )
 from simple_ar.code_task.analysis.index import build_codebase_index
-from simple_ar.code_task.analysis.source_context import requested_source_context as _requested_source_context
+from simple_ar.code_task.analysis.source_context import inferred_source_request, requested_source_context as _requested_source_context
 from simple_ar.code_task.analysis.dependency_api import inspect_dependency_api
 from simple_ar.code_task.editing.planning import select_relevant_files
 from simple_ar.code_task.analysis.repo_map import build_repo_map
 from simple_ar.code_task.memory import task_memory_context
-from simple_ar.code_task.analysis.interfaces import snippet_api_contract
+from simple_ar.code_task.analysis.interfaces import render_source_snippets, snippet_api_contract, source_snippet_views
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.integrations.usage import record_usage
 
@@ -187,7 +193,7 @@ def propose_patch_edits(
     loaded_context = load_latest_code_task_context_pack(root)
     context_pack_ref: dict[str, Any] | None = None
     if loaded_context is not None:
-        selected_context = _context_pack_files(loaded_context, max_files=max_files)
+        selected_context = loaded_context.selected_paths(max_files=max_files)
         selected = _context_pack_editable_files(
             loaded_context,
             protected_patterns=protected_patterns,
@@ -211,7 +217,7 @@ def propose_patch_edits(
             max_files=max_files,
             max_chars_per_file=max_source_chars_per_file,
         )
-        context_pack_ref = _context_pack_manifest_ref(root, loaded_context)
+        context_pack_ref = loaded_context.manifest_reference(root)
         _emit(message_callback, f"Using code-task context pack: {context_pack_ref['path']}")
         if not selected:
             _emit(message_callback, "Context pack has no editable snippets; falling back to index selection.")
@@ -249,7 +255,7 @@ def propose_patch_edits(
                 protected_patterns=protected_patterns,
             )
         ]
-        snippets = _source_snippets(
+        snippets = read_source_snippets(
             workspace_dir,
             selected,
             max_chars_per_file=max_source_chars_per_file,
@@ -263,7 +269,7 @@ def propose_patch_edits(
             max_files=max_files,
         )
         selected = _limit_known_paths(allowed_edit_files, _known_paths(index), max_files=max_files)
-        snippets = _source_snippets(
+        snippets = read_source_snippets(
             workspace_dir,
             selected,
             max_chars_per_file=max_source_chars_per_file,
@@ -337,7 +343,8 @@ def propose_patch_edits(
                 )
                 source_fallback = False
                 if not any(request[key] for key in ("files", "query", "symbols", "dependency_symbols")):
-                    request = _truncated_source_request(acquired_snippets, proposal_allowed_files, max_files)
+                    request = inferred_source_request([*acquired_snippets, *acquired_references], proposal_allowed_files, max_files,
+                                                        index=index, proposal=proposal)
                     source_fallback = bool(request["files"])
                 supplied = [*acquired_snippets, *acquired_references]
                 remaining = max(0, total_chars - sum(len(item["text"]) for item in supplied))
@@ -365,7 +372,8 @@ def propose_patch_edits(
                     # A requested symbol may already be visible or unresolvable.
                     # Spend remaining source budget on an unfinished editable
                     # file before returning the evidence gap to the caller.
-                    fallback = _truncated_source_request(acquired_snippets, proposal_allowed_files, max_files)
+                    fallback = inferred_source_request([*acquired_snippets, *acquired_references], proposal_allowed_files, max_files,
+                                                         index=index, proposal=proposal)
                     if fallback["files"]:
                         request, source_fallback = fallback, True
                         extra = _requested_source_context(
@@ -638,9 +646,12 @@ def _ask_llm_for_edits(
         snippets=[*snippets, *reference_snippets],
         allowed_edit_files=allowed_edit_files,
         known_paths=_known_paths(index),
-    ):
+    ) and not inferred_source_request(
+        [*snippets, *reference_snippets], allowed_edit_files, len(allowed_edit_files),
+        index=index, proposal=response,
+    )["symbols"]:
         partial_source = any(
-            item.get("truncated") for item in [*snippets, *reference_snippets]
+            item.get("truncated") for item in source_snippet_views([*snippets, *reference_snippets])
             if item.get("path") in allowed_edit_files
         )
         source_guidance = (
@@ -709,45 +720,12 @@ def _edit_user_prompt(
     memory_context: str,
     dependency_api: dict[str, Any] | None = None,
 ) -> str:
-    compact_files = [
-        {
-            "path": str(item.get("path", "")),
-            "kind": item.get("kind"),
-            "role_tags": item.get("role_tags", []),
-            "edit_role": (
-                "read_only"
-                if is_protected_edit_path(
-                    str(item.get("path", "")),
-                    protected_patterns=protected_patterns,
-                )
-                else (
-                    "editable"
-                    if is_edit_allowed_path(
-                        str(item.get("path", "")),
-                        allowed_patterns=allowed_patterns,
-                        protected_patterns=protected_patterns,
-                    )
-                    else "read_only"
-                )
-            ),
-            "summary": item.get("summary", ""),
-        }
-        for item in _index_files(index)
-    ]
-    snippet_text = "\n\n".join(
-        f"### {item.get('path', '')} "
-        f"({item.get('access_role', 'editable')}; "
-        f"{'partial' if item.get('truncated') else 'complete'} source, "
-        f"{item.get('source_chars', 'unknown')} total chars)\n"
-        f"```text\n{item.get('text', '')}\n```"
-        for item in snippets
+    compact_files = prompt_file_inventory(
+        index, allowed_patterns=allowed_patterns, protected_patterns=protected_patterns,
+        selected_paths=(str(item.get("path", "")) for item in [*snippets, *reference_snippets]),
     )
-    reference_snippet_text = "\n\n".join(
-        f"### {item.get('path', '')} "
-        f"({item.get('access_role', 'reference')})\n"
-        f"```text\n{item.get('text', '')}\n```"
-        for item in reference_snippets
-    )
+    snippet_text = render_source_snippets(snippets)
+    reference_snippet_text = render_source_snippets(reference_snippets)
     return (
         "Return JSON with fields: `summary` string, `edits` list, "
         "`validation` list of strings, `risks` list of strings, and optional "
@@ -766,8 +744,8 @@ def _edit_user_prompt(
         "- Do not include diff markers such as `+`, `-`, `@@`, `---`, or "
         "`+++` inside `old` or `new`; they must contain only file text.\n"
         "- Use only workspace-relative paths from the provided file inventory.\n"
-        "- Only propose edits for files whose inventory `edit_role` is `editable`.\n"
-        "- Files whose `edit_role` is `read_only` are evidence only; do not "
+        "- Only propose edits for inventory `editable_files` within the allowed batch.\n"
+        "- Inventory `read_only_files` are evidence only; do not "
         "modify tests, benchmarks, or validation targets.\n"
         "- Reference source snippets are read-only dependency context. Use them "
         "to understand imports, call signatures, configuration, and expected "
@@ -787,9 +765,9 @@ def _edit_user_prompt(
         "This is a read request, not permission to edit beyond the allowed files.\n"
         "- Do not request source already visible in a complete snippet or repeat "
         "an identical supplied span.\n"
-        "- Return an empty `edits` list only when the task is impossible within the "
-        "allowed files, edit budget, or safety policy; explain the blocker in "
-        "`validation`.\n\n"
+        "- If required source is missing, return empty `edits` and a concrete "
+        "`context_request`. If the task is impossible within the allowed files, "
+        "edit budget or safety policy, explain that blocker in `validation`.\n\n"
         "Current edit budget JSON. Stay within this budget. If the task cannot "
         "be completed within it, return a concise `context_request` or explain "
         "why a larger budget is required instead of emitting a giant patch:\n"
@@ -806,7 +784,7 @@ def _edit_user_prompt(
         f"Task:\n{task_text}\n\n"
         f"Approved patch plan:\n{patch_plan}\n\n"
         f"Task memory:\n{memory_context}\n\n"
-        f"Workspace file inventory JSON:\n{json.dumps(compact_files, indent=2, ensure_ascii=False)}\n\n"
+        f"Workspace file inventory JSON:\n{json.dumps(compact_files, separators=(',', ':'), ensure_ascii=False)}\n\n"
         "Read-only context files omitted from editable snippets:\n"
         f"{json.dumps(read_only_context, indent=2, ensure_ascii=False)}\n\n"
         "Selected Python API contract (derived from the exact snippets below):\n"
@@ -1006,16 +984,6 @@ def _prepare_edits(
     return prepared
 
 
-def _looks_like_diff_fragment(text: str) -> bool:
-    """Detect accidental unified-diff content in structured old/new edits."""
-    lines = [line for line in text.splitlines() if line.strip()]
-    if any(line.startswith(("@@", "--- ", "+++ ")) for line in lines):
-        return True
-    removed = any(line.startswith("-") for line in lines)
-    added = any(line.startswith("+") for line in lines)
-    return removed and added
-
-
 def _evaluate_budget(
     edits: list[dict[str, str]],
     *,
@@ -1026,7 +994,6 @@ def _evaluate_budget(
 ) -> dict[str, Any]:
     stats = _proposal_stats(edits, proposal=proposal, workspace_dir=workspace_dir)
     warnings: list[str] = []
-    normal = edit_budget_for_profile("normal")
     large = edit_budget_for_profile("large")
     absolute = edit_budget_for_profile("absolute")
     if _stats_exceed(stats, absolute) or stats["whole_file_rewrite_suspicions"]:
@@ -1190,29 +1157,6 @@ def _normalize_context_request(value: dict[str, Any], known_paths: set[str]) -> 
     }
 
 
-def _truncated_source_request(
-    snippets: list[dict[str, Any]], allowed_edit_files: list[str], max_files: int,
-) -> dict[str, Any]:
-    targets = list(dict.fromkeys(
-        str(item.get("path")) for item in snippets
-        if item.get("truncated") and item.get("path") in allowed_edit_files
-    ))
-    return {
-        "files": targets[:max_files], "query": "", "symbols": [],
-        "dependency_symbols": [], "reason": "Bounded continuation of truncated editable source",
-    }
-
-
-def _workspace_file(workspace: Path, relative_path: str) -> Path | None:
-    rel = Path(relative_path)
-    if rel.is_absolute() or ".." in rel.parts:
-        return None
-    path = (workspace / rel).resolve()
-    if not _is_relative_to(path, workspace):
-        return None
-    return path
-
-
 def _unified_diff(
     prepared: list[_PreparedEdit],
     old_text_by_path: dict[Path, str],
@@ -1339,7 +1283,7 @@ def _selected_context_files(
 ) -> list[str]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
     plan = manifest.get("plan", {})
-    selected: list[str] = []
+    selected = planned_context_paths(patch_plan, known_paths)
     if isinstance(plan, dict):
         for path in plan.get("selected_files", []):
             if isinstance(path, str) and path in known_paths and path not in selected:
@@ -1350,20 +1294,6 @@ def _selected_context_files(
     if not selected:
         selected = select_relevant_files(index, task_text, max_files=max_files)
     return selected[: max(1, max_files)]
-
-
-def _context_pack_files(
-    loaded: LoadedCodeTaskContextPack,
-    *,
-    max_files: int,
-) -> list[str]:
-    selected: list[str] = []
-    for path in loaded.selected_files:
-        if path not in selected:
-            selected.append(path)
-        if len(selected) >= max(1, max_files):
-            break
-    return selected
 
 
 def _context_pack_editable_files(
@@ -1430,16 +1360,7 @@ def _context_pack_editable_snippets(
         if path not in selected_set or not isinstance(text, str):
             continue
         limit = max(200, max_chars_per_file)
-        snippets.append(
-            {
-                "path": path,
-                "access_role": "editable",
-                "text": _clip_text(text, max_chars=limit),
-                "source_offset": 0,
-                "source_chars": row.get("source_chars", len(text)),
-                "truncated": bool(row.get("truncated")) or len(text) > limit,
-            }
-        )
+        snippets.append({**clip_source_snippet(row, max_chars=limit), "access_role": "editable"})
     return snippets
 
 
@@ -1458,35 +1379,10 @@ def _context_pack_reference_snippets(
         if not path or path in excluded or not isinstance(text, str):
             continue
         limit = max(200, max_chars_per_file)
-        snippets.append(
-            {
-                "path": path,
-                "access_role": "reference",
-                "text": _clip_text(text, max_chars=limit),
-                "source_offset": 0,
-                "source_chars": row.get("source_chars", len(text)),
-                "truncated": bool(row.get("truncated")) or len(text) > limit,
-            }
-        )
+        snippets.append({**clip_source_snippet(row, max_chars=limit), "access_role": "reference"})
         if len(snippets) >= max(1, max_files):
             break
     return snippets
-
-
-def _context_pack_manifest_ref(
-    run_dir: Path,
-    loaded: LoadedCodeTaskContextPack,
-) -> dict[str, Any]:
-    budget = loaded.context_pack.get("budget")
-    if not isinstance(budget, dict):
-        budget = {}
-    return {
-        "path": _relative_to_run(run_dir, loaded.context_pack_path),
-        "prompt_context": _relative_to_run(run_dir, loaded.prompt_context_path),
-        "snippets": _relative_to_run(run_dir, loaded.snippets_path),
-        "selected_files": list(loaded.selected_files),
-        "budget": budget,
-    }
 
 
 def _batch_constraints(batch: LoadedCodeTaskBatch | None) -> dict[str, Any]:
@@ -1658,35 +1554,6 @@ def _paths_from_patch_plan(patch_plan: str, known_paths: set[str]) -> list[str]:
     return found
 
 
-def _source_snippets(
-    workspace_dir: Path,
-    selected_files: list[str],
-    *,
-    max_chars_per_file: int,
-) -> list[dict[str, Any]]:
-    snippets: list[dict[str, Any]] = []
-    workspace = workspace_dir.resolve()
-    for rel_path in selected_files:
-        path = _workspace_file(workspace, rel_path)
-        if path is None or not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        snippets.append(
-            {
-                "path": rel_path,
-                "access_role": "editable",
-                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
-                "source_offset": 0,
-                "source_chars": len(text),
-                "truncated": len(text) > max(200, max_chars_per_file),
-            }
-        )
-    return snippets
-
-
 def _update_manifest_after_proposal(
     manifest_path: Path,
     manifest: dict[str, Any],
@@ -1828,15 +1695,6 @@ def _read_optional_text(path: Path) -> str:
     return read_text(path) if path.exists() else ""
 
 
-def _read_required_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing required artifact: {path}")
-    data = read_json(path)
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Expected JSON object in {path}")
-    return data
-
-
 def _read_required_text(path: Path) -> str:
     if not path.exists():
         raise FileNotFoundError(f"Missing required artifact: {path}")
@@ -1876,11 +1734,8 @@ def _hash_rows_for_prepared(
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def _plan_status(manifest: dict[str, Any]) -> str:
@@ -1905,24 +1760,6 @@ def _string_list(value: object) -> list[str]:
     return [_string(item) for item in value if _string(item)]
 
 
-def _clip_text(text: str, *, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars].rstrip() + "\n... [truncated]"
-
-
 def _emit(callback: MessageCallback | None, message: str) -> None:
     if callback is not None:
         callback(message)
-
-
-def _is_relative_to(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
-
-
-def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")

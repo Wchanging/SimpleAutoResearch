@@ -16,6 +16,11 @@ def build_parser(
     from simple_ar.cli.start import add_start_parser
     add_start_parser(subparsers)
 
+    preparation_parser = subparsers.add_parser("project-info", help="Read project instructions, dependency declarations, entry candidates and named data locations without execution.")
+    preparation_parser.add_argument("--project", type=Path, required=True)
+    preparation_parser.add_argument("--data-path", action="append", default=[], type=Path, help="Named data location; relative paths use the project root. Contents are not read.")
+    preparation_parser.add_argument("--output", type=Path, required=True, help="New directory for editable preparation notes and facts.")
+
     export_parser = subparsers.add_parser(
         "report-export", help="Export an assembled report as an editable ACM acmart manuscript."
     )
@@ -107,6 +112,8 @@ def build_parser(
     add_data_options(session_parser)
     session_parser.add_argument("--material", action="append", default=[],
                                 help="Writing: text/PDF or table_analysis.v1 analysis.json with copied data; not a verified experiment or bibliographic paper.")
+    session_parser.add_argument("--data-path", action="append", default=[], type=Path,
+                                help="Reproduction/measurement: named input data file or directory; records an external read-only asset, without automatic copying or command rewriting.")
     session_parser.add_argument("--total-tokens", type=int, default=None, help="Optional session API token budget; omitted means unlimited.")
     session_parser.add_argument("--llm-requests", type=int, default=None, help="Optional session API request budget; omitted means unlimited.")
     session_parser.add_argument("--max-output-tokens", type=int, default=None)
@@ -196,7 +203,7 @@ def build_parser(
         action="store_true",
         help=(
             "After a passed session, append the existing report and audit attempts. "
-            "This is the default when --model is supplied."
+            "This is the default when --model is supplied, except data_analysis which requires an explicit report request."
         ),
     )
     session_parser.add_argument(
@@ -221,18 +228,7 @@ def build_parser(
         default=1,
         help="Maximum report revision cycles per section with --with-report.",
     )
-    session_parser.add_argument(
-        "--report-document-review", action=argparse.BooleanOptionalAction, default=None,
-        help="Opt into one bounded whole-document review and targeted section revision.",
-    )
-    session_parser.add_argument(
-        "--report-outline-strategy", choices=("auto", "template", "adaptive"), default=None,
-        help="Use the template or plan an evidence-organized outline; non-survey adaptive planning is opt-in.",
-    )
-    session_parser.add_argument(
-        "--report-data-tables", choices=("linked", "full"), default=None,
-        help="Link complete copied analysis records (default) or repeat their full tables in the report.",
-    )
+    _add_report_document_args(session_parser, prefix="report-")
     session_parser.add_argument(
         "--code-task-config",
         default=None,
@@ -369,18 +365,7 @@ def build_parser(
         default=1,
         help="Maximum Writer revision cycles per section.",
     )
-    report_parser.add_argument(
-        "--document-review", action=argparse.BooleanOptionalAction, default=None,
-        help="Opt into one bounded whole-document review and targeted section revision.",
-    )
-    report_parser.add_argument(
-        "--outline-strategy", choices=("auto", "template", "adaptive"), default=None,
-        help="Override outline planning for an explicitly requested new report.",
-    )
-    report_parser.add_argument(
-        "--data-tables", choices=("linked", "full"), default=None,
-        help="Link complete copied analysis records or include their full tables.",
-    )
+    _add_report_document_args(report_parser)
     report_parser.add_argument(
         "--max-section-tokens",
         type=int,
@@ -921,6 +906,26 @@ def build_parser(
     )
 
     return parser
+
+def _add_report_document_args(parser: argparse.ArgumentParser, *, prefix: str = "") -> None:
+    """Same report controls for new sessions and explicit report generation."""
+    options = (
+        ("document-review", {"action": argparse.BooleanOptionalAction,
+            "help": "Enable bounded whole-document review and targeted revision."}),
+        ("review-scope", {"choices": ("section", "document"),
+            "help": f"Review each section or the complete body; document requires --{prefix}document-review."}),
+        ("draft-scope", {"choices": ("section", "document"),
+            "help": f"Draft separately or jointly; document requires --{prefix}review-scope document and --{prefix}document-review."}),
+        ("--max-document-review-prompt-chars", {"type": int,
+            "help": "Optional complete review request character limit; 0 uses client/session capacity without truncating evidence."}),
+        ("outline-strategy", {"choices": ("auto", "template", "adaptive"),
+            "help": "Use the template or explicitly plan an evidence-organized outline for this new report."}),
+        ("data-tables", {"choices": ("linked", "full"),
+            "help": "Link complete copied analysis records (default) or repeat their full tables in the report."}),
+    )
+    for name, settings in options:
+        parser.add_argument(name if name.startswith("--") else f"--{prefix}{name}", default=None, **settings)
+
 
 def _add_code_task_env_args(parser: argparse.ArgumentParser) -> None:
     """Add shared code-task execution environment policy arguments."""

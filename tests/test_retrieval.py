@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
 
+from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.core.artifacts import read_json, read_jsonl, write_json, write_jsonl, write_text
 from simple_ar.retrieval.chunking import build_artifact_chunks
 from simple_ar.retrieval.index import build_artifact_index
@@ -95,8 +97,13 @@ class RetrievalTests(unittest.TestCase):
             goal = _artifact(index, "01-plan/goal.md")
             self.assertEqual(goal["kind"], "markdown")
             self.assertEqual(goal["stage"], "plan")
-            self.assertEqual(len(goal["sha256"]), 64)
+            self.assertEqual(goal["sha256"], hashlib.sha256((run_dir / goal["path"]).read_bytes()).hexdigest())
             self.assertTrue((run_dir / "artifact_index.json").is_file())
+            results = _artifact(index, "07-run/results.json")
+            code_index = build_codebase_index(run_dir)
+            code_results = next(row for row in code_index["files"] if row["path"] == results["path"])
+            self.assertEqual(results["summary"], "json object keys: accuracy")
+            self.assertEqual(code_results["summary"], results["summary"])
 
     def test_chunking_writes_line_addressable_chunks(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

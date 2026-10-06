@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from pydantic import ValidationError
 
-from simple_ar.integrations.llm import LLMResponseError
+from simple_ar.integrations.llm import LLMError, LLMResponseError
 from simple_ar.research.contracts import CLAIM_SCOPE_RULES
 from simple_ar.report.tools import report_tool_specs
-from simple_ar.report.templates import reviewing_template_guidance
-from simple_ar.report.narrative import report_edit_scope, report_tool_context, review_source_evidence
+from simple_ar.report.templates import is_builtin_template, reviewing_template_guidance
+from simple_ar.report.narrative import document_plan_context, report_edit_scope, report_tool_context, review_source_evidence
 from simple_ar.report.data_delivery import DELIVERY_RULES
 from simple_ar.report.review_evidence import (
     EVIDENCE_QUOTE_RULES, EVIDENCE_QUOTE_SCHEMA, validate_evidence_quotes, validate_finding_anchors,
@@ -20,6 +21,7 @@ from simple_ar.report.review_evidence import (
 )
 from simple_ar.report.schema import (
     ReportMemory,
+    ReportIterationRecord,
     ReportRuntimeConfig,
     ReportSectionDraft,
     ReportSectionReview,
@@ -34,8 +36,158 @@ from simple_ar.report.schema import (
 
 
 MAX_DOCUMENT_REVIEW_CHARS = 60_000
-MAX_DOCUMENT_REVIEW_PROMPT_CHARS = 90_000
 MAX_DOCUMENT_REVISION_SECTIONS = 2
+
+
+def document_revision_limit(memory: ReportMemory) -> int:
+    """Argument-led documents can correct every frozen owning section.
+
+    Existing per-section rounds and the session ledger still bound work. Old
+    checkpoints without an argument plan retain their original two targets;
+    recovery never creates a new plan or resets previously consumed rounds.
+    """
+    if memory.document_plan is not None and memory.document_plan.argument_plan is not None:
+        return len(memory.document_plan.sections)
+    return MAX_DOCUMENT_REVISION_SECTIONS
+
+
+def edit_joint_document(
+    *, memory: ReportMemory, config: ReportRuntimeConfig,
+    sections: list[ReportSectionDraft], iterations: list[ReportIterationRecord],
+    reviews: list[ReportSectionReview], all_findings: list[ReviewerFinding],
+    checkpoint: Callable[[], None],
+    draft: Callable[[ReportIterationRecord, list[ReportSectionDraft]], list[ReportSectionDraft]],
+    inspect: Callable[[list[ReportSectionDraft], list[ReviewerFinding] | None], list[ReportSectionReview]],
+) -> None:
+    """Revise and adopt a candidate set atomically in the existing checkpoint.
+
+    The frozen plans and source evidence stay read-only. Saved candidates and
+    completed checks are reused after interruption; rounds count proposal
+    starts, including unavailable calls, rather than granting recovery credit.
+    """
+    def needs_change(review: ReportSectionReview) -> bool:
+        return (review.verdict in {"revise_required", "fail"}
+                or any(finding_requires_resolution(row) for row in review.findings))
+
+    attempts = [row for row in iterations if row.action == "document_joint_revise"]
+    legacy_rounds = max(Counter(row.section_id for row in iterations
+        if row.action == "document_revise").values(), default=0)
+    event = attempts[-1] if attempts and attempts[-1].status == "drafted" and not attempts[-1].adopted else None
+    active = coalesce_document_reviews([row for row in reviews if needs_change(row)])
+    for review in reviews:
+        all_findings.extend(review.findings)
+        memory.reviewer_findings.extend(row for row in review.findings if row not in memory.reviewer_findings)
+    while event is not None or (active and legacy_rounds + len(attempts) < config.max_review_iterations):
+        if event is None:
+            # A cross-section opinion can require changing its quoted neighbor,
+            # not just the section that owns the opinion. Keep that identity
+            # once; only current, literally anchored prose adds an edit target.
+            # Saved requests/candidates never acquire targets during recovery.
+            current = {row.section_id: (row.heading, row.draft_markdown) for row in sections}
+            related = []
+            for review in active:
+                for finding in review.findings:
+                    if not finding_requires_resolution(finding) or finding.required_action in {"advisory", "verify"}:
+                        continue
+                    for anchor in finding.draft_quotes:
+                        if anchor.section_id != review.section_id and draft_quote_present(current, anchor.section_id, anchor.quote):
+                            related.append(ReportSectionReview(section_id=anchor.section_id, verdict="revise_required",
+                                revision_instructions=[*review.revision_instructions,
+                                    *([finding.suggested_action] if finding.suggested_action else [])],
+                                notes=f"Joint context for opinion {finding.finding_id!r} owned by {review.section_id!r}; "
+                                      "coordinate the correction without treating quoted context as a separate defect."))
+            active = coalesce_document_reviews([*active, *related])
+            event = ReportIterationRecord(iteration=len(iterations) + 1, section_id="",
+                action="document_joint_revise", status="started", adopted=False,
+                section_reviews=active, summary="Joint correction of frozen section targets.")
+            iterations.append(event)
+            attempts.append(event)
+            checkpoint()
+        # Recover the saved request, not a new inspection of the unchanged old
+        # manuscript; it must not redefine an interrupted candidate's scope.
+        active = event.section_reviews
+        targets = {row.section_id for row in active}
+        originals = {row.section_id: row for row in sections}
+        try:
+            if not event.drafts:
+                previous = next((row for row in reversed(attempts[:-1]) if row.drafts), None)
+                prior_by_id = {row.section_id: row for row in previous.drafts} if previous else {}
+                event.drafts = draft(event, [prior_by_id.get(row.section_id, row) for row in sections])
+                event.status = "drafted"
+                checkpoint()
+            candidate_by_id = {row.section_id: row for row in event.drafts}
+            if (set(candidate_by_id) != targets or len(event.drafts) != len(targets)
+                    or not targets.issubset(originals)
+                    or any(not row.draft_markdown.strip() for row in event.drafts)):
+                raise ValueError("Joint revision must retain each eligible section exactly once with complete prose.")
+            candidate = [candidate_by_id.get(row.section_id, row) for row in sections]
+            prior = [finding for review in active for finding in review.findings
+                     if finding.type not in DOCUMENT_CONTROL_FINDING_TYPES]
+            checks = [row for row in iterations if row.iteration > event.iteration
+                      and row.action in {"document_joint_finding_check", "document_joint_verify"}]
+            checked = next((row for row in checks if row.action == "document_joint_finding_check"), None)
+            if prior and checked is None:
+                rows = inspect(candidate, prior)
+                checked = ReportIterationRecord(iteration=len(iterations) + 1, section_id="",
+                    action="document_joint_finding_check", status="completed",
+                    section_reviews=rows, requested_findings=prior)
+                iterations.append(checked)
+                checkpoint()
+            closed = True
+            if prior:
+                handles = historical_opinion_handles(prior)
+                observed = {(row.section_id, item.finding_id): item
+                    for row in checked.section_reviews for item in row.finding_checks}
+                closed = (set(observed) == set(handles)
+                          and all(item.status != "unresolved" for item in observed.values())
+                          and not any(row.context_requests for row in checked.section_reviews))
+            verified = next((row for row in checks if row.action == "document_joint_verify"), None)
+            if closed and verified is None:
+                rows = inspect(candidate, None)
+                verified = ReportIterationRecord(iteration=len(iterations) + 1, section_id="",
+                    action="document_joint_verify", status="completed", section_reviews=rows)
+                iterations.append(verified)
+                checkpoint()
+            findings = [row for check in (checked, verified) if check
+                        for review in check.section_reviews for row in review.findings]
+            all_findings.extend(findings)
+            memory.reviewer_findings.extend(row for row in findings if row not in memory.reviewer_findings)
+            acceptable = (closed and verified is not None
+                          and not any(needs_change(row) or row.context_requests
+                                      for check in (checked, verified) if check for row in check.section_reviews))
+            if acceptable:
+                sections[:] = candidate
+                event.status, event.adopted = "verified", True
+                resolved = [row for review in active for row in review.findings]
+                memory.reviewer_findings = [row for row in memory.reviewer_findings if row not in resolved]
+                memory.reviewer_findings = [row for row in memory.reviewer_findings
+                    if not (row.type in DOCUMENT_CONTROL_FINDING_TYPES and row.finding_id.startswith("joint-revision-"))]
+                checkpoint()
+                return
+            event.status = "rejected"
+            checkpoint()
+            # A rejected candidate can be corrected in the same remaining
+            # round allowance. Never adopt only the apparently good sections.
+            rejected_reviews = [row for check in (checked, verified) if check for row in check.section_reviews]
+            active = coalesce_document_reviews([*active, *[row for row in rejected_reviews if needs_change(row)]])
+        except (LLMError, ValidationError, ValueError) as exc:
+            event.status = "drafted" if event.drafts else "unavailable"
+            finding = ReviewerFinding(finding_id=f"joint-revision-{event.iteration}-unavailable",
+                type="document_revision_unavailable", severity="major",
+                message=f"Joint correction was not adopted: {exc}",
+                suggested_action="Inspect the preserved candidate and original revision request.")
+            all_findings.append(finding)
+            memory.reviewer_findings.append(finding)
+            checkpoint()
+            return
+        event = None
+    if active:
+        finding = ReviewerFinding(finding_id="joint-revision-unresolved", type="document_revision_unresolved",
+            severity="major", message="Joint correction allowance exhausted; the adopted original remains unchanged.")
+        all_findings.append(finding)
+        memory.reviewer_findings.append(finding)
+        checkpoint()
+
 # Execution/review failures are owned by the controller, not model opinions.
 DOCUMENT_CONTROL_FINDING_TYPES = frozenset({
     "document_review_unavailable", "document_revision_unavailable", "document_revision_unresolved",
@@ -174,12 +326,16 @@ def review_document(
                "markdown": row.draft_markdown,
                "markdown_token_count": len(row.draft_markdown.split())} for row in sections]
     additions = assembly_owned_content or []
-    if sum(len(row["markdown"]) for row in [*drafts, *additions]) > MAX_DOCUMENT_REVIEW_CHARS:
+    references = (delivery_text_observation or {}).get("references") or {}
+    if (sum(len(row["markdown"]) for row in [*drafts, *additions])
+            + len(references.get("markdown", "")) > MAX_DOCUMENT_REVIEW_CHARS):
         raise ValueError("Whole-document review exceeds its bounded source window; no complete review was performed.")
     known = {row.section_id for row in sections}
     # Inspect current prose independently. Prior opinions are supplied only to
     # the separate check, never as extra source facts or an inspection answer.
     prior = historical_findings or []
+    revision_capacity = len(memory.section_plan) if config.draft_scope == "document" else document_revision_limit(memory)
+    correction_allowance = ("joint candidate rounds" if config.draft_scope == "document" else "per-section rounds")
     primary_sources = review_source_evidence(source_evidence or [])
     prior_by_key = historical_opinion_handles(prior)
     if any(row.section_id not in known or row.type in DOCUMENT_CONTROL_FINDING_TYPES for row in prior):
@@ -197,11 +353,15 @@ def review_document(
         "task": "check_historical_findings" if prior else "review_document_coherence",
         "objective": memory.objective if writing_objective is None else writing_objective,
         "document_title": memory.document_plan.title if memory.document_plan else "",
+        # Share the meaning of planning, not its proposed conclusions. An
+        # independent reviewer judges current prose against task and sources.
+        "document_plan": document_plan_context(memory, independent_review=True),
         "document_length_budget": memory.document_plan.length_budget if memory.document_plan else {},
         "edit_scope": report_edit_scope([row["section_id"] for row in drafts]),
         "report_mode": memory.report_mode,
         "template": template.name,
         "criteria": reviewing_template_guidance(template, memory, config),
+        "authored_template_requirements": template.template_markdown if not is_builtin_template(template, config) else "",
         "sections": drafts,
         "assembly_owned_content": additions,
         "delivery_text_observation": dict(delivery_text_observation or {}),
@@ -237,7 +397,7 @@ def review_document(
             *EVIDENCE_QUOTE_RULES,
             "If response_format_correction is supplied, re-evaluate the rejected answer against this schema, the validation error and the current supplied evidence. Preserve requested opinion identities, not a rejected factual conclusion. Its quotation, evidence role or judgement may be wrong. Change status only when supported by current evidence; neither unsupported closure nor preserving an unsupported judgement is a valid correction. The rejected answer is not source evidence or permission to rewrite the report.",
             "Inspect the current supplied drafts and original evidence, not remembered or superseded prose. A historical reviewer statement is an opinion to test, not independent evidence. No omitted historical finding is automatically resolved.",
-            "The original request governs length. document_length_budget is a planner interpretation and known assembly forecast, not semantic verification or proof the final report fits. Section shares are approximate rather than minimums; unresolved references/visual text require checking the completed canonical delivery. Do not discard required evidence to fit a quota.",
+            "The original request governs length. document_length_budget is a planner interpretation and known assembly forecast, not semantic verification or proof the final report fits. A constraint=target or length_check.status=target_only is a soft approximate target, not a hard interval; do not invent tolerance bounds or reject solely for deviation. Still review whether the content and extent satisfy the actual task. Section shares are approximate rather than minimums; unresolved references/visual text require checking the completed canonical delivery. Do not discard required evidence to fit a quota.",
             "When historical_findings_to_check is supplied, return a finding_check for each checked opinion under its supplied target section only. Use resolved when the current draft demonstrably fixes it; not_applicable when its premise is unsupported or no longer applies and the current draft remains appropriately bounded; otherwise unresolved. Give a specific explanation and exact nonempty quotations from the current draft for any closure. Each quotation identifies its own current section_id, which can differ from the opinion target for a cross-section issue; do not move or duplicate the opinion itself to other targets. Missing evidence is not proof that a claim or source does not exist; do not require unverified facts as a replacement for a qualified statement.",
             *([] if prior else [
             "Find contradictions between sections about the same method, setting, result or conclusion.",
@@ -250,7 +410,7 @@ def review_document(
             "Distinguish parsed source passages from model reading notes and abstract-only access. Do not deny a reported result merely because it is absent from an abstract; check the supplied passages. Missing passages are not proof that the paper omits the result.",
             "Cold document checking omits earlier model reading cards but retains their locator and original passage window. A get_paper_brief request can retrieve the recorded card; its notes remain derived interpretations, not primary support. Request original source chunks when the passage window is insufficient, and retain the gap when tools are unavailable.",
             "Recorded bibliography is not independently verified identity or edition information. Check important attribution against original source passages; retain conflicting dates/identifiers and author-list coverage limits instead of inventing metadata.",
-            *([] if prior else ["Return at most one review per supplied section. Retain all consequential findings, even when they affect more than two sections; do not pad findings or omit defects to fit the correction allowance. The editor can modify at most two target sections, prioritizing required and severe corrections; remaining findings stay unresolved."]),
+            *([] if prior else [f"Return at most one review per supplied section. Retain all consequential findings; do not pad or omit defects to fit the allowance. The editor can modify up to {revision_capacity} frozen target sections within its existing {correction_allowance}, prioritizing required corrections; unresolved findings remain visible."]),
         ],
         "output_schema": {"section_reviews": [{
             "section_id": "one of the supplied section ids",
@@ -277,6 +437,7 @@ def review_document(
         view["length_observation"]["known_delivery_markdown_tokens"] = delivery_text_observation.get("markdown_token_count")
         view["length_observation"]["counting_rule"] = delivery_text_observation.get("counting_rule", "unavailable")
         view["length_observation"]["delivery_count_scope"] = delivery_text_observation.get("preview_status", "unavailable")
+        view["length_observation"]["assembly_preview_complete"] = delivery_text_observation.get("preview_status") == "pre_render_text_preview"
     if prior:
         # This role tests recorded allegations, not the old drafting directions.
         # Keep the original objective, full current prose and evidence intact;
@@ -310,9 +471,10 @@ def review_document(
     else:
         view["output_schema"]["section_reviews"][0]["finding_checks"] = []
     base_prompt = json.dumps(view, ensure_ascii=False, separators=(",", ":"))
-    if len(base_prompt) > MAX_DOCUMENT_REVIEW_PROMPT_CHARS:
+    prompt_limit = config.max_document_review_prompt_chars
+    if prompt_limit and len(base_prompt) > prompt_limit:
         raise ValueError("Whole-document review exceeds its bounded evidence window; no complete review was performed.")
-    remaining = MAX_DOCUMENT_REVIEW_PROMPT_CHARS - len(base_prompt) - len(',"evidence_locator":')
+    remaining = prompt_limit - len(base_prompt) - len(',"evidence_locator":') if prompt_limit else 4000
     try:
         locator = review_evidence_locator(view, max_chars=min(4000, max(0, remaining)))
     except ValueError:
@@ -320,7 +482,7 @@ def review_document(
     if len(json.dumps(locator, ensure_ascii=False, separators=(",", ":"))) <= remaining:
         view["evidence_locator"] = locator
     prompt = json.dumps(view, ensure_ascii=False, separators=(",", ":"))
-    if len(prompt) > MAX_DOCUMENT_REVIEW_PROMPT_CHARS:
+    if prompt_limit and len(prompt) > prompt_limit:
         raise ValueError("Whole-document review exceeds its bounded evidence window; no complete review was performed.")
     response = client.ask_json(
         ("Check only the supplied historical opinions against current drafts and evidence. "
@@ -330,7 +492,16 @@ def review_document(
         max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
     )
     try:
-        return _validate_document_reviews(response, sections=sections, prior_by_key=prior_by_key, evidence_view=view)
+        reviews = _validate_document_reviews(response, sections=sections, prior_by_key=prior_by_key, evidence_view=view)
+        if prior_by_key and not any(row.context_requests for row in reviews):
+            checked = {(row.section_id, check.finding_id) for row in reviews for check in row.finding_checks}
+            missing = set(prior_by_key) - checked
+            if missing:
+                raise LLMResponseError(
+                    f"Historical opinion checking omitted requested decisions: {sorted(missing)!r}; "
+                    "return every requested check, using unresolved when it cannot be decided."
+                )
+        return reviews
     except (LLMResponseError, ValidationError) as exc:
         # Retain the parsed answer, not just its error, before the owner stops.
         # Transport/JSON decoding failures have no parsed review to preserve.

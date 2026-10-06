@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from simple_ar.core.artifacts import read_json, read_jsonl, write_json, write_jsonl, write_text
+from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
 from simple_ar.code_task.analysis.locate import locate_code_task_context
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
@@ -68,6 +68,25 @@ class LoadedCodeTaskContextPack:
     snippets: tuple[dict[str, Any], ...]
     selected_files: tuple[str, ...]
 
+    def selected_paths(self, *, max_files: int) -> list[str]:
+        """Retain saved selection order and the established positive file limit."""
+        return list(dict.fromkeys(self.selected_files))[:max(1, max_files)]
+
+    def manifest_reference(self, run_dir: Path) -> dict[str, Any]:
+        """Shared saved-pack reference for planning, work planning and editing."""
+        def relative(path: Path) -> str:
+            try:
+                return path.resolve().relative_to(run_dir.resolve()).as_posix()
+            except ValueError:
+                return str(path)
+
+        budget = self.context_pack.get("budget")
+        return {"path": relative(self.context_pack_path),
+                "prompt_context": relative(self.prompt_context_path),
+                "snippets": relative(self.snippets_path),
+                "selected_files": list(self.selected_files),
+                "budget": budget if isinstance(budget, dict) else {}}
+
 
 def build_code_task_context_pack(
     run_dir: Path,
@@ -78,6 +97,7 @@ def build_code_task_context_pack(
     max_source_chars_per_file: int = DEFAULT_MAX_SOURCE_CHARS_PER_FILE,
     max_total_chars: int = DEFAULT_MAX_TOTAL_CHARS,
     refresh_map: bool = False,
+    preferred_paths: tuple[str, ...] | None = None,
 ) -> CodeTaskContextPackResult:
     """Build a prompt-ready context pack from locate results and workspace files.
 
@@ -91,6 +111,9 @@ def build_code_task_context_pack(
         max_source_chars_per_file: Per-file snippet character budget.
         max_total_chars: Total text budget across all snippets.
         refresh_map: Rebuild repo-map artifacts before locating context.
+        preferred_paths: Current batch targets to read first. By default use
+            existing indexed paths in the saved plan's Files To Modify section.
+            Reading priority does not grant edit permission.
 
     Returns:
         Paths and selected files for the generated context pack.
@@ -134,6 +157,27 @@ def build_code_task_context_pack(
         str(item.get("path")): item for item in repo_map.get("files", [])
         if isinstance(item, dict)
     } if isinstance(repo_map, dict) else {}
+    plan_path = paths.task_dir / "patch_plan.md"
+    preferred = (planned_context_paths(read_text(plan_path), set(known_files))
+                 if preferred_paths is None and plan_path.is_file() else list(preferred_paths or ()))
+    prioritized = [dict(known_files[path], path=path,
+                        reasons=["current planned target; read priority only"])
+                   for path in dict.fromkeys(preferred) if path in known_files]
+    # The plan can identify a file absent from coarse keyword retrieval. Read it
+    # before incidental dependency/environment matches, retaining index roles.
+    locate_data["editable_targets"] = [row for row in prioritized if row.get("access_role") == "editable"] + _object_list(locate_data.get("editable_targets"))
+    locate_data["read_only_evidence"] = [row for row in prioritized if row.get("access_role") != "editable"] + _object_list(locate_data.get("read_only_evidence"))
+    seeds = prioritized or _object_list(locate_data.get("editable_targets"))[:1]
+    seed_paths = {row["path"] for row in seeds}
+    # One-hop indexed imports provide collaborating files that coarse keyword
+    # ranking misses. No traversal, new graph, permissions or extra file budget.
+    locate_data["preferred_context"] = prioritized
+    # Reuse the existing symbol inventory to start a source window at a named
+    # definition, instead of spending it on an unrelated file prefix.
+    locate_data["symbols"] = repo_map.get("symbols", []) if isinstance(repo_map, dict) else []
+    locate_data["import_context"] = [dict(known_files[path], reasons=[f"static local import of {seed['path']}; read priority only"])
+        for seed in seeds for path in known_files[seed["path"]].get("local_import_paths", [])
+        if path in known_files and path not in seed_paths]
     missing = [path for path in required_paths if path not in known_files]
     if missing:
         raise ValueError(f"Required code-task context is absent from the workspace index: {missing}")
@@ -186,6 +230,7 @@ def build_code_task_context_pack(
             for row in snippets
         ],
         "required_read_only_paths": list(dict.fromkeys(required_paths)),
+        "preferred_paths": [row["path"] for row in prioritized],
         "omitted": omitted,
         "artifacts": {
             "selected_snippets": "selected_snippets.jsonl",
@@ -205,6 +250,23 @@ def build_code_task_context_pack(
         locate_results_path=locate.results_path,
         selected_files=tuple(str(row["path"]) for row in snippets),
     )
+
+
+def planned_context_paths(patch_plan: str, known_paths: set[str]) -> list[str]:
+    """Read target references from the canonical saved plan, not its run log.
+
+    Only exact indexed paths in Files To Modify qualify. Task excerpts,
+    validation commands and unknown/outside paths cannot become targets here.
+    Existing plans need no migration or second persisted source of truth.
+    """
+    section = re.search(r"(?mi)^## Files To Modify[ \t]*\r?$", patch_plan)
+    if section is None:
+        return []
+    body = patch_plan[section.end():]
+    end = re.search(r"(?m)^## ", body)
+    body = body[:end.start()] if end else body
+    return list(dict.fromkeys(path for path in re.findall(r"`([^`\r\n]+)`", body)
+                              if path in known_paths))
 
 
 def load_latest_code_task_context_pack(run_dir: Path) -> LoadedCodeTaskContextPack | None:
@@ -253,6 +315,25 @@ def load_latest_code_task_context_pack(run_dir: Path) -> LoadedCodeTaskContextPa
         snippets=snippets,
         selected_files=tuple(_snippet_paths(snippets)),
     )
+
+
+def ensure_code_task_context_pack(
+    run_dir: Path, *, query: str, max_files: int, max_source_chars_per_file: int,
+) -> LoadedCodeTaskContextPack | None:
+    """Share fresh planning retrieval; never refresh an already saved pack.
+
+    Ordinary and staged model planning need the same named definitions, local
+    collaborators and exact offsets before decomposing edits. Offline planning
+    keeps its existing no-retrieval path. This writes only the original pack and
+    manifest references, with the caller's existing file/character allowance.
+    """
+    loaded = load_latest_code_task_context_pack(run_dir)
+    if loaded is None:
+        build_code_task_context_pack(run_dir, query=query, top_k=max(8, max_files * 2),
+            max_files=max_files, max_source_chars_per_file=max_source_chars_per_file,
+            max_total_chars=max_files * max_source_chars_per_file)
+        loaded = load_latest_code_task_context_pack(run_dir)
+    return loaded
 
 
 def render_prompt_context(
@@ -344,7 +425,10 @@ def _collect_snippets(
             _append_detail(omitted, path, "unreadable")
             continue
         limit = min(max_chars_per_file, remaining)
-        snippet_text, truncated = _clip_text(text, limit)
+        start = _named_definition_offset(text, path, str(locate_data.get("query", "")),
+            _object_list(locate_data.get("symbols")))
+        snippet_text = text[start:start + limit]
+        truncated = start > 0 or start + len(snippet_text) < len(text)
         snippets.append(
             {
                 "schema_version": 1,
@@ -355,11 +439,90 @@ def _collect_snippets(
                 "chars": len(snippet_text),
                 "source_chars": len(text),
                 "truncated": truncated,
+                "source_offset": start,
+                "start_line": text.count("\n", 0, start) + 1,
+                "end_line": text.count("\n", 0, start + max(0, len(snippet_text) - 1)) + 1,
+                "has_unread_tail": start + len(snippet_text) < len(text),
                 "text": snippet_text,
             }
         )
         used_chars += len(snippet_text)
     return snippets, omitted
+
+
+def _named_definition_offset(text: str, path: str, query: str, symbols: list[dict[str, Any]]) -> int:
+    """Prefer exact named definitions from the existing map; do not infer intent.
+
+    Qualified names disambiguate methods. A bare name shared by several
+    definitions is not guessed. A stale/invalid line anchor falls back to the
+    historical prefix; the window is reading evidence, not edit permission.
+    """
+    definitions = [row for row in symbols if row.get("path") == path]
+    counts: dict[str, int] = {}
+    for row in definitions:
+        name = str(row.get("name", ""))
+        counts[name] = counts.get(name, 0) + 1
+    candidates = []
+    lines = text.splitlines(keepends=True)
+    for row in definitions:
+        name, qualified = str(row.get("name", "")), str(row.get("qualified_name", ""))
+        choices = [qualified] if qualified and qualified != name else []
+        if name and counts[name] == 1:
+            choices.append(name)
+        line = row.get("line_start")
+        if type(line) is not int or not 1 <= line <= len(lines):
+            continue
+        if not re.match(rf"\s*(?:async\s+def|def|class)\s+{re.escape(name)}\b", lines[line - 1]):
+            continue
+        for choice in choices:
+            hit = re.search(rf"(?<!\w){re.escape(choice)}(?!\w)", query, flags=re.IGNORECASE)
+            if hit:
+                candidates.append((hit.start(), -len(choice), line))
+    return sum(len(line) for line in lines[:min(candidates)[2] - 1]) if candidates else 0
+
+
+def clip_source_snippet(row: dict[str, Any], *, max_chars: int) -> dict[str, Any]:
+    """Preserve exact source coordinates through planning/editing projections.
+
+    Text markers are presentation, not source characters. Never insert them
+    into a window that later supplies continuation offsets or exact edits.
+    Legacy prefix windows have offset zero; no migration or new persisted state.
+    """
+    text = row["text"][:max_chars]
+    offset = row.get("source_offset", 0)
+    source_chars = row.get("source_chars", offset + len(row["text"]))
+    result = {**row, "text": text, "source_offset": offset, "source_chars": source_chars,
+        "truncated": bool(row.get("truncated")) or len(text) < len(row["text"]),
+        "has_unread_tail": offset + len(text) < source_chars}
+    if type(row.get("start_line")) is int:
+        result["end_line"] = row["start_line"] + text[:max(0, len(text) - 1)].count("\n")
+    return result
+
+
+def read_source_snippets(
+    workspace_dir: Path, selected_files: list[str], *, max_chars_per_file: int,
+    editable_files: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Read bounded exact prefixes; the caller owns edit authorization.
+
+    This is the index-selection fallback for planning and editing. Use the
+    same coordinates as saved context packs, not presentation markers in code.
+    """
+    snippets: list[dict[str, Any]] = []
+    for rel_path in selected_files:
+        path = workspace_file(workspace_dir, rel_path)
+        if path is None or not path.is_file() or path.name.startswith(".env"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        snippets.append(clip_source_snippet(
+            {"path": rel_path, "text": text, "source_chars": len(text), "start_line": 1,
+             "access_role": "editable" if editable_files is None or rel_path in editable_files else "read_only"},
+            max_chars=max(200, max_chars_per_file),
+        ))
+    return snippets
 
 
 def _ordered_candidates(
@@ -370,6 +533,8 @@ def _ordered_candidates(
     combined: list[dict[str, Any]] = []
     combined.extend(editable[:1])
     combined.extend(required_candidates)
+    combined.extend(_object_list(locate_data.get("preferred_context")))
+    combined.extend(_object_list(locate_data.get("import_context")))
     combined.extend(editable[1:])
     combined.extend(evidence)
     return combined
@@ -395,6 +560,10 @@ def _snippet_manifest_row(row: dict[str, Any]) -> dict[str, Any]:
         "chars": row.get("chars"),
         "source_chars": row.get("source_chars"),
         "truncated": row.get("truncated"),
+        "source_offset": row.get("source_offset", 0),
+        "start_line": row.get("start_line"),
+        "end_line": row.get("end_line"),
+        "has_unread_tail": row.get("has_unread_tail"),
         "reasons": row.get("reasons", []),
     }
 
@@ -493,14 +662,6 @@ def _append_detail(omitted: dict[str, Any], path: str, reason: str) -> None:
         details = []
         omitted["details"] = details
     details.append({"path": path, "reason": reason})
-
-
-def _clip_text(text: str, max_chars: int) -> tuple[str, bool]:
-    if len(text) <= max_chars:
-        return text, False
-    if max_chars <= 20:
-        return text[:max_chars], True
-    return text[: max_chars - 18].rstrip() + "\n... [truncated]\n", True
 
 
 def _object_list(value: object) -> list[dict[str, Any]]:

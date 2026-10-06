@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -94,9 +94,19 @@ def bibliographic_details(paper: Paper) -> dict[str, Any]:
             year = published[:4]
         except ValueError:
             issues.append("Recorded publication date is invalid; publication year was not inferred.")
+    else:
+        # Unambiguous written-month dates are common in supplied publications.
+        # Parse a complete calendar date, not an arbitrary four-digit substring
+        # or an ambiguous numeric day/month order. Preserve the recorded text.
+        for date_format in ("%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y"):
+            try:
+                year = f"{datetime.strptime(published, date_format).year:04d}"
+                break
+            except ValueError:
+                continue
     authors = [name.strip() for name in paper.authors if name.strip()]
     url = paper.url.strip()
-    public_url = url if paper.source != "local_files" and url.lower().startswith(("https://", "http://")) else ""
+    public_url = url if url.lower().startswith(("https://", "http://")) else ""
     doi = _doi_identifier(paper.doi or "")
     if paper.doi and not doi:
         issues.append("Recorded DOI format is unresolved; no DOI was inferred.")

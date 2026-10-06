@@ -12,14 +12,15 @@ import re
 
 from simple_ar.research.contracts import CLAIM_SCOPE_RULES
 from simple_ar.report.execution_evidence import report_execution_evidence
-from simple_ar.report.document_plan import LENGTH_REQUEST_RULE, LENGTH_REQUEST_SCHEMA, check_document_length, reserve_document_words, supplied_figure_sources, validate_length_request
+from simple_ar.report.document_plan import ARGUMENT_PLAN_SCHEMA, ARGUMENT_PLANNING_RULES, LENGTH_REQUEST_RULE, LENGTH_REQUEST_SCHEMA, check_document_length, manuscript_body_tokens, reserve_document_words, supplied_figure_sources, validate_length_request
 from simple_ar.report.data_delivery import DELIVERY_RULES, attach_delivery_block, supplied_data_delivery
 
 from simple_ar.report.schema import (
     ClaimEvidenceRecord, ReportContext, ReportDocumentPlan, ReportIterationRecord, ReportMemory, ReportRuntimeConfig, ReportSectionDraft,
     ReportSectionPlan, ReportSectionReview,
-    ReportToolResult, SourceHandle, finding_requires_resolution,
+    ReportTemplateBundle, ReportToolResult, SourceHandle, finding_requires_resolution,
 )
+from simple_ar.report.templates import BUILTIN_TEMPLATE_NAMES, planning_template_guidance
 
 
 DERIVED_CONTEXT_STATUS = {
@@ -60,7 +61,7 @@ def report_edit_scope(section_ids: Sequence[str]) -> dict[str, Any]:
         "eligible_section_ids": list(section_ids),
         "writer_call_unit": "One selected section's model-authored body, display heading and supported metadata only",
         "read_only_components": ["other adopted section bodies in this Writer call", "frozen document title and plan",
-            "registered source data, measurements and execution records", "assembly-owned captions, tables, links and appendix"],
+            "registered source data, measurements and execution records", "assembly-owned references, citation numbering, captions, tables, links and appendix"],
         "unavailable_remedy": "An assembly/input defect stays unresolved for its owner; a section Writer cannot fix it by claiming to change or omit protected text. Do not demand that remedy as this candidate's acceptance condition.",
     }
 
@@ -163,7 +164,9 @@ def review_source_evidence(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def evidence_outline_context(
-    context: ReportContext, memory: ReportMemory, config: ReportRuntimeConfig, *, retry: bool = False,
+    context: ReportContext, memory: ReportMemory, config: ReportRuntimeConfig, *, retry: bool = False, retry_error: str = "",
+    rejected_response: Mapping[str, Any] | None = None,
+    template: ReportTemplateBundle | None = None,
 ) -> dict[str, Any]:
     """Project existing inputs for organization without declaring new facts.
 
@@ -178,6 +181,9 @@ def evidence_outline_context(
     metric_rows = metrics["rows"]
     handles = memory.source_handles
     claims = memory.claims_evidence_matrix
+    adaptive_builtin = (template is not None and template.name in BUILTIN_TEMPLATE_NAMES
+        and config.template in {"", "auto", *BUILTIN_TEMPLATE_NAMES}
+        and config.outline_strategy != "template")
     payload = {
         "task": "plan_evidence_organized_document", "topic": context.topic,
         "report_mode": context.report_mode, "template": memory.template,
@@ -187,12 +193,15 @@ def evidence_outline_context(
         "synthesis": excerpt(context.synthesis_markdown, 3000),
         "synthesis_status": dict(DERIVED_CONTEXT_STATUS),
         "evidence_summary": excerpt(context.evidence_summary, 3000),
+        "source_comparisons": context.source_comparisons,
+        "comparison_status": dict(DERIVED_CONTEXT_STATUS),
         "template_responsibilities": [
             {"heading": section.heading, "goal": section.goal, "evidence_handles": section.evidence_handles,
-             "target_words": section.target_words} for section in memory.section_plan
+             "target_words": section.target_words} for section in memory.section_plan if not adaptive_builtin
         ],
         "sources": [_prompt_handle_view(handle) for handle in handles[:40]],
         "sources_omitted": max(0, len(handles) - 40),
+        "evidence_handle_choices": [handle.handle for handle in handles[:40]],
         "supplied_figures": supplied_figure_sources(context),
         "assembly_owned_content": supplied_data_delivery(context, config=config,
             plan=memory.document_plan, section_ids=[row.section_id for row in memory.section_plan])
@@ -210,12 +219,14 @@ def evidence_outline_context(
         "delivery_constraints": {"max_cited_sources": config.max_cited_sources or None,
                                  "max_section_sources": config.max_section_sources or None},
         "planning_rules": [
+            *ARGUMENT_PLANNING_RULES,
             *DELIVERY_RULES,
+            "Copy evidence_handles from evidence_handle_choices (the sources' top-level handle). Passage chunk_id/document_id and prose citation keys locate evidence inside a source; they are not replacement source handles. Do not construct new identifiers by concatenating them.",
             "Use the requested genre and actual evidence to define concise sections with distinct responsibilities. Template headings are starting points, not compulsory new claims.",
             "Distinguish a research paper draft, reproduction report, analysis report and supplied-material account; do not invent novelty, theorems, experiments, baselines or ablations to resemble a reference paper.",
             "Name the question, what the inputs establish, how comparisons were made, findings and limitations. Put detailed numeric comparisons in one responsible section; others interpret rather than repeat them.",
             "Source summaries and input claims are recorded assertions, not independent verification. A source handle or completed invocation is not proof of a method claim.",
-            "No new experiment or source retrieval is authorized. Unknowns and omitted material remain unknown; scope results to recorded conditions, and distinguish reported paper values from local observations.",
+            "No new experiment or external source retrieval is authorized. Registered read-only tools, when offered, can inspect retained inputs. Unknowns and omitted material remain unknown; scope results to recorded conditions, and distinguish reported paper values from local observations.",
             "Keep goals and headings reader-facing, not pipeline steps. Give each section only supplied evidence handles; no minimum citations or word quota beyond the user's existing configuration.",
             "If the request specifies an overall length, allocate target_words across sections within that total, not the same total to every section. Use fewer purposeful sections for short reports. Do not pad to template section lengths or repeat scope disclaimers to fill space.",
             LENGTH_REQUEST_RULE,
@@ -224,16 +235,21 @@ def evidence_outline_context(
             "Return 2-12 sections as needed. References are appended separately. Do not return a References section.",
         ],
         "output_schema": {"title": "Concise evidence-scoped title",
+                          "argument_plan": ARGUMENT_PLAN_SCHEMA,
                           "length_request": dict(LENGTH_REQUEST_SCHEMA),
-                          "sections": [{"heading": "Short heading", "goal": "Purpose, claim boundaries and evidence to use",
+                          "sections": [{"section_key": "Distinct short literal key reused by arguments and visuals", "heading": "Short heading", "goal": "Purpose, claim boundaries and evidence to use",
                                          "evidence_handles": ["exact supplied handle"], "target_words": 0,
                                          "subsections": ["optional purposeful subsection"]}],
-                          "visual_intents": [{"kind": "figure", "view": "supplied-data", "section_heading": "exact heading from your sections",
+                          "visual_intents": [{"kind": "figure", "view": "supplied-data", "section_key": "exact key from your sections",
                               "title": "What the supplied data figure compares", "purpose": "Why this figure belongs here",
                               "evidence_handles": ["one exact supplied_figures handle"]}]},
     }
+    if template is not None:
+        payload["template_guidance"] = planning_template_guidance(template, config)
     if retry:
-        payload["retry_instruction"] = "Correct the invalid structure or source pointers. Use only supplied handles and valid sections; do not add evidence to make the plan pass."
+        payload["validation_error"] = retry_error
+        payload["rejected_response"] = rejected_response
+        payload["retry_instruction"] = "Correct this rejected proposal against the same inputs. Check every section owner, evidence handle and metric_id, including pointers not named in the first validation error. Copy metric_id from recorded_metrics, not its display name. Return the complete corrected proposal; do not add evidence or remove the substantive argument to make validation pass."
     return payload
 
 
@@ -261,7 +277,8 @@ def adopted_memory_notes(
     Pending/rejected drafts establish provenance, never current authority.
     No stored input, draft or diagnostic history is mutated or certified here.
     """
-    drafts = [*sections, *(row.draft for row in iterations if row.draft is not None)]
+    drafts = [*sections, *(row.draft for row in iterations if row.draft is not None),
+              *(draft for row in iterations for draft in row.drafts)]
     if pending_draft is not None:
         drafts.append(pending_draft)
     result = {}
@@ -278,7 +295,7 @@ def delivery_text_observation(
     context: ReportContext, memory: ReportMemory, sections: Sequence[ReportSectionDraft],
     config: ReportRuntimeConfig, *, additions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Count canonical reader-facing text, not only model-written sections.
+    """Observe canonical delivery length and references from the same preview.
 
     No second renderer or saved state. Missing package fields or invalid citation
     inputs make the count unknown; omission is never interpreted as zero prose.
@@ -293,6 +310,7 @@ def delivery_text_observation(
         "scope": "current supplied sections only; future drafts, renderer-generated figures and attachment rechecks are not certified",
         "preview_status": "unavailable", "markdown_token_count": None,
         "rendering_performed": False,
+        "references": None,
         "pending_owner_sections": [],
         "pending_draft_sections": [row.section_id for row in (memory.document_plan.sections
             if memory.document_plan and memory.document_plan.sections else memory.section_plan)
@@ -324,10 +342,22 @@ def delivery_text_observation(
     except CitationError as exc:
         result["unavailable_reason"] = str(exc)
     else:
+        budget = memory.document_plan.length_budget if memory.document_plan else {}
+        body_count = manuscript_body_tokens(preview.report_body_markdown)
+        delivery_count = len(preview.report_markdown.split())
+        selected_count = body_count if budget.get("scope") == "manuscript_body" else delivery_count
+        if budget.get("scope") == "manuscript_body":
+            result["counting_rule"] = "whitespace-separated tokens in canonical body Markdown, including tables, captions and body attachments, excluding ATX title/section headings and appended bibliography; not a language-independent word-limit verifier"
         result.update(preview_status="pre_render_text_preview",
-                      markdown_token_count=len(preview.report_markdown.split()),
-                      length_check=check_document_length(memory.document_plan.length_budget if memory.document_plan else {},
-                          objective=report_objective(context, memory), token_count=len(preview.report_markdown.split())),
+                      markdown_token_count=selected_count,
+                      full_delivery_markdown_token_count=delivery_count,
+                      body_markdown_token_count=body_count,
+                      references={"markdown": preview.references_markdown,
+                          "citation_numbers": dict(preview.citation_numbers),
+                          "model_keys": {key: paper_id for key, paper_id in context.citation_key_map.items()
+                                         if paper_id in preview.citation_numbers}},
+                      length_check=check_document_length(budget,
+                          objective=report_objective(context, memory), token_count=selected_count),
                       removed_citations=list(preview.removed_citations))
     return result
 
@@ -349,16 +379,16 @@ def budget_document_plan(
     skeleton = [ReportSectionDraft(section_id=row.section_id, heading=row.heading,
         draft_markdown="SARPlanningPlaceholder") for row in plan.sections]
     observed = delivery_text_observation(context.model_copy(update={"papers": []}),
-        memory.model_copy(update={"document_plan": plan}), skeleton, config)
+        memory.model_copy(update={"document_plan": plan.model_copy(update={"length_budget": validated})}), skeleton, config)
     count = observed.get("markdown_token_count")
     forecast = {
         "status": "known_assembly_forecast" if observed["preview_status"] == "pre_render_text_preview" else "unavailable",
         "known_fixed_markdown_tokens": count - len(skeleton) if type(count) is int else None,
         "counting_rule": observed["counting_rule"],
         "rendering_performed": False,
-        "unresolved_future_components": (["cited_reference_selection_and_display"] if context.papers else [])
+        "unresolved_future_components": (["cited_reference_selection_and_display"] if context.papers and validated["scope"] == "whole_document" else [])
             + (["new_model_authored_visuals_and_renderer_text"] if any(intent.view != "supplied-data" for intent in plan.visual_intents) else []),
-        "scope_note": "Known title, frozen headings, registered data attachments and experiment appendix only; no future model prose or cited-reference selection. Whitespace tokens are a planning aid, not a language-independent word verifier.",
+        "scope_note": "Known assembly text within the task's selected count scope only; no future model prose. Whitespace tokens are a planning aid, not a language-independent word verifier.",
     }
     return reserve_document_words(plan, request=validated, forecast=forecast)
 
@@ -368,6 +398,7 @@ def narrative_context(
     adopted: Sequence[ReportSectionDraft],
     *, context: ReportContext | None = None, config: ReportRuntimeConfig | None = None,
     current_draft: ReportSectionDraft | None = None,
+    independent_review: bool = False,
 ) -> dict:
     """Expose section responsibilities and actual preceding prose with coverage.
 
@@ -381,6 +412,21 @@ def narrative_context(
     # Normal plans have at most twelve sections. Bound custom templates too;
     # favor recent drafts rather than allowing early provenance guards to crowd out prose.
     visible = others[-12:]
+    # Reuse the original 12*1000 prose window as one document allowance.
+    # Short drafts must not lose their middle just because each section used
+    # to get an independent 1000-character cap. Distribute spare space fairly
+    # over longer sections; saved text and coverage remain authoritative.
+    lengths = [len(row.draft_markdown) for row in visible]
+    allowances = [0] * len(visible)
+    remaining = 12_000
+    active = list(range(len(visible)))
+    while active and remaining:
+        share = max(1, remaining // len(active))
+        for index in active:
+            added = min(share, lengths[index] - allowances[index], remaining)
+            allowances[index] += added
+            remaining -= added
+        active = [index for index in active if allowances[index] < lengths[index]]
     view = {
         "edit_scope": report_edit_scope([section.section_id]),
         "planning_status": dict(PLANNING_CONTEXT_STATUS),
@@ -400,19 +446,18 @@ def narrative_context(
             {
                 "section_id": row.section_id, "heading": row.heading,
                 "purpose": plan_by_id[row.section_id].goal if row.section_id in plan_by_id else "",
-                **_excerpt(row.draft_markdown),
+                **_excerpt(row.draft_markdown, allowance),
                 "table_excerpt": _table_excerpt(row.draft_markdown),
                 "declared_claims": [claim.model_dump(mode="json") for claim in row.claims[:4]],
                 "declared_claims_omitted": max(0, len(row.claims) - 4),
                 "support_status": "not_independently_verified_by_this_projection",
             }
-            for row in visible
+            for row, allowance in zip(visible, allowances)
         ],
         "adopted_sections_omitted": max(0, len(others) - len(visible)),
         "writing_rules": [
             *CLAIM_SCOPE_RULES,
             REVISION_PREMISE_RULE,
-            "Section purposes and the frozen document plan organize the work; they are not observed claims or source evidence. Follow the original task and supported sources when a planning interpretation overreaches. Do not add an unsupported assertion merely to fulfill a named item in the plan.",
             "Address this section's purpose; use other sections' responsibilities to give each detailed fact a home.",
             "Use adopted prose to avoid contradictory or duplicated explanations; excerpts are not primary-source evidence.",
             "Abstract and conclusion synthesize the actual body, including negative results and limitations; do not add findings.",
@@ -423,6 +468,8 @@ def narrative_context(
         ],
     }
     if context is not None and config is not None:
+        view["source_comparisons"] = context.source_comparisons
+        view["comparison_status"] = dict(DERIVED_CONTEXT_STATUS)
         additions = supplied_data_delivery(context, config=config, plan=memory.document_plan,
             section_ids=[row.section_id for row in plans])
         view["assembly_owned_content"] = additions + _experiment_delivery_view(context, config)
@@ -434,11 +481,25 @@ def narrative_context(
         view["length_observation"]["assembly_preview_complete"] = all(
             row.get("preview_status") != "unavailable" for row in additions)
         view["writing_rules"].extend(DELIVERY_RULES)
-    if memory.document_plan is not None:
+    if independent_review:
+        # Review current prose against task, criteria and source passages, not
+        # the proposed drafting answer. Retain section identities and actual
+        # neighboring prose/coverage; no saved plan or draft is modified.
+        for key in ("section_purpose", "writing_rules", "source_comparisons", "comparison_status"):
+            view.pop(key, None)
+        for row in view["section_responsibilities"]:
+            row.pop("purpose")
+        for row in view["adopted_sections"]:
+            row.pop("purpose")
+            row.pop("declared_claims")
+            row.pop("declared_claims_omitted")
+    elif memory.document_plan is not None:
         # All section prompts already include the frozen document_plan. Do not
         # repeat every long goal here (and again for each adopted section).
         # Unplanned/legacy callers retain the self-contained responsibility view.
         view["responsibilities_source"] = "document_plan.sections"
+        view["argument_plan_source"] = "document_plan.argument_plan"
+        view["argument_section_id"] = section.section_id
         view.pop("section_responsibilities")
         view.pop("responsibilities_omitted")
         for row in view["adopted_sections"]:
@@ -472,8 +533,9 @@ def _excerpt(text: str, limit: int = 1000) -> dict:
         windows = [{"start": 0, "end": len(text), "text": text}]
     else:
         half = limit // 2
+        tail = limit - half
         windows = [{"start": 0, "end": half, "text": text[:half]},
-                   {"start": len(text) - half, "end": len(text), "text": text[-half:]}]
+                   {"start": len(text) - tail, "end": len(text), "text": text[-tail:]}]
     return {"prose_windows": windows, "position_unit": "unicode_characters",
             "prose_characters": len(text),
             "prose_characters_omitted": len(text) - sum(len(row["text"]) for row in windows)}
@@ -600,9 +662,51 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
     compact: dict[str, Any] = {}
     analyses = results.get("supplied_analyses")
     if isinstance(analyses, list):
+        from simple_ar.result_analysis.table import table_input_handling
         compact["supplied_analyses"] = [{"document_id": row["document_id"], "evidence_role": row["evidence_role"],
             "spec": row["spec"], "records": row["records"][:12], "records_truncated": len(row["records"]) > 12}
             for row in analyses[:6]]
+        for projected, original in zip(compact["supplied_analyses"], analyses):
+            handling = table_input_handling(original)
+            if isinstance(handling["observed_use"], list):
+                handling["observed_use_omitted"] = max(0, len(handling["observed_use"]) - 24)
+                handling["observed_use"] = handling["observed_use"][:24]
+            projected["input_handling"] = handling
+            figures = original.get("figures", [])
+            projected["figures"] = figures[:12]
+            projected["figures_omitted"] = max(0, len(figures) - 12)
+            if "row_count" in original:
+                projected["input_row_count"] = original["row_count"]
+            projected["records_scope"] = (
+                "Computed group/column summaries, not individual raw rows. The imported analysis package "
+                "retains its copied input separately; an uncomputed joint relationship is not evidence that row-level data are unavailable."
+                if original["spec"].get("mode", "observations") == "observations" else
+                "Supplied values/coordinates without inferred aggregation. Row meanings remain user-declared; "
+                "the short records preview is not the complete input or proof of independence."
+            )
+            if original.get("coordinate_summaries"):
+                projected["coordinate_summaries"] = original["coordinate_summaries"][:24]
+                projected["coordinate_summaries_omitted"] = max(0, len(original["coordinate_summaries"]) - 24)
+                projected["coordinate_summary_scope"] = (
+                    "Exact count and marginal five-number summaries over all retained rows with both coordinates, "
+                    "per declared group/column; quantiles interpolate at (n-1)*p. Raw points are not aggregated or replaced. "
+                    "Separate axis distributions alone do not establish within-group association or joint overlap shape. "
+                    "If an explicit association field is present, it reports descriptive complete-pair Pearson r for this group/column, "
+                    "not candidate-minus-baseline differences, significance, causality, population inference or inspected-image evidence. "
+                    "The short records preview is not representative of every group; use summaries or read full records."
+                )
+            if original.get("observation_summaries"):
+                projected["observation_summaries"] = original["observation_summaries"][:24]
+                projected["observation_summaries_omitted"] = max(0, len(original["observation_summaries"]) - 24)
+                projected["observation_summary_scope"] = (
+                    "Empirical marginal distributions of every nonmissing value per group/column; "
+                    "quartiles interpolate at (n-1)*p. Not confidence intervals, paired differences, "
+                    "joint relationships or population inference. The short records preview is not representative of every group."
+                )
+            if original.get("paired_comparisons"):
+                projected["paired_comparisons"] = [
+                    {key: value for key, value in pair.items() if key != "differences"}
+                    for pair in original["paired_comparisons"]]
         compact["supplied_analyses_truncated"] = len(analyses) > 6
     implementation = _mapping(results.get("implementation"))
     if implementation is not None:
@@ -784,17 +888,28 @@ def _compact_execution_context(value: object) -> str:
     return narrative[:5000]
 
 
-def _compact_document_plan(memory: ReportMemory) -> dict[str, Any]:
-    """Expose the frozen plan without reintroducing parallel planning state."""
+def document_plan_context(memory: ReportMemory, *, independent_review: bool = False) -> dict[str, Any]:
+    """One organizational plan view for every writing/review scope; not facts."""
     plan = memory.document_plan
-    if plan is None:
-        return {}
+    view = {
+        "planning_status": dict(PLANNING_CONTEXT_STATUS),
+        "interpretation_rules": [
+            "Section purposes and the frozen document plan organize the work; they are not observed claims or source evidence. Follow the original task and supported sources when a planning interpretation overreaches. Do not add an unsupported assertion merely to fulfill a named item in the plan.",
+            "Develop the planned argument using source passages and recorded results: explain what the comparison means and how it advances the reader's question. Correct or omit a planned point if its premise is unsupported; a frozen plan is not scientific truth. Section identities, title, delivery scope and edit ownership remain fixed, not the truth of a proposed explanation.",
+        ],
+    }
+    if plan is None or independent_review:
+        # Reviewers judge current prose without the proposed drafting answer.
+        # Legacy callers have no resolved plan; do not invent one for them.
+        return view
     return {
+        **view,
         "schema_version": plan.schema_version,
         "status": plan.status,
         "title": plan.title,
         "target_words": plan.target_words,
         "length_budget": plan.length_budget,
+        "argument_plan": plan.argument_plan.model_dump(mode="json") if plan.argument_plan else None,
         "sections": [
             {
                 "section_id": section.section_id,
@@ -878,6 +993,15 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
     if isinstance(title_source, dict):
         data["metadata"]["title_source"] = {
             key: str(title_source.get(key) or "")[:240] for key in ("section_id", "quote", "scope")
+        }
+    origins = source_metadata.get("bibliographic_sources")
+    if isinstance(origins, dict):
+        data["metadata"]["bibliographic_sources"] = {
+            field: {"section_id": str(origin.get("section_id") or ""),
+                    "quote": str(origin.get("quote") or "")[:480],
+                    "quote_truncated": len(str(origin.get("quote") or "")) > 480,
+                    "scope": str(origin.get("scope") or "")}
+            for field, origin in origins.items() if isinstance(origin, dict)
         }
     bibliography = source_metadata.get("bibliography")
     if isinstance(bibliography, dict):
@@ -966,6 +1090,7 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
         data["metadata"]["evidence_passages"] = [
             {"chunk_id": str(row.get("chunk_id", "")), "text": str(row.get("text", ""))[:1400],
              "character_start": row.get("character_start"), "character_end": row.get("character_end"),
+             "total_characters": row.get("total_characters"), "selection": row.get("selection", ""),
              "truncated": bool(row.get("truncated")) or len(str(row.get("text", ""))) > 1400}
             for row in passages[:6] if isinstance(row, dict)
         ]

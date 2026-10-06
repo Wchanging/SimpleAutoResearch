@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ReportModel(BaseModel):
@@ -32,8 +32,8 @@ class ReportFigureConfig(ReportModel):
     """
 
     enabled: bool = True
-    # Zero selects a compact set of representative paired metrics; a positive
-    # value is an explicit expert limit.
+    # Zero selects supported planned diagrams or representative paired metrics;
+    # a positive value is an explicit expert limit, not a target to fill.
     max_figures: int = 0
     format: Literal["svg"] = "svg"
     mode: Literal["auto", "off"] = "auto"
@@ -81,6 +81,17 @@ class ReportRuntimeConfig(ReportModel):
     max_review_iterations: int = 2
     # Optional until cross-document editing is validated on real long-form work.
     document_review: bool = False
+    # Default preserves existing section-first tasks. Document-first writing
+    # adopts validated drafts, then uses the same whole-document editor; it
+    # never represents those drafts as individually reviewed.
+    review_scope: Literal["section", "document"] = "section"
+    # Explicit joint drafting shares one article context, but commits the same
+    # section objects and leaves independent inspection to the existing editor.
+    draft_scope: Literal["section", "document"] = "section"
+    # Evidence already has bounded retrieval windows. Do not impose a second
+    # hidden character cap on the assembled request: the client and session
+    # token ledger own capacity/cost. Experts may opt into a smaller window.
+    max_document_review_prompt_chars: int = Field(default=0, ge=0)
     # Zero means that the report writer/reviewer does not add a per-call
     # provider output cap. The provider or session token budget still bounds
     # the run when configured. A positive value is an explicit expert limit.
@@ -101,6 +112,14 @@ class ReportRuntimeConfig(ReportModel):
     figures: ReportFigureConfig = Field(default_factory=ReportFigureConfig)
     longform: ReportLongformConfig = Field(default_factory=ReportLongformConfig)
     audit: ReportAuditConfig = Field(default_factory=ReportAuditConfig)
+
+    @model_validator(mode="after")
+    def require_document_review(self) -> ReportRuntimeConfig:
+        if self.review_scope == "document" and not self.document_review:
+            raise ValueError('review_scope="document" requires document_review=true.')
+        if self.draft_scope == "document" and (self.review_scope != "document" or self.source_strategy != "full"):
+            raise ValueError('draft_scope="document" requires review_scope="document" and source_strategy="full".')
+        return self
 
 
 class ReportTemplateBundle(ReportModel):
@@ -192,6 +211,30 @@ class ReportVisualIntent(ReportModel):
     columns: list[str] = Field(default_factory=list)
 
 
+class ReportArgumentPoint(ReportModel):
+    """One proposed reasoning step, not a certified source claim."""
+
+    claim: str
+    section_id: str
+    evidence_handles: list[str] = Field(default_factory=list)
+    metric_ids: list[str] = Field(default_factory=list)
+    reasoning: str = ""
+    qualifications: list[str] = Field(default_factory=list)
+    counterevidence_handles: list[str] = Field(default_factory=list)
+
+
+class ReportArgumentPlan(ReportModel):
+    """Reader-facing argument owned by the existing frozen document plan."""
+
+    question: str
+    answer: str
+    document_kind: str = ""
+    points: list[ReportArgumentPoint] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    scope_section_id: str = ""
+    technical_details_placement: Literal["appendix", "body", "linked_artifacts"] = "appendix"
+
+
 class ReportDocumentPlan(ReportModel):
     """Frozen, single-source plan consumed by the report-stage agents."""
 
@@ -203,6 +246,7 @@ class ReportDocumentPlan(ReportModel):
     visual_budget: dict[str, int] = Field(default_factory=dict)
     visual_intents: list[ReportVisualIntent] = Field(default_factory=list)
     length_budget: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda value: not value)
+    argument_plan: ReportArgumentPlan | None = Field(default=None, exclude_if=lambda value: value is None)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -275,6 +319,7 @@ class ReportContext(ReportModel):
     synthesis_markdown: str = ""
     hypothesis_markdown: str = ""
     evidence_summary: str = ""
+    source_comparisons: list[dict[str, Any]] = Field(default_factory=list)
     execution_context: str = ""
     search_meta: dict[str, Any] = Field(default_factory=dict)
     experiment_plan: dict[str, Any] = Field(default_factory=dict)
@@ -437,6 +482,12 @@ class ReportIterationRecord(ReportModel):
     # Rejected structured judgments remain diagnostic evidence, never findings.
     rejected_review: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda review: not review)
     requested_findings: list[ReviewerFinding] = Field(default_factory=list, exclude_if=lambda findings: not findings)
+    # Joint corrections use the same trace/checkpoint, but retain a complete
+    # candidate and its original per-section requests instead of mixed adoption.
+    drafts: list[ReportSectionDraft] = Field(default_factory=list, exclude_if=lambda drafts: not drafts)
+    section_reviews: list[ReportSectionReview] = Field(default_factory=list, exclude_if=lambda reviews: not reviews)
+    # Writer-initiated reads use the same trace and gateway allowance.
+    tool_requests: list[ReportToolCall] = Field(default_factory=list, exclude_if=lambda requests: not requests)
 
 
 class AgentReportResult(ReportModel):

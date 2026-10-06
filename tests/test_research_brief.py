@@ -11,7 +11,6 @@ from simple_ar.core import (
 from simple_ar.core.capabilities import CapabilityContext
 from simple_ar.research.brief import (
     ResearchBriefRequest,
-    ResearchBriefResult,
     build_research_brief,
 )
 from simple_ar.research.contracts import DocumentRecord, PaperCard, TextChunk

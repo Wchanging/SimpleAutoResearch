@@ -1,4 +1,4 @@
-﻿# 开发指南
+# 开发指南
 
 [English version](DEVELOPMENT.md)
 
@@ -6,20 +6,45 @@
 
 ## 项目形态
 
-控制台脚本与 Python 调用统一使用 `simple_ar.cli.main:main`，即
-`from simple_ar.cli.main import main`。不要在包上同名转发函数，导入子模块会覆盖该属性。
-入口改变后先用 `uv sync --inexact` 重新安装，再使用 `--no-sync`；保留共享环境额外科学包。
-
-SimpleAutoResearch 现在以文件产物和持久化 session state 为中心：
+SimpleAutoResearch 以文件产物和持久化 session state 为中心：
 
 - capability 读取和写入具体 artifact；
-- session state 通过 `session_manifest.json`、attempt 和 `ArtifactRef` handoff 可见；
-- 测试验证 contract/artifact，而不是依赖隐藏内存状态；
-- 高风险代码修改发生在隔离 editable workspace 中，通常是受保护 copy，也可以是 detached git worktree，或实验性 sparse copy。
+- `session_manifest.json`、attempt 和 `ArtifactRef` 展示保存状态与交接；
+- 测试检查契约和产物，不依赖隐藏的内存状态；
+- 代码修改发生在隔离工作区，不直接修改原项目。
 
-这样项目更容易学习、调试和重构。
+主要职责分布：
+
+```text
+src/simple_ar/
+  cli/              用户输入、配置与命令分发
+  app/              任务协调与下一步判断
+  core/             会话、attempt、产物、预算与进程
+  research/         文档、阅读、综合、设计与分析契约
+  code_task/        项目调查、受限修改、验证与修复
+  result_analysis/  确定性表格分析与数据图
+  report/           写作、审阅、装配、书目、审计与导出
+  integrations/     模型与服务适配
+  agent_backends/   有范围的交接与后端接口
+```
+
+控制台入口使用 `simple_ar.cli.main:main`，Python 调用使用
+`from simple_ar.cli.main import main`。入口变更后先重新安装，再使用
+`--no-sync`；不要恢复依赖子模块导入顺序的包级同名转发。
 
 ## 工程原则与代码审查标准
+
+代码提示共用 `scope.prompt_file_inventory`，全部索引路径保留编辑/证据权限，详细
+描述只供可改或已选文件。`interfaces.source_snippet_views` 将相符的相邻/重叠源码
+用于统一展示和接口提取，不拼接未读缺口或不同访问角色。完整覆盖须有已知全文件
+长度，冲突窗口保持分开。这是不可变投影，不是另一套源码索引或缓存。
+源码清单在遍历前按标准 `pyvenv.cfg` 排除虚拟环境，不仅依赖 `.venv`/`venv` 名字。
+项目内的任务环境不能变成源码或配置上下文；名为 `environment` 的普通源码目录保留。
+
+`execution/repair` 复用同一源码窗口读取及呈现：traceback/静态报错行优先，再读当前
+diff锚点，每文件至多两个位置共用原字符额度。小文件完整，旧坐标失效回退当前部分
+视图；只读测试提供证据但不能获得编辑权。旧计划是待检验假设，不是固定诊断。
+这是改善信息供给，不等于证明模型已改对代码。
 
 最重要的原则是：**为当前真实任务提供可靠路径；遇到研究上的不确定性，保留证据并继续判断；只有触及明确的执行边界时才阻止操作。**
 
@@ -31,6 +56,10 @@ SimpleAutoResearch 同时要避免两种失控：不断增加暂时没有消费�
 2. **正常路径应当直白可读。** 从研究输入到下一动作，应能沿着少量应用函数看明白。已有 capability registry 可以用于明确的能力边界，但普通内部函数不必全部注册，也不要为了可替换性让一次调用穿过多层 factory、manager、gateway 和 adapter。
 3. **先复用具体代码，再决定抽象。** 两处确实相同的处理可以提取共同函数；只是表面相似时允许少量重复。抽象应来自已经出现的共同需求，而不是来自预想中的所有未来实现。合并 CodeTask bridge 与独立入口前，先核对默认值、授权和失败语义，不能只统一函数名称。
 4. **配置项必须有实际使用场景。** 不为每个 `if` 增加开关，也不要求用户理解内部阶段才能运行。预算、可修改范围、研究目标等会影响用户决定的内容才需要显式配置；内部选择优先使用合理默认值。
+
+依次优先标准库、已有依赖、合适的新库。引库须说明实际消费者、替代的自造实现、
+行为/序列化兼容、许可及安装成本；直接使用时显式声明，不偷偷依赖传递安装。
+开发检查工具不必成为运行时依赖。库的价值是减少维护职责，不只是少写几行。
 
 ### 契约、真实性与异常
 
@@ -148,7 +177,9 @@ facade、registry 分支和 projection 应直接删除，不继续保留“以�
 
 ## 职责边界表
 
-CLI/TOML 合并后的输入校验归 `cli.research_config.validate_session_arguments`；行动分发、
+CLI/TOML 合并后的输入校验归 `cli.research_config.validate_session_arguments`；同模块
+`report_settings` 沿既有 `FIELDS["report"]` 投影新建与显式续跑的报告参数。续跑省略项
+不覆盖保存值，显式 false、0 和空映射保留；模板选择仍属于 CLI 的任务策略。行动分发、
 执行决策与持久化仍归应用，普通行动处理方法不另建运行时。有界报告提示视图归
 `report.narrative`，不保存第二份报告记忆。编辑上下文选择归 `code_task.editing.scope`，
 初次改码与修复共用。整理纯视图不意味着可以改变 checkpoint、预算或采用稿语义。
@@ -167,6 +198,10 @@ CLI/TOML 合并后的输入校验归 `cli.research_config.validate_session_argum
 | Report 与 audit | `report.projection`、`report.capability`、`report.audit`、`report.writing` | 证据投影、显式章节组装、可选图表渲染、引用/指标审计和旧报告兼容 | 隐藏缺失证据、凭空生成图表，或没有迁移契约就替换旧 writer/reviewer |
 | 写作上下文与修订 | `report.narrative`、既有 `report.agent`/`editor` | 已采用正文投影、原修改契约、候选验证、既有检查点/额度消费 | 第二套记忆、把拒绝稿当事实或无界反复审阅 |
 | Application 与 benchmark | `app`、`cli`、`code_task` 和 benchmark adapter | 面向用户的编排、旧 projection、code-task 策略和外部评测接入 | 成为 core runtime 的依赖，或为了单个 benchmark 改变通用 capability 语义 |
+
+阅读查找投影由 `research.evidence.reader.reading_followup_context` 负责。综合只消费
+当前采用笔记、补读原文和剩余问题，不将嵌套旧笔记重复当作当前判断；完整历史留在
+原Read产物，报告投影复用同一查找视图，不复制另一份历史。
 
 如果一个功能看起来跨越两行，应把协调放在 application 或显式 adapter 中，
 通过声明的 `ArtifactRef` 传递输入；不要让下层直接导入上层的私有文件。只有当
@@ -281,7 +316,7 @@ capability 承接建议及选择理由，不另做一次模型选择。模型不
 的技术失败可由调用方显式重试而不重建研究证据，科学负结果不会被静默重跑。
 执行与确定性分析是独立持久化 attempt，失败进程可交付诊断但原失败状态不变；应用 completed 表示交付产物齐备，
 不是实验成功。重载复用已保存测量，覆盖物理 attempt 完成但应用引用未保存的窗口。
-完整资产保护和真实 Linux/CUDA 验收仍待完成；report 生命周期已经接入，但真实用户规模的语义质量仍待验证。
+显式资产检查和报告生命周期见下文；交付完成不代表科学结论或正文质量通过验收。
 
 执行配置还可提供 `protocol`，复用已有 `ResearchExperimentContract` 的 `protocol_revision`、
 `dataset_refs`、`split_spec`、`metric_specs` 和 `comparison_conditions` 保存对照设置；未知协议字段会
@@ -399,9 +434,8 @@ report-only 请求；旧报告入口执行顺序尚未迁移。
 跨运行的受检文件内容不同也不能作同条件提升比较。它是指定文件的审计，不是 OS 写保护、访问隔离，
 也无法发现最终快照前已恢复的临时修改。哈希按块读取，时间不计入子进程墙钟预算。
 
-新的应用 session 还会持久化会话级 `BudgetLedger`，并在 manifest 中保存引用；传入标准
-`LLMClient` 时会创建绑定该账本的副本。CodeTask、Writer 和跨入口 client factory 的统一注入
-仍属于后续迁移，不在这里提前宣称完成。
+应用 session 持久化会话级 `BudgetLedger`，并在 manifest 中保存引用；传入标准
+`LLMClient` 时会创建绑定该账本的副本。下游调用沿用同一会话的累计用量，恢复不重置额度。
 
 LLM 超时后，账本记录已知请求次数；有输出上限时保留 token 预留作为保守估计，实际用量仍标为未知，
 剩余额度内可以重试。没有上限的未知用量仍会阻止继续消费有限的 token 预算。
@@ -537,7 +571,8 @@ handoff 表示。`_legacy.documents.load_search_document_bundle(search_dir)` 显
 ### 复用 Read 边界
 
 `research.evidence.reader.ReadRequest` 接收 `DocumentBundle` 以及可选的文档或论文标识；
-`read_documents()` 返回 typed evidence cards 和诊断信息，不调用 LLM，也不写入文件。现有的
+`read_documents()` 返回 typed evidence cards 和诊断信息，不写入文件。默认确定性；显式
+`use_llm=True` 并提供 client 时可进行有界筛选、笔记与缺口补读。现有的
 `write_read_card_artifacts()` 仍作为该边界的兼容 projection，因此阶段产物路径和旧调用方保持不变。
 如果需要由 session 持有这次结果，可以使用 `run_read_capability()`，它把相同的 cards 和来源位置
 写成一次 `read_result.json` handoff；不会复制 chunk 原文、下载文档或扩大选择范围。
@@ -547,7 +582,15 @@ handoff 表示。`_legacy.documents.load_search_document_bundle(search_dir)` 显
 引用内容的语义正确性。
 `query_evidence()` 是 P05a 的来源解析边界：给定文档或明确的 chunk ID，它返回带来源身份、内容版本、精确位置、
 提取状态、目标原文和同文档真实相邻上下文的 `EvidenceRef`。未知 ID 会显式报错；相邻 chunk 不能替代缺失的目标引用。
-Read handoff 的 `source_spans` 已使用该投影，但不复制原文；逐篇分配上下文和记录模型实际所见 chunk 仍待 P05a 后续实现。
+Read handoff 的 `source_spans` 使用该投影但不复制原文。模型笔记保留有界概览覆盖、
+缺口查询与返回窗口，不认证完整阅读。新解析可将混合大小写字母附录与 references 分开，
+正文交叉引用、作者缩写不作标题。共用 `research.store.retrieval` 用正文词和保存的章节
+标题导航，按相邻不同查询词选择精确窗口，保持词/数字边界；标题、图注和精确短语
+只是导航线索，不认证主张。旧 bundle/笔记不回写，重新解析另存；词面可达性不代表
+论文身份或语义正确。
+基础PDF默认全部页面，显式正整数页数上限仍生效。可选 `ParsedDocument.coverage`
+进入原record/extraction元数据、Reader诊断及Writer限制。解析成功仍可能截断或有空文本页，
+不当OCR或完整理解；旧两参数外部parser及历史bundle保持未知覆盖，不新建状态层或追认。
 
 ### 复用 Synthesis 边界
 
@@ -848,8 +891,10 @@ OpenAI tool calling、MCP adapter 和外部 agent backend 提供统一、可审�
 - `docs/CONFIG_REFERENCE.md` / `docs/CONFIG_REFERENCE_zh.md`：TOML schema 和配置示例。
 - `docs/WORKFLOWS.md` / `docs/WORKFLOWS_zh.md`：每个 workflow/stage 做什么，以及产物结构。
 - `docs/DEVELOPMENT.md` / `docs/DEVELOPMENT_zh.md`：贡献者指南。
-- `CHANGELOG.md`：按时间记录开发进展。
+- `CHANGELOG.md` / `CHANGELOG_zh.md`：按日期倒序记录用户可见变化、兼容与迁移提示。
 - `MDfiles/`：私有或学习型规划笔记，通常不提交 GitHub。
+
+修改所属章节并沿用已有文风，不在开头追加进度说明。操作步骤、可运行示例和接口契约有各自用途，不能只为缩短篇幅删除。CHANGELOG 每个日期只出现一次，相关变化在日期内归并；内部调试与验收细节留在维护记录。
 
 英文文档应链接到对应中文版本；中文文档内部链接应优先指向中文版本。
 
@@ -860,6 +905,8 @@ OpenAI tool calling、MCP adapter 和外部 agent backend 提供统一、可审�
 ```bash
 uv run simple-ar-checks --list
 uv run simple-ar-checks quick
+uv run simple-ar-checks intake
+uv run simple-ar-checks data
 uv run simple-ar-checks code-task
 uv run --extra examples simple-ar-checks pipeline
 uv run simple-ar-checks research
@@ -887,12 +934,32 @@ uv run python scripts/run_checks.py code-task
 | 输入、应用状态、候选评估 | `uv run simple-ar-checks application`。 |
 | LLM 传输与计量 | `uv run simple-ar-checks llm`。 |
 | 仅报告相关改动 | `uv run simple-ar-checks report`。 |
+| 引导/对话及共用CLI/TOML输入 | `uv run simple-ar-checks intake`。 |
+| 表格分析、图与写作交接 | `uv run simple-ar-checks data`。 |
 | 本地进程控制、执行结果 | `uv run --extra examples simple-ar-checks execution`。 |
 | 共享接口/架构收口或发布候选 | `uv run --extra examples simple-ar-checks all`。 |
 
 小改动直接选择受影响的 unittest 模块或方法。组合分组时自动去重；选择 `all` 后不再重复运行其他分组。
 提交动作本身不是全量重跑的理由。删除测试要确认对应行为已废弃或有保留测试实际覆盖，不能仅按数量删减。
 mock 测试通过仍不能替代小型真实执行。
+
+分组是烟测选择，不是某领域的完整验收。小改动直接运行对应模块，例如
+`uv run python -m unittest tests.test_report_source_backtracking`。
+`code-task` 分组覆盖 `test_code_task` 的执行及 `test_code_source_views` 的目标选择、
+命名窗口、审阅和修复消费者；不要每次定位修正再建测试模块。
+执行场景只共用临时根目录夹具，不把任务策略放进夹具。
+整稿起草、审阅与联合修订归 `test_report_document_first`；当前正文记忆的历史和
+持久输入身份归 `test_report_checkpoints`。保留各场景明确的客户端和断言，
+不要每次修正再增加一个测试模块。
+数据测试按职责归属：`test_table_analysis` 共管五种图的 CLI/冻结/恢复/搬迁/导入及分布包检查，
+`test_table_figures` 管分布、矩阵和格式导出，`test_coordinate_figures` 管坐标、分组、关联证据与恢复，
+`test_report_data_delivery` 管写作投影；新图不要再复制完整 CLI 夹具。
+产品的 `table._write_analysis_delivery` 同样共管分析、写作导入和显式重建的包输出；
+输入复算/验证与完成恢复仍保留各自语义。共享夹具归 `tests` 包，
+命名测试和完整发现均不应要求将 `tests/` 加进 `PYTHONPATH`；标准发现命令为
+`python -m unittest discover -s tests -t .`。优先断言实际结果与副作用，不锁死私有函数次数
+或提示文案。可用 `uvx ruff check src/simple_ar tests --select F401,F811` 辅助静态清理，
+逐项核查，不能自动删除公共导出或有必要副作用的导入。
 
 Experiment 与 CodeTask 已复用 `core/process.py` 的输出和进程生命周期：每个流保留 200 KB 内存尾部，
 指定输出目录时流式保存最多 2 MB 日志前缀，同时记录丢弃字节数。stdout 指标解析只覆盖保留尾部；

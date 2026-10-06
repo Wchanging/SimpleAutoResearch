@@ -13,7 +13,6 @@ actions do not fall through to a second file-writing strategy.
 import json
 import py_compile
 import re
-import ast
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -21,8 +20,10 @@ from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.analysis.interfaces import (
     dependency_context,
     find_return_contract_mismatches,
+    project_api_contract,
     public_api,
 )
+from simple_ar.code_task.analysis.index import project_python_files
 from simple_ar.code_task.analysis.entrypoints import source_suppresses_entrypoint_traceback
 from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
 from simple_ar.code_task.editing.actions import apply_repair_actions
@@ -480,7 +481,7 @@ def _review_file_repair_prompt(
         f"Target path: {rel_path}\n\n"
         f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Actual dependency APIs:\n{json.dumps(dependency_context(project_dir, file_spec), indent=2, ensure_ascii=False)}\n\n"
-        f"Existing project APIs:\n{json.dumps(_project_api_snapshot(project_dir), indent=2, ensure_ascii=False)}\n\n"
+        f"Existing project APIs:\n{json.dumps(project_api_contract(project_dir), indent=2, ensure_ascii=False)}\n\n"
         f"Project review index:\n{json.dumps(_generated_review_index(project_dir, result_schema=result_schema, contract=contract), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Task contract:\n{json.dumps(_compact_for_prompt(contract), indent=2, ensure_ascii=False)}\n\n"
@@ -488,16 +489,6 @@ def _review_file_repair_prompt(
         f"Review report:\n{json.dumps(_compact_for_prompt(review_report), indent=2, ensure_ascii=False)}\n"
         f"\nPrevious repair context:\n{previous_repair_context[:12000] or 'No previous repair context recorded.'}\n"
     )
-
-
-def _project_api_snapshot(project_dir: Path) -> dict[str, list[str]]:
-    rows: dict[str, list[str]] = {}
-    for path in sorted(project_dir.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
-        rel = path.relative_to(project_dir).as_posix()
-        rows[rel] = public_api(path)
-    return rows
 
 
 def _compact_for_prompt(value: Mapping[str, Any], *, limit: int = 12000) -> dict[str, Any]:
@@ -858,7 +849,7 @@ def _run_repair_context(
             for path in candidate_paths
             if (project_dir / path).is_file()
         ],
-        "project_api": _project_api_snapshot(project_dir),
+        "project_api": project_api_contract(project_dir),
         "resource_static": analyze_resource_risks(project_dir),
     }
     context["failure_graph"] = _compact_failure_graph_for_repair(failure_analysis)
@@ -1062,8 +1053,7 @@ def _generated_python_paths(
     if project_dir is not None and project_dir.is_dir():
         paths.extend(
             path.relative_to(project_dir).as_posix()
-            for path in project_dir.rglob("*.py")
-            if "__pycache__" not in path.parts
+            for path in project_python_files(project_dir)
         )
     return list(dict.fromkeys(path for path in paths if not path.endswith("/__init__.py")))
 
@@ -1146,7 +1136,7 @@ def _run_file_repair_prompt(
         f"Relevant project context for this repair:\n{json.dumps(_compact_for_prompt(repair_context, limit=24000), indent=2, ensure_ascii=False)}\n\n"
         f"Previous repair context:\n{previous_repair_context[:12000] or 'No previous repair context recorded.'}\n\n"
         f"Actual dependency APIs:\n{json.dumps(dependency_context(project_dir, file_spec, max_source_chars=5000), indent=2, ensure_ascii=False)}\n\n"
-        f"Existing project APIs:\n{json.dumps(_project_api_snapshot(project_dir), indent=2, ensure_ascii=False)}\n\n"
+        f"Existing project APIs:\n{json.dumps(project_api_contract(project_dir), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Task contract:\n{json.dumps(_compact_for_prompt(contract), indent=2, ensure_ascii=False)}\n\n"
         f"Dependency advice:\n{json.dumps(_compact_for_prompt(dependency_advice), indent=2, ensure_ascii=False)}\n"
@@ -1165,7 +1155,7 @@ def _compile_error(path: Path) -> str:
 
 def _compile_project(project_dir: Path) -> list[str]:
     errors: list[str] = []
-    for path in sorted(project_dir.rglob("*.py")):
+    for path in project_python_files(project_dir):
         error = _compile_error(path)
         if error:
             errors.append(f"{path.relative_to(project_dir).as_posix()}: {error}")

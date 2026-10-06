@@ -6,13 +6,13 @@ import ast
 from pathlib import Path
 from typing import Any
 
+from simple_ar.code_task.analysis.index import project_python_files
+
 
 def analyze_resource_risks(project_dir: Path, *, max_files: int = 80) -> dict[str, Any]:
     """Return bounded source observations, not an execution safety verdict."""
     files: list[dict[str, Any]] = []
-    for path in sorted(Path(project_dir).rglob("*.py"))[:max_files]:
-        if "__pycache__" in path.parts:
-            continue
+    for path in project_python_files(Path(project_dir))[:max_files]:
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, SyntaxError):

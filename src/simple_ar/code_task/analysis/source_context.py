@@ -4,10 +4,13 @@ import ast
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from simple_ar.code_task.analysis.index import IGNORED_DIR_NAMES
+from simple_ar.code_task.analysis.index import IGNORED_DIR_NAMES, is_python_environment
+from simple_ar.code_task.analysis.context import clip_source_snippet
+from simple_ar.code_task.analysis.interfaces import source_snippet_views
 from simple_ar.code_task.editing.planning import select_relevant_files
+from simple_ar.code_task.runtime.state import workspace_file
 
 
 SOURCE_SUFFIXES = {
@@ -15,6 +18,113 @@ SOURCE_SUFFIXES = {
     ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".r", ".jl", ".sh",
 }
 CONTEXT_SUFFIXES = SOURCE_SUFFIXES | {".toml", ".yaml", ".yml", ".md", ".txt", ".json", ".ini", ".cfg"}
+
+
+def inferred_source_request(
+    snippets: list[dict[str, Any]], preferred_files: list[str], max_files: int,
+    *, index: dict[str, Any] | None = None, proposal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Locate named indexed definitions; reading is not edit authorization.
+
+    Prefer a visible owner when names collide; otherwise only a unique owner
+    qualifies. No inferred filename, imported binding or missing definition is
+    treated as established. Explicit requests remain the caller's first choice.
+    """
+    targets = list(dict.fromkeys(str(item.get("path")) for item in source_snippet_views(snippets)
+        if item.get("truncated") and item.get("path") in preferred_files))
+    explanation = [str((proposal or {}).get("summary", "")),
+                   *[row for row in ((proposal or {}).get("validation") or []) if isinstance(row, str)]]
+    mentioned = set(re.findall(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", "\n".join(explanation)))
+    owners: dict[str, list[str]] = {}
+    for row in (index or {}).get("files", []):
+        python = row.get("python") or {}
+        definitions = [str(item.get("name", "")) for item in
+                       [*python.get("functions", []), *python.get("classes", [])]]
+        definitions.extend(f"{klass['name']}.{method['name']}" for klass in python.get("classes", [])
+                           for method in klass.get("methods", []))
+        for name in dict.fromkeys(definitions):
+            if name in mentioned:
+                owners.setdefault(name, []).append(row["path"])
+    visible = {item["path"] for item in snippets}
+    named: dict[str, list[str]] = {}
+    for name, paths in owners.items():
+        candidates = [path for path in paths if path in visible] if len(paths) > 1 else paths
+        if len(candidates) == 1:
+            named.setdefault(candidates[0], []).append(name)
+    selected = list(dict.fromkeys([*(path for path in named if path not in visible),
+        *(path for path in targets if path in named), *named]))[:max_files] if named else targets[:max_files]
+    return {"files": selected, "query": "", "symbols": list(dict.fromkeys(
+                name for path in selected for name in named.get(path, []))),
+            "dependency_symbols": [],
+            "reason": "Bounded lookup of definitions named in the proposal explanation" if named else
+                      "Bounded continuation of truncated editable source"}
+
+
+def diff_source_anchors(patch_diff: str) -> list[tuple[str, int]]:
+    """Current-file line coordinates from unified diff hunks, not old source."""
+    anchors: list[tuple[str, int]] = []
+    path = ""
+    for line in patch_diff.splitlines():
+        if line.startswith("+++ "):
+            path = line[4:].split("\t", 1)[0].removeprefix("b/")
+        elif path and (match := re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)):
+            anchors.append((path, max(1, int(match.group(1)))))
+    return anchors
+
+
+def source_context_for_files(
+    workspace_dir: Path, selected_files: list[str], *, max_chars_per_file: int,
+    anchors: Sequence[tuple[str, int]] = (), editable_files: list[str] | None = None,
+    include_unanchored_tail: bool = False,
+) -> list[dict[str, Any]]:
+    """Exact, bounded current-source views shared by review and repair.
+
+    Up to two anchors share each file's original character budget. Small
+    files remain whole; stale coordinates fall back to a bounded prefix.
+    Reading source never expands the caller's edit authorization.
+    """
+    snippets: list[dict[str, Any]] = []
+    limit = max(0, max_chars_per_file)
+    for rel_path in dict.fromkeys(selected_files):
+        path = workspace_file(workspace_dir, rel_path)
+        if limit == 0 or path is None or not path.is_file() or path.name.startswith(".env"):
+            continue
+        lines = list(dict.fromkeys(line for anchor, line in anchors
+            if anchor == rel_path or anchor.endswith("/" + rel_path)))[:2]
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if len(text) <= limit:
+            lines = []
+        observed: list[dict[str, Any]] = []
+        remaining = limit
+        for position, line in enumerate(lines or [None]):
+            request: dict[str, Any] = {"files": [rel_path]}
+            if line is not None:
+                request["line_range"] = {"start": max(1, line - 4), "end": line + 75}
+            found = requested_source_context(workspace_dir, {"files": [{"path": rel_path}]},
+                request, supplied=observed, max_files=1,
+                max_chars=remaining // (len(lines) - position) if lines else remaining,
+                max_total_chars=remaining)
+            observed.extend(found)
+            remaining -= sum(len(row["text"]) for row in found)
+        if not observed and lines:
+            observed = requested_source_context(workspace_dir, {"files": [{"path": rel_path}]},
+                {"files": [rel_path]}, supplied=[], max_files=1, max_chars=limit)
+        if not lines and include_unanchored_tail and len(text) > limit and limit > 1:
+            # Generated-project review has no diff. Preserve its head/tail
+            # coverage without joining disjoint code or exceeding the budget.
+            half = limit // 2
+            offset = len(text) - (limit - half)
+            observed = [
+                clip_source_snippet({"path": rel_path, "text": text, "source_chars": len(text),
+                    "source_offset": 0, "start_line": 1}, max_chars=half),
+                clip_source_snippet({"path": rel_path, "text": text[offset:], "source_chars": len(text),
+                    "source_offset": offset, "start_line": text.count("\n", 0, offset) + 1,
+                    "truncated": True}, max_chars=limit - half),
+            ]
+        for row in observed:
+            row["access_role"] = "editable" if editable_files is None or rel_path in editable_files else "read_only"
+        snippets.extend(observed)
+    return snippets
 
 
 def _construction_call_positions(text: str, symbols: list[str], query: str) -> list[int]:
@@ -45,16 +155,17 @@ def _construction_call_positions(text: str, symbols: list[str], query: str) -> l
     return [position for name in names for position in sorted(calls[name])]
 
 
-def _unfinished_python_symbol_starts(
+def _python_symbol_starts(
     text: str, symbols: list[str], seen: list[tuple[int, int]],
+    *, include_new: bool = True,
 ) -> list[int]:
-    """Continue a named definition whose signature was read but body was clipped.
+    """Locate a named definition or continue its clipped body.
 
     A later call site is not a substitute for the unseen body of the requested
     method. Only definitions named by the caller qualify; unrelated truncated
     functions do not consume another source window.
     """
-    if not symbols or not seen:
+    if not symbols:
         return []
     try:
         tree = ast.parse(text)
@@ -74,8 +185,10 @@ def _unfinished_python_symbol_starts(
             if qualified in wanted or (not parents and node.name in wanted):
                 begin = offsets[node.lineno - 1]
                 end = offsets[min(node.end_lineno or node.lineno, len(offsets) - 1)]
+                if include_new and not any(lo <= begin < hi for lo, hi in seen):
+                    starts.append(begin)
                 for lo, hi in seen:
-                    if lo <= begin < hi < end:
+                    if lo <= begin < hi < end and not any(a <= hi < b for a, b in seen):
                         starts.append(hi)
             visit(node.body, (*parents, node.name))
 
@@ -90,8 +203,10 @@ def source_file_inventory(
     files: list[dict[str, Any]] = []
     scanned = 0
     for current, dirnames, filenames in os.walk(workspace):
+        current_path = Path(current)
         dirnames[:] = sorted(
-            (name for name in dirnames if name not in IGNORED_DIR_NAMES and not name.startswith(".")),
+            (name for name in dirnames if name not in IGNORED_DIR_NAMES and not name.startswith(".")
+             and not is_python_environment(current_path / name)),
             key=lambda name: (name.lower() in {"data", "datasets", "outputs", "runs", "results", "artifacts"}, name),
         )
         for name in sorted(filenames):
@@ -198,10 +313,12 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
             if start < end and size > 0:
                 excerpt = text[start:min(end, start + size)]
                 result.append({"path": relative, "access_role": "read_only", "text": excerpt,
+                               "source_chars": len(text),
                                "source_offset": start,
                                "start_line": text.count("\n", 0, start) + 1,
                                "end_line": text.count("\n", 0, start + len(excerpt) - 1) + 1,
-                               "truncated": start > 0 or start + len(excerpt) < len(text)})
+                               "truncated": start > 0 or start + len(excerpt) < len(text),
+                               "has_unread_tail": start + len(excerpt) < len(text)})
             break
         def positions_for(terms: list[str]) -> list[int]:
             # Preserve the caller's term priority rather than selecting the
@@ -224,20 +341,25 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
         # call arguments as well as the continuation after it.
         starts = [max(0, min(pos - size // 2, len(text) - size)) for pos in unseen(literal_positions)]
         if not literal and path.suffix == ".py":
-            starts += _unfinished_python_symbol_starts(text, request.get("symbols", []), seen)
+            starts += _python_symbol_starts(text, request.get("symbols", []), seen,
+                                           include_new=not call_positions)
         starts += [max(0, min(pos - size // 2, len(text) - size)) for pos in unseen(call_positions)]
         starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(query_positions)]
         starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(symbol_positions)]
         if not positions and not symbols and not query_terms:
-            first = min(max((hi for _, hi in seen), default=0), max(0, len(text) - size))
-            starts = [min(first + offset * size, max(0, len(text) - size))
+            first = 0
+            for lo, hi in sorted(seen):
+                if first < lo:
+                    break
+                first = max(first, hi)
+            starts = [min(first + offset * size, len(text))
                       for offset in range(max_windows_per_file)]
         elif positions and not starts and not literal:
             # A requested method can start in an already supplied window but
             # continue beyond its clipped end. Return one adjacent window.
             starts = [min(hi, max(0, len(text) - size)) for lo, hi in seen
                       if hi < len(text) and any(lo <= pos < hi and pos >= hi - size // 3 for pos in positions)]
-        if max_windows_per_file > 1 and starts and len(text) > size:
+        if max_windows_per_file > 1 and starts and len(text) > size and len(symbols) <= 1:
             # A symbol hit near the start of a long function is not the whole
             # behavior. When the caller explicitly budgets another window,
             # inspect the adjacent continuation before unrelated later hits.
@@ -248,19 +370,28 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
         for start in starts:
             if file_windows >= max_windows_per_file or len(result) >= max_files or remaining <= 0:
                 break
-            excerpt = text[start:start + min(size, remaining)]
-            novel = sum(not any(lo <= pos < hi for lo, hi in seen)
-                        for pos in range(start, start + len(excerpt)))
-            required_novel = min(1500, max(1, len(excerpt) // 4))
-            if start + len(excerpt) == len(text):
-                required_novel = min(required_novel, 256)
-            if novel < required_novel:
+            end = min(len(text), start + min(size, remaining))
+            # Return one exact unseen interval. Adjacent observations can be
+            # joined by the existing source-view owner; repeated bytes must
+            # not spend the remaining read allowance again.
+            for lo, hi in sorted(seen):
+                if lo <= start < hi:
+                    start = hi
+                elif start < lo < end:
+                    end = lo
+                    break
+            if start >= end:
                 continue
+            # The interval subtraction above already guarantees unseen bytes;
+            # do not rescan every character or impose a second novelty quota.
+            excerpt = text[start:end]
             result.append({"path": relative, "access_role": "read_only", "text": excerpt,
+                           "source_chars": len(text),
                            "source_offset": start,
                            "start_line": text.count("\n", 0, start) + 1,
                            "end_line": text.count("\n", 0, start + len(excerpt) - 1) + 1,
-                           "truncated": start > 0 or start + len(excerpt) < len(text)})
+                           "truncated": start > 0 or start + len(excerpt) < len(text),
+                           "has_unread_tail": start + len(excerpt) < len(text)})
             seen.append((start, start + len(excerpt)))
             remaining -= len(excerpt)
             file_windows += 1

@@ -208,8 +208,12 @@ class ReviewActionTests(unittest.TestCase):
         seen = []
         class Client:
             def ask_json(client, system, prompt, **kwargs):
-                seen.append(json.loads(prompt))
-                return {'section_reviews': []}
+                view = json.loads(prompt)
+                seen.append(view)
+                return {'section_reviews': [{'section_id': row['section_id'],
+                    'finding_checks': [{'finding_id': row['finding_id'], 'status': 'unresolved',
+                        'explanation': 'Synthetic capture checks input projection, not factual resolution.'}]}
+                    for row in view.get('historical_findings_to_check', [])]}
         review_document(client=Client(), template=objects['template'], memory=objects['memory'],
             sections=[ReportSectionDraft(section_id='findings', heading='Findings', draft_markdown='Text')],
             config=objects['config'], execution_summary={}, metric_summary={},

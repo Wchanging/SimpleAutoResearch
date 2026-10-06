@@ -5,7 +5,7 @@ from typing import Any
 
 from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_text
 from simple_ar.code_task.editing.scope import is_protected_edit_path
-from simple_ar.code_task.memory import code_task_memory_paths
+from simple_ar.code_task.memory import code_task_memory_paths, _artifact_ref
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     load_code_task_manifest,
@@ -730,19 +730,6 @@ def _read_jsonl_safe(path: Path) -> list[dict[str, Any]]:
         return [row for row in read_jsonl(path) if isinstance(row, dict)]
     except Exception:
         return []
-
-
-def _artifact_ref(run_dir: Path, path: Path) -> str:
-    root = Path(run_dir)
-    target = Path(path)
-    try:
-        return target.relative_to(root).as_posix()
-    except ValueError:
-        pass
-    try:
-        return "../" + target.relative_to(root.parent).as_posix()
-    except ValueError:
-        return str(target)
 
 
 def _read_run_json(run_dir: Path, label: str, filename: str) -> dict[str, Any]:

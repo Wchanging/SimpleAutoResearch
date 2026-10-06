@@ -33,14 +33,16 @@ FIELDS = {
                   "max_iterations": ("max_research_iterations", int),
                  "keep_raw_pdf": ("research_keep_raw_pdf", bool),
                  "interaction": ("interaction", str)},
-    "assets": {"papers": ("local_document", list), "materials": ("material", list)},
+    "assets": {"papers": ("local_document", list), "materials": ("material", list), "data": ("data_path", list)},
     "analysis": {"file": ("data_file", str), "value_columns": ("value_column", list),
                  "group_column": ("group_column", str), "observation_unit": ("observation_unit", str),
                  "value_unit": ("value_unit", str), "mode": ("data_mode", str),
                  "missing": ("data_missing", str), "width": ("figure_width", str), "max_mb": ("data_max_mb", int),
                  "max_figures": ("data_max_figures", int), "plot": ("data_plot", str),
                  "x_column": ("x_column", str), "x_unit": ("x_unit", str), "max_points": ("data_max_points", int),
-                 "series_layout": ("series_layout", str)},
+                 "series_layout": ("series_layout", str), "paired_baseline": ("paired_baseline", str),
+                 "association": ("data_association", str),
+                 "attribution": ("data_attribution", str)},
     "execution": {"command": ("command_argv", list), "cwd": ("cwd", str),
                   "timeout_sec": ("timeout_sec", int), "code_task_config": ("code_task_config", str),
                   "primary_metric": ("primary_metric", str), "metrics": ("metric", list),
@@ -50,13 +52,37 @@ FIELDS = {
                "data_tables": ("report_data_tables", str),
                "max_review_iterations": ("max_review_iterations", int),
                "document_review": ("report_document_review", bool),
+               "review_scope": ("report_review_scope", str),
+               "draft_scope": ("report_draft_scope", str),
+               "max_document_review_prompt_chars": ("max_document_review_prompt_chars", int),
                "max_section_tokens": ("max_section_tokens", int),
                "max_cited_sources": ("report_max_cited_sources", int),
                "figures": ("report_figures", dict)},
 }
-PATHS = {"output_root", "cache_dir", "cwd", "code_task_config", "local_document", "material", "data_file"}
+PATHS = {"output_root", "cache_dir", "cwd", "code_task_config", "local_document", "material", "data_file", "data_path"}
 LIST_FLAGS = {"providers": "--provider", "queries": "--query", "local_document": "--local-document", "material": "--material",
-              "metric": "--metric", "metric_direction": "--metric-direction", "value_column": "--value-column"}
+              "metric": "--metric", "metric_direction": "--metric-direction", "value_column": "--value-column", "data_path": "--data-path"}
+
+
+def report_settings(args: argparse.Namespace, *, explicit_destinations: set[str] | None = None) -> dict:
+    """Project report options from the existing TOML/CLI field owner.
+
+    New sessions consume parsed defaults; recovery consumes only supplied
+    destinations. False, zero and empty mappings are values, not omissions.
+    """
+    settings = {}
+    for key, (destination, _) in FIELDS["report"].items():
+        if args.command == "research-report":
+            destination = key
+        if explicit_destinations is not None and destination not in explicit_destinations:
+            continue
+        value = getattr(args, destination, None)
+        if value is None:
+            continue
+        if key in {"max_document_review_prompt_chars", "max_section_tokens"} and value < 0:
+            raise SystemExit(f"--{key.replace('_', '-')} cannot be negative; use 0 to omit the cap.")
+        settings[key] = value
+    return settings
 
 
 @dataclass(frozen=True)
@@ -73,23 +99,28 @@ class SessionArguments:
 def data_settings(args: argparse.Namespace) -> dict:
     """Validate table settings shared by guided and direct session input."""
     from simple_ar.result_analysis.table import TableSpec, read_table_source, validate_table_columns
-    spec = TableSpec(tuple(args.value_column), args.observation_unit, args.group_column,
-                     args.value_unit, args.data_mode, args.data_missing, args.figure_width, args.data_max_mb, args.data_max_figures,
-                     args.data_plot, args.x_column, args.x_unit, args.data_max_points, args.series_layout)
+    spec = TableSpec.from_config({key: getattr(args, destination)
+        for key, (destination, _) in FIELDS["analysis"].items()
+        if key != "file" and hasattr(args, destination)})
     if args.data_file is None:
         raise ValueError("Data analysis requires --data-file.")
     path = args.data_file.expanduser().resolve()
-    if not path.is_file() or path.suffix.lower() not in {".csv", ".tsv", ".json"}:
-        raise ValueError("Provide an existing CSV/TSV or JSON records file.")
     # Preview checks shape and names; ingestion freezes and validates fresh bytes.
     _, rows = read_table_source(path, max_mb=spec.max_mb)
     validate_table_columns(rows, spec)
-    from dataclasses import asdict
-    return {"file": str(path), **asdict(spec)}
+    return {"file": str(path), **spec.to_config()}
 
 
 def validate_session_arguments(args: argparse.Namespace) -> SessionArguments:
     """Validate merged arguments before model setup or session writes."""
+    if (not getattr(args, "session_root", None)
+            and getattr(args, "report_draft_scope", None) == "document"
+            and getattr(args, "report_review_scope", None) != "document"):
+        raise SystemExit('report.draft_scope="document" requires report.review_scope="document".')
+    if (not getattr(args, "session_root", None)
+            and getattr(args, "report_review_scope", None) == "document"
+            and getattr(args, "report_document_review", None) is not True):
+        raise SystemExit('report.review_scope="document" requires report.document_review=true (--report-document-review).')
     if getattr(args, "reanalyze", False) and not getattr(args, "session_root", None):
         raise SystemExit("--reanalyze requires --session-root.")
     if getattr(args, "recover_interrupted", False) and not getattr(args, "session_root", None):
@@ -119,12 +150,18 @@ def validate_session_arguments(args: argparse.Namespace) -> SessionArguments:
         raise SystemExit("Use execution.pairs or a single command, not both; paired argv must be explicit.")
     outputs = getattr(args, "outputs", None)
     materials = getattr(args, "material", [])
+    data_paths = getattr(args, "data_path", [])
+    if data_paths and task_kind not in {"reproduction", "measurement", "auto", "bug_fix"}:
+        raise SystemExit("--data-path/assets.data belongs to experiment inputs; table analysis uses analysis.file/--data-file.")
     if outputs and "data_analysis" in outputs and task_kind != "data_analysis":
         raise SystemExit("data_analysis output requires an explicit data_analysis task.")
     data_analysis = None
+    data_report = task_kind == "data_analysis" and ("report" in (outputs or ()) or args.with_report)
     if task_kind == "data_analysis":
-        if command or execution_details or args.code_task_config or args.local_document or materials or args.queries or args.providers or args.with_report or outputs not in (None, ["data_analysis"]):
-            raise SystemExit("Data analysis accepts only a supplied table and descriptive settings, without research, CodeTask or experiment execution.")
+        if command or execution_details or args.code_task_config or args.queries or args.providers or (outputs is not None and set(outputs) not in ({"data_analysis"}, {"data_analysis", "report"})):
+            raise SystemExit("Data analysis accepts a supplied table, descriptive settings and an optional report, without research, CodeTask or experiment execution.")
+        if (args.local_document or materials) and not data_report:
+            raise SystemExit("Data documentation and references require outputs=[data_analysis, report].")
         if not getattr(args, "session_root", None):
             try:
                 data_analysis = data_settings(args)
@@ -132,24 +169,26 @@ def validate_session_arguments(args: argparse.Namespace) -> SessionArguments:
                 raise SystemExit(str(exc)) from exc
     elif any((args.data_file, args.value_column, args.group_column, args.observation_unit, args.value_unit,
               args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100,
-              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000, args.series_layout != "separate")):
+              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000, args.series_layout != "separate", args.paired_baseline, args.data_attribution, getattr(args, "data_association", "none") != "none")):
         raise SystemExit("Data options require --task-kind data_analysis.")
-    if materials and task_kind != "writing":
-        raise SystemExit("--material/assets.materials currently requires task.kind=writing.")
+    if materials and task_kind not in {"writing", "data_analysis"}:
+        raise SystemExit("--material/assets.materials requires writing or data_analysis with a report.")
     if task_kind == "writing":
         if command or execution_details or getattr(args, "code_task_config", None) or args.no_report or outputs not in (None, ["report"]):
             raise SystemExit("Writing requests only a report without execution or CodeTask configuration.")
         if not getattr(args, "session_root", None) and not (materials or args.local_document):
             raise SystemExit("Writing requires --material and/or --local-document.")
+    if task_kind == "writing" or data_report:
         if args.queries or args.providers or getattr(args, "research_materials_only", None) is False or getattr(args, "research_allow_pdf_download", None):
-            raise SystemExit("Writing uses supplied local material only; online research is a survey task.")
+            raise SystemExit("Material-based reports use supplied local material only; online research is a survey task.")
         supplied = [Path(path).expanduser().resolve() for path in [*materials, *args.local_document]]
         if len(supplied) != len(set(supplied)):
             raise SystemExit("Writing material must have one unambiguous role per file; do not repeat a paper as material.")
-        text_suffixes = {".md", ".markdown", ".txt", ".pdf"}
-        for paths, suffixes in ((args.local_document, text_suffixes), (materials, text_suffixes | {".json"})):
+        from simple_ar.research.documents.ports import SUPPORTED_DOCUMENT_SUFFIXES, SUPPORTED_MATERIAL_SUFFIXES
+        for paths, suffixes in ((args.local_document, SUPPORTED_DOCUMENT_SUFFIXES),
+                               (materials, SUPPORTED_MATERIAL_SUFFIXES if task_kind == "writing" else SUPPORTED_DOCUMENT_SUFFIXES)):
             if any(not Path(path).expanduser().is_file() or Path(path).suffix.lower() not in suffixes for path in paths):
-                raise SystemExit("Writing requires text/PDF or a table_analysis.v1 analysis package; raw tables are not writing results.")
+                raise SystemExit("Report inputs must be local text/HTML/PDF; writing also accepts JSON material and table_analysis.v1 packages.")
     if outputs and task_kind != "bug_fix" and "experiments" not in outputs and (command or execution_details or getattr(args, "code_task_config", None)):
         raise SystemExit("Execution configuration requires experiments in --outputs/task.outputs.")
     if task_kind == "bug_fix" and outputs and set(outputs) != {"bug_fix"}:
@@ -204,7 +243,7 @@ def research_defaults(
             raise ValueError(f"Unknown research configuration section: {section}")
         for name, value in values.items():
             if section == "execution" and name in {
-                "pairs", "protocol", "seeds", "seed_flag", "seed_count", "baseline_policy", "baseline_ref", "output_files",
+                "pairs", "protocol", "seeds", "seed_flag", "seed_count", "baseline_policy", "baseline_ref", "output_files", "environment",
             }:
                 if name == "pairs":
                     from simple_ar.app.research_execution import execution_pairs
@@ -215,6 +254,9 @@ def research_defaults(
                 elif name == "protocol":
                     if not isinstance(value, dict):
                         raise ValueError("execution.protocol must be a table")
+                elif name == "environment":
+                    from simple_ar.research.project_environment import environment_profile
+                    value = environment_profile(value)
                 elif name == "seeds":
                     if not isinstance(value, list) or not value or any(type(item) is not int for item in value) or len(set(value)) != len(value):
                         raise ValueError("execution.seeds must be a non-empty list of unique integers")
@@ -239,12 +281,16 @@ def research_defaults(
                 explicit_destinations.add(dest)
             if type(value) is not expected or (expected is list and any(type(item) is not str for item in value)):
                 raise ValueError(f"Invalid type for {section}.{name}: expected {expected.__name__}")
-            if expected is int and dest not in {"additional_attempts", "additional_no_progress"} and value < (0 if dest in {"max_review_iterations", "max_section_tokens", "report_max_cited_sources", "max_research_iterations", "process_invocations", "process_wall_seconds"} else 1):
+            if expected is int and dest not in {"additional_attempts", "additional_no_progress"} and value < (0 if dest in {"max_review_iterations", "max_section_tokens", "max_document_review_prompt_chars", "report_max_cited_sources", "max_research_iterations", "process_invocations", "process_wall_seconds"} else 1):
                 raise ValueError(f"Invalid value for {section}.{name}: {value}")
             if dest == "interaction" and value not in {"assisted", "checkpoints", "autonomous"}:
                 raise ValueError("research.interaction must be assisted, checkpoints or autonomous")
             if dest == "report_outline_strategy" and value not in {"auto", "template", "adaptive"}:
                 raise ValueError("report.outline_strategy must be auto, template or adaptive")
+            if dest == "report_review_scope" and value not in {"section", "document"}:
+                raise ValueError("report.review_scope must be section or document")
+            if dest == "report_draft_scope" and value not in {"section", "document"}:
+                raise ValueError("report.draft_scope must be section or document")
             if dest == "report_data_tables" and value not in {"linked", "full"}:
                 raise ValueError("report.data_tables must be linked or full")
             if dest == "decision_response" and value not in {"accept", "reject", "revise"}:
@@ -271,8 +317,8 @@ def research_defaults(
         raise ValueError('task.kind=writing requires task.outputs = ["report"]')
     if "analysis" in data and defaults.get("task_kind") != "data_analysis":
         raise ValueError("analysis configuration requires task.kind=data_analysis")
-    if defaults.get("task_kind") == "data_analysis" and defaults.get("outputs", ["data_analysis"]) != ["data_analysis"]:
-        raise ValueError('task.kind=data_analysis requires only data_analysis in task.outputs')
+    if defaults.get("task_kind") == "data_analysis" and set(defaults.get("outputs", ["data_analysis"])) not in ({"data_analysis"}, {"data_analysis", "report"}):
+        raise ValueError('task.kind=data_analysis requires data_analysis and optionally report in task.outputs')
     if defaults.get("task_kind") == "reproduction" and (
         "experiments" not in defaults.get("outputs", []) or set(defaults.get("outputs", [])) - {"experiments", "report"}
     ):
