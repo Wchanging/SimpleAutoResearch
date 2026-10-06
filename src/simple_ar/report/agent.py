@@ -2055,7 +2055,7 @@ def _writer_task_context(
         "document_plan": document_plan_context(memory),
         "source_handles": list({row["handle"]: row for target in selected
             for row in _handles_for_section(memory, target)}.values()),
-        "metric_sources": _prompt_metrics(memory, detail=_report_metric_detail(section.heading) if section else "full"),
+        "metric_sources": _prompt_metrics(memory, section_id=section.section_id if section else None),
         "extra_tool_context": [report_tool_context(row) for row in tools[-6:]],
         "extra_tool_context_omitted": max(0, len(tools) - 6),
         "review_findings": [finding.model_dump(mode="json") for finding in (review.findings if review else [])],
@@ -2329,7 +2329,7 @@ def _reviewer_context(
         "experiment_plan": _compact_experiment_plan(context.experiment_plan),
         "allowed_sources": source_evidence,
         "metric_sources": _prompt_metrics(
-            memory, detail=_report_metric_detail(section.heading)
+            memory, section_id=section.section_id, metric_ids=draft.metric_ids
         ),
         "verified_execution_results": _compact_execution_results(context.results),
         "execution_evidence": report_execution_evidence(context),
@@ -2765,15 +2765,6 @@ def _final_sequence(
 ) -> list[ReportSectionDraft]:
     order = {plan.section_id: plan.final_order or index for index, plan in enumerate(plans, start=1)}
     return sorted(drafts, key=lambda draft: (order.get(draft.section_id, 9999), draft.section_id))
-
-
-
-
-def _report_metric_detail(heading: str) -> str:
-    """Send per-seed rows only to sections that interpret measured results."""
-    return (
-        "full" if heading.strip().lower() in {"results", "result"} else "summary"
-    )
 
 
 

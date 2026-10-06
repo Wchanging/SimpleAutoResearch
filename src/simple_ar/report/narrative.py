@@ -936,16 +936,28 @@ def document_plan_context(memory: ReportMemory, *, independent_review: bool = Fa
     }
 
 
-def _prompt_metrics(memory: ReportMemory, *, detail: str = "full") -> dict[str, Any]:
+def _prompt_metrics(
+    memory: ReportMemory, *, detail: str = "full",
+    section_id: str | None = None, metric_ids: list[str] | None = None,
+) -> dict[str, Any]:
     """Build a compact model-facing table while retaining raw evidence elsewhere.
 
     Paired experiments also keep task-by-task measurements in the session for
     audit and export.  Sending those rows to every section writer duplicates a
     large amount of context without helping ordinary paper prose; aggregate
-    and non-task-level seed rows are sufficient for the Writer.
+    and non-task-level seed rows provide the default overview. Section argument
+    references and Reviewer draft references retain their exact measurements,
+    including task-level rows. Legacy plans keep the complete compact overview.
     """
     columns = ["metric_id", "name", "value", "label", "direction", "condition_id", "unit", "source_kind"]
     metrics = list(memory.metric_sources)
+    requested = set(metric_ids or [])
+    argument = memory.document_plan.argument_plan if memory.document_plan else None
+    if section_id is not None and argument is not None:
+        # Ownership is independent of heading, language and drafting order.
+        requested.update(metric_id for point in argument.points
+                         if point.section_id == section_id for metric_id in point.metric_ids)
+        detail = "summary"
     paired_summary = [
         metric for metric in metrics
         if metric.label.startswith("paired_summary:")
@@ -962,6 +974,11 @@ def _prompt_metrics(memory: ReportMemory, *, detail: str = "full") -> dict[str, 
             if detail == "summary"
             else [*paired_summary, *seed_metrics]
         )
+    # Explicit evidence references also retain task-level rows otherwise omitted
+    # from the compact overview. Unknown IDs never fabricate measurements.
+    selected = {metric.metric_id for metric in metrics}
+    metrics.extend(metric for metric in memory.metric_sources
+                   if metric.metric_id in requested and metric.metric_id not in selected)
     return {"columns": columns, "rows": [
         [getattr(metric, column) for column in columns] for metric in metrics
     ]}

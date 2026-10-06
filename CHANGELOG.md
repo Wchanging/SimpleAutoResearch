@@ -6,6 +6,10 @@ This file records implemented, user-visible changes in reverse chronological ord
 
 ## 2026-10-06
 
+- Section writing and review select detailed measurements from the accepted
+  argument plan and draft references, not English section titles. Renaming or
+  translating a heading preserves its evidence; historical tasks without an
+  argument plan retain the complete compact overview.
 - Local API checks now use Python's standard-library symbol table instead of
   handwritten top-level binding rules. Conditional imports, dotted imports and
   unpacking follow lexical scope; function/class locals are not module exports.

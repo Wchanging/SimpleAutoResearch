@@ -222,6 +222,9 @@ drafts; incomplete old package previews remain explicitly unknown. These are pla
 aids, not final export word-count certificates or paper-quality guarantees. Canonical
 pre-render text counts also include the title, normalized headings, cited references
 and experiment appendix, without duplicating the whole report in every prompt.
+Section measurement detail follows the argument plan's metric references, not
+the heading's wording or language. Review also receives metrics named by the
+current draft; legacy tasks without an argument plan retain the compact overview.
 Future renderer output and attachment rechecks still require final artifact inspection.
 Draft References are cleaned before protected data/caption additions, not afterwards.
 During section verification the preview replaces the adopted version with the current

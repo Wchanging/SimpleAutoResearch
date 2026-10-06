@@ -235,6 +235,47 @@ class NarrativeTests(unittest.TestCase):
 
 
 class ReportObjectiveTests(unittest.TestCase):
+    def test_section_metric_evidence_follows_argument_and_draft_not_heading(self):
+        import simple_ar.report.agent as agent
+        from simple_ar.report.schema import (
+            MetricSource, ReportArgumentPlan, ReportArgumentPoint, ReportDocumentPlan,
+        )
+        context, config, template, memory, section, draft = self.objects()
+        memory.metric_sources = [
+            MetricSource(metric_id=key, name=name, value=value, artifact="results.json", label=label)
+            for key, name, value, label in [
+                ("mean", "accuracy.delta_mean", .1, "paired_summary:0"),
+                ("seed", "accuracy", .7, "candidate:seed=0"),
+                ("task", "accuracy_after_task_1", .6, "candidate:seed=0"),
+                ("other", "accuracy", .5, "baseline:seed=0"),
+            ]
+        ]
+        memory.document_plan = ReportDocumentPlan(sections=[section], argument_plan=ReportArgumentPlan(
+            question="How did accuracy change?", answer="One recorded comparison.", points=[
+                ReportArgumentPoint(claim="Interpret the seed", section_id=section.section_id,
+                                    metric_ids=["seed", "not-registered"]),
+                ReportArgumentPoint(claim="Other comparison", section_id="elsewhere", metric_ids=["other"]),
+            ]))
+        draft.metric_ids = ["task"]
+        before = memory.model_dump()
+        writer_args = dict(context=context, memory=memory, config=config, extra_context=[],
+                           previous_draft=None, review=None, adopted_sections=[])
+        for heading in ("Results", "实验观察", "Evidence and trade-offs"):
+            section.heading = heading
+            writer = agent._writer_task_context(**writer_args, section=section)
+            reviewer = agent._reviewer_context(context=context, memory=memory, section=section,
+                config=config, template=template, draft=draft)
+            self.assertEqual([row[0] for row in writer["metric_sources"]["rows"]], ["mean", "seed"])
+            self.assertEqual([row[0] for row in reviewer["metric_sources"]["rows"]], ["mean", "seed", "task"])
+        # Projection does not rewrite the saved evidence or accepted argument.
+        section.heading = before["document_plan"]["sections"][0]["heading"]
+        self.assertEqual(memory.model_dump(), before)
+        joint = agent._writer_task_context(**writer_args, section=None, document_sections=[section])
+        self.assertEqual([row[0] for row in joint["metric_sources"]["rows"]], ["mean", "seed", "other"])
+        memory.document_plan = None
+        legacy = agent._writer_task_context(**writer_args, section=section)
+        self.assertEqual(legacy["metric_sources"], joint["metric_sources"])
+
     def test_section_review_policy_and_schema_use_one_read_tool_registry(self):
         import simple_ar.report.agent as agent
         from simple_ar.report.tools import report_tool_specs
