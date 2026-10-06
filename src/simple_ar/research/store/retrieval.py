@@ -228,21 +228,17 @@ def material_overview_views(chunks: list[TextChunk], query: str, *, limit: int =
         candidates = [row for row in ordered if row.chunk_id not in selected_ids]
     available = limit - len(views)
     # An overview is not a narrow lookup: repeated hits from one long section
-    # must not crowd out distinct retained sections. First expose a section's
-    # entry context (definitions/conditions can precede its highest-scoring
-    # interior), then fill ranked interiors within the SAME budget. An explicit
-    # caption still routes directly. Missing IDs keep the legacy ranking.
+    # must not crowd out distinct retained sections. Preserve each section's
+    # best actual hit; its opening is not a substitute for a matching result.
+    # Remaining slots retain ranked interiors and source-order fallback.
     ranked_pool = rank_source_chunks(candidates, query, limit=len(candidates))
     lexical_ids = {row.chunk_id for row in ranked_pool}
-    entries = {}
-    for row in candidates:
-        entries.setdefault(str(row.metadata.get("section_id") or row.chunk_id), row)
     ranked = []
     sections_seen = set()
     for row in ranked_pool:
         section_id = str(row.metadata.get("section_id") or row.chunk_id)
         if section_id not in sections_seen:
-            ranked.append(row if _source_label_match(row.text, query) else entries[section_id])
+            ranked.append(row)
             sections_seen.add(section_id)
     chosen = {row.chunk_id for row in ranked}
     ranked = (ranked + [row for row in ranked_pool if row.chunk_id not in chosen])[:available]
@@ -250,7 +246,6 @@ def material_overview_views(chunks: list[TextChunk], query: str, *, limit: int =
     selected = (ranked + [row for row in candidates if row.chunk_id not in matched])[:available]
     for row in source_chunk_views(selected, query=query, max_chars=max(1, remaining),
                                   max_chunk_chars=max_chunk_chars):
-        row["selection"] = ("task_lexical_match" if row["chunk_id"] in lexical_ids
-                            else "section_entry_context" if row["chunk_id"] in matched else "source_order_fallback")
+        row["selection"] = "task_lexical_match" if row["chunk_id"] in lexical_ids else "source_order_fallback"
         views.append(row)
     return views

@@ -111,13 +111,17 @@ class MaterialEvidenceSelectionTests(unittest.TestCase):
         for row in rows:
             self.assertEqual(row['text'], by_id[row['chunk_id']].text[row['character_start']:row['character_end']])
 
-    def test_overview_preserves_section_entry_before_repeated_interior_matches(self):
+    def test_overview_keeps_actual_hit_and_uses_spare_capacity_for_entry_context(self):
         entry = self.chunk('entry', 'Observations must be independent under the stated model.', 'method', 5)
         hit = self.chunk('interior', 'Calibration coverage comparison experiment results.', 'method', 10)
         entry.metadata['section_id'] = hit.metadata['section_id'] = 'method'
         rows = material_overview_views([entry, hit], 'calibration coverage comparison experiment results', limit=1)
-        self.assertEqual(rows[0]['chunk_id'], 'entry')
-        self.assertEqual(rows[0]['selection'], 'section_entry_context')
+        self.assertEqual(rows[0]['chunk_id'], 'interior')
+        self.assertEqual(rows[0]['selection'], 'task_lexical_match')
+        rows = material_overview_views([entry, hit], 'calibration coverage comparison experiment results', limit=2)
+        self.assertEqual([row['chunk_id'] for row in rows], ['interior', 'entry'])
+        self.assertIn('Observations must be independent', rows[1]['text'])
+        self.assertEqual(rows[1]['selection'], 'source_order_fallback')
         hit = self.chunk('caption', 'Table 2: Calibration coverage comparison experiment results.', 'method', 10)
         hit.metadata['section_id'] = 'method'
         rows = material_overview_views([entry, hit], 'Table 2', limit=1)

@@ -32,6 +32,9 @@ both results; historical tasks keep their already-consumed batch rather than
 replaying it. Review evidence references use actual JSON Pointers to supplied
 fields. Resolving a field establishes its location and ownership, not scientific
 support; quotations and old saved references retain their validation rules.
+Bounded source overviews keep the highest-ranked matching passage from each
+selected section; a section opening is additional context when capacity permits,
+not a replacement for a retrieved result. The views still represent partial reading.
 
 ### Changed-source review coverage
 
