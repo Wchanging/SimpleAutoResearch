@@ -20,15 +20,15 @@ from simple_ar.core.console import print_line
 from simple_ar.core.locking import SessionFileLock
 from simple_ar.integrations.llm import LLMClient
 from simple_ar.report.templates import BUILTIN_TEMPLATE_NAMES
-from simple_ar.result_analysis.table import TABLE_MODE_DESCRIPTIONS, TABLE_PLOT_DESCRIPTIONS
+from simple_ar.result_analysis.table import TABLE_CHOICES, TABLE_MODE_DESCRIPTIONS, TABLE_PLOT_DESCRIPTIONS
 
 
 KINDS = {"survey", "bug_fix", "reproduction", "writing", "data_analysis"}
-CHOICES = {"sources": {"materials", "search"}, "data_mode": {"observations", "values"},
+CHOICES = {"sources": {"materials", "search"}, "data_mode": set(TABLE_CHOICES["mode"]),
            "environment": {"current", "venv"},
-           "data_missing": {"reject", "omit"}, "data_plot": set(TABLE_PLOT_DESCRIPTIONS),
-           "series_layout": {"separate", "shared"},
-           "data_association": {"none", "pearson"},
+           "data_missing": set(TABLE_CHOICES["missing"]), "data_plot": set(TABLE_CHOICES["plot"]),
+           "series_layout": set(TABLE_CHOICES["series_layout"]),
+           "data_association": set(TABLE_CHOICES["association"]),
            "template": set(BUILTIN_TEMPLATE_NAMES)}
 TEXT_FIELDS = {"group_column", "observation_unit", "value_unit", "x_column", "x_unit", "paired_baseline", "data_attribution"}
 PATH_FIELDS = {"data_file", "project", "cwd", "output_root"}

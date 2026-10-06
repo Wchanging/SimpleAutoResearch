@@ -13,9 +13,9 @@ import shlex
 import sys
 
 from simple_ar.app.session_roots import new_research_session_root
-from simple_ar.cli.research_config import data_settings
+from simple_ar.cli.research_config import data_options_supplied, data_settings
 from simple_ar.core.console import print_line
-from simple_ar.result_analysis.table import TABLE_MODE_DESCRIPTIONS, TABLE_PLOT_DESCRIPTIONS
+from simple_ar.result_analysis.table import TABLE_CHOICES, TABLE_MODE_DESCRIPTIONS, TABLE_PLOT_DESCRIPTIONS, TableSpec
 
 
 FUNCTION_LABELS = {
@@ -28,6 +28,7 @@ FUNCTION_LABELS = {
 
 
 def add_data_options(parser: argparse.ArgumentParser) -> None:
+    defaults = TableSpec.defaults()
     parser.add_argument("--data-file", type=Path, help="Data analysis: UTF-8 CSV/TSV or JSON records.")
     parser.add_argument("--data-attribution", default="", help="Optional user-declared data source/credit/version. Preserved in analysis and writing; not downloaded or independently verified.")
     parser.add_argument("--value-column", action="append", default=[], help="Explicit numeric column; repeat for separate metrics or selected matrix/coordinate columns.")
@@ -35,20 +36,20 @@ def add_data_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--observation-unit", default="", help="What one row represents, e.g. one independent run or one supplied summary.")
     parser.add_argument("--value-unit", default="", help="Unit shared by selected value columns; omitted is recorded as unknown.")
     parser.add_argument("--paired-baseline", default="", help="Explicit same-row paired comparison: selected baseline column; other selected observation columns are candidates with a common quantity/unit.")
-    parser.add_argument("--data-association", choices=("none", "pearson"), default="none",
+    parser.add_argument("--data-association", choices=TABLE_CHOICES["association"], default=defaults["association"],
                         help="Opt-in descriptive Pearson r for supplied line/scatter x/y pairs in each group; not paired differences, significance or causal inference.")
-    parser.add_argument("--data-mode", choices=tuple(TABLE_MODE_DESCRIPTIONS), default="observations",
+    parser.add_argument("--data-mode", choices=TABLE_CHOICES["mode"], default=defaults["mode"],
                         help="; ".join(f"{mode}: {meaning}" for mode, meaning in TABLE_MODE_DESCRIPTIONS.items()))
-    parser.add_argument("--data-missing", choices=("reject", "omit"), default="reject")
-    parser.add_argument("--figure-width", choices=("column", "wide"), default="wide", help="Generic 3.5/7-inch figure target, not a conference-specific size.")
-    parser.add_argument("--data-max-mb", type=int, default=20, help="Physical input size limit, MiB.")
-    parser.add_argument("--data-max-figures", type=int, default=100, help="Physical SVG page limit; overflow fails without dropping categories.")
-    parser.add_argument("--data-plot", choices=tuple(TABLE_PLOT_DESCRIPTIONS), default="bar",
+    parser.add_argument("--data-missing", choices=TABLE_CHOICES["missing"], default=defaults["missing"])
+    parser.add_argument("--figure-width", choices=TABLE_CHOICES["width"], default=defaults["width"], help="Generic 3.5/7-inch figure target, not a conference-specific size.")
+    parser.add_argument("--data-max-mb", type=int, default=defaults["max_mb"], help="Physical input size limit, MiB.")
+    parser.add_argument("--data-max-figures", type=int, default=defaults["max_figures"], help="Physical SVG page limit; overflow fails without dropping categories.")
+    parser.add_argument("--data-plot", choices=TABLE_CHOICES["plot"], default=defaults["plot"],
                         help="; ".join(f"{plot}: {meaning}" for plot, meaning in TABLE_PLOT_DESCRIPTIONS.items()))
     parser.add_argument("--x-column", default="", help="line/scatter: explicit numeric x column, distinct from value columns.")
     parser.add_argument("--x-unit", default="", help="Unit of the x coordinate; omission is recorded as unknown.")
-    parser.add_argument("--data-max-points", type=int, default=10000, help="Physical points per coordinate figure; excess fails without sampling.")
-    parser.add_argument("--series-layout", choices=("separate", "shared"), default="separate",
+    parser.add_argument("--data-max-points", type=int, default=defaults["max_points"], help="Physical points per coordinate figure; excess fails without sampling.")
+    parser.add_argument("--series-layout", choices=TABLE_CHOICES["series_layout"], default=defaults["series_layout"],
                         help="line/scatter: separate axes by default, or explicitly share axes for columns with a common declared unit.")
 
 
@@ -252,9 +253,7 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
                                          for item in tokens]
             args.observation_unit = _answer("What one row represents / 每行代表什么", args.observation_unit, interactive=True)
         analysis = data_settings(args)
-    elif any((args.data_file, args.value_column, args.group_column, args.observation_unit, args.value_unit,
-              args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100,
-              args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000, args.series_layout != "separate", args.paired_baseline, args.data_attribution, getattr(args, "data_association", "none") != "none")):
+    elif data_options_supplied(args):
         raise ValueError("Data options require --kind data_analysis.")
     documents = [path.expanduser().resolve() for path in args.document]
     materials = [path.expanduser().resolve() for path in args.material]

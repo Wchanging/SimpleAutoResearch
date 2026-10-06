@@ -343,7 +343,9 @@ def _add_llm_synthesis(
         "conditions (settings, definitions, units or assumptions affecting comparison), "
         "interpretation (why the evidence matters to the user), and unresolved_question. "
         "A difference in setting or metric is not a contradiction. Preserve counterevidence. "
-        "Use single_source when only one independent source supports an assessment; return [] when no comparison is supported. "
+        "Use single_source when only one independent source supports an assessment; this does not exclude "
+        "comparisons of methods, controls or ablations actually measured within that source. Preserve the "
+        "matched subset and its conditions without extending it to unmatched settings. Return [] when no comparison is supported. "
         "These are model interpretations, not independently verified facts. Do not introduce new studies or measurements."
     )
     prompt += "\nComparison response contract:\n" + json.dumps({

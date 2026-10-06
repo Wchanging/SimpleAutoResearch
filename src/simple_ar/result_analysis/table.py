@@ -7,7 +7,7 @@ changed file. Aggregated values and row-level observations remain distinct.
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass, fields
+from dataclasses import MISSING, asdict, dataclass, fields
 import io
 import json
 import math
@@ -27,6 +27,12 @@ TABLE_PLOT_DESCRIPTIONS = {
     "line": "Supplied numeric x/y coordinates, ordered within series; missing y breaks lines.",
     "scatter": "Supplied numeric x/y coordinates, retaining individual complete pairs.",
     "heatmap": "Supplied matrix values with unique row labels and a common quantity/unit; no normalization, clustering or inferred correlation.",
+}
+
+TABLE_CHOICES = {
+    "mode": tuple(TABLE_MODE_DESCRIPTIONS), "plot": tuple(TABLE_PLOT_DESCRIPTIONS),
+    "missing": ("reject", "omit"), "width": ("column", "wide"),
+    "series_layout": ("separate", "shared"), "association": ("none", "pearson"),
 }
 
 
@@ -61,9 +67,9 @@ class TableSpec:
             raise ValueError("State what one row represents (observation_unit).")
         if not isinstance(self.group_column, str) or not isinstance(self.value_unit, str):
             raise ValueError("group_column and value_unit must be strings.")
-        if self.mode not in {"observations", "values"} or self.missing not in {"reject", "omit"}:
+        if self.mode not in TABLE_CHOICES["mode"] or self.missing not in TABLE_CHOICES["missing"]:
             raise ValueError("mode must be observations/values; missing must be reject/omit.")
-        if self.width not in {"column", "wide"} or type(self.max_mb) is not int or self.max_mb < 1:
+        if self.width not in TABLE_CHOICES["width"] or type(self.max_mb) is not int or self.max_mb < 1:
             raise ValueError("width must be column/wide; max_mb must be a positive integer.")
         if type(self.max_figures) is not int or self.max_figures < 1:
             raise ValueError("max_figures must be a positive physical output limit.")
@@ -71,9 +77,9 @@ class TableSpec:
             raise ValueError("plot must be " + "/".join(TABLE_PLOT_DESCRIPTIONS) + ".")
         if self.plot == "box" and self.mode != "observations":
             raise ValueError("Box plots require row-level observations; quartiles cannot be inferred from supplied summaries.")
-        if not isinstance(self.association, str) or self.association not in {"none", "pearson"} or (self.association != "none" and self.plot not in {"line", "scatter"}):
+        if not isinstance(self.association, str) or self.association not in TABLE_CHOICES["association"] or (self.association != "none" and self.plot not in {"line", "scatter"}):
             raise ValueError("association must be none/pearson; Pearson requires explicit line/scatter x and y coordinates, not mean bars or paired differences.")
-        if self.series_layout not in {"separate", "shared"}:
+        if self.series_layout not in TABLE_CHOICES["series_layout"]:
             raise ValueError("series_layout must be separate/shared.")
         if self.series_layout == "shared" and self.plot not in {"line", "scatter"}:
             raise ValueError("Shared coordinate axes require line/scatter; bar groups retain their own layout.")
@@ -99,6 +105,11 @@ class TableSpec:
         if self.paired_baseline and (self.mode != "observations" or self.plot not in {"bar", "box"}
                 or self.paired_baseline not in self.value_columns or len(self.value_columns) < 2):
             raise ValueError("Paired comparison requires row-level observations, bar/box plots and at least two selected columns including the explicit baseline.")
+
+    @classmethod
+    def defaults(cls) -> dict:
+        """Expose optional defaults to adapters without constructing a task."""
+        return {field.name: field.default for field in fields(cls) if field.default is not MISSING}
 
     @classmethod
     def from_config(cls, config):

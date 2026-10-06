@@ -6,6 +6,15 @@ This file records implemented, user-visible changes in reverse chronological ord
 
 ## 2026-10-06
 
+- Code review keeps model concerns advisory rather than promoting matching
+  wording across review groups into a blocking verdict. Scope violations,
+  definite missing interfaces and recorded validation failures still block;
+  authorized behavior checks provide actual evidence and can drive repair.
+- Accepted direct-material writing plans retain their ordinary source handoff
+  without an unused model query-planning call. Search and evidence-reading
+  plans retain query planning; saved task plans and recovery are unchanged.
+  Writing distinguishes the number of sources from the number of methods:
+  supported within-paper comparisons keep their matched conditions.
 - Section writing and review select detailed measurements from the accepted
   argument plan and draft references, not English section titles. Renaming or
   translating a heading preserves its evidence; historical tasks without an

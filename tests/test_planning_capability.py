@@ -22,6 +22,39 @@ from simple_ar.research.task_plan import TaskPlanRequest
 
 
 class PlanningCapabilityTests(unittest.TestCase):
+    def test_direct_material_report_retains_handoff_without_query_model(self) -> None:
+        from dataclasses import replace
+        from simple_ar.research.task_plan import default_task_steps
+
+        base = TaskPlanRequest(
+            task_kind="survey", goal="Compare supplied notes", request_text="Compare supplied notes",
+            requested_outputs=("report",),
+            config={"research_materials_only": True, "research_local_documents": ["notes.md"]},
+        )
+        class Client:
+            model = "fixture-planner"
+            def __init__(self):
+                self.labels = []
+            def ask_json(self, _system, _prompt, *, label="", **_kwargs):
+                self.labels.append(label)
+                if label != "task-plan":
+                    raise AssertionError("Direct writing has no query-planning consumer")
+                return {"steps": default_task_steps(base)}
+
+        client = Client()
+        with tempfile.TemporaryDirectory() as tmp:
+            context = CapabilityContext(store=ArtifactStore(Path(tmp)),
+                                        attempt=AttemptManifest(attempt_id="plan-local", capability="plan"))
+            result = run_research_plan_capability(context=context, request=ResearchPlanRequest(
+                topic=base.goal, config=base.config, use_llm=True, llm_client=client,
+                task_plan_request=replace(base, use_llm=True, llm_client=client),
+            ))
+            plans = {ref.kind: context.store.read_json(ref) for ref in result.artifacts}
+            self.assertEqual(plans["research_plan"]["planner"], "deterministic")
+            self.assertTrue(plans["research_plan"]["research_questions"]["questions"])
+            self.assertNotIn("read", [row["action"] for row in plans["task_plan"]["steps"]])
+        self.assertEqual(client.labels, ["task-plan"])
+
     def test_rejected_task_route_does_not_spend_a_query_planning_call(self) -> None:
         class Client:
             model = "fixture-planner"

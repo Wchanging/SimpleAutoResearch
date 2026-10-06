@@ -1,6 +1,5 @@
 import unittest
 
-from simple_ar.code_task.review import _corroborated_review_findings
 from simple_ar.code_task.reviewing import build_review_artifact
 from simple_ar.reviewing.schema import ReviewFinding
 
@@ -58,8 +57,6 @@ class ReviewConsensusTests(unittest.TestCase):
     def test_requests_for_downstream_validation_do_not_block_that_validation(self):
         rows = [finding(cluster, 'The applied fix has no recorded validation outcome', category='validation')
                 for cluster in ('entrypoint', 'data_flow', 'core_logic', 'config_docs')]
-        result = _corroborated_review_findings(rows)
-        self.assertEqual(result, [])
         report = build_review_artifact(reviewer='code-task-reviewer', subject='post_apply', findings=rows)
         self.assertEqual(report['summary']['blocking_count'], 0)
         self.assertEqual(report['summary']['warning_count'], 1)
@@ -84,41 +81,37 @@ class ReviewConsensusTests(unittest.TestCase):
             rows = _deterministic_findings(run, {}, [])
             self.assertTrue(any(row.key == 'validation:failed' and row.severity == 'blocking' for row in rows))
 
-    def test_three_independent_matching_correctness_findings_block(self) -> None:
-        rows = [
-            finding("entrypoint", "New path is unreachable: no caller supplies the required argument."),
-            finding("data_flow", "New path is unreachable: the active configuration omits the argument."),
-            finding("metrics", "New path is unreachable: measured runs cannot enter the branch."),
-        ]
-        result = _corroborated_review_findings(rows)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].severity, "blocking")
-        self.assertEqual(result[0].source, "code-task.review-consensus")
-        report = build_review_artifact(
-            reviewer="code-task-reviewer", subject="post_apply", findings=[*rows, *result],
-        )
-        self.assertEqual(report["status"], "failed")
-        self.assertEqual(report["summary"]["blocking_count"], 1)
-
-    def test_single_source_unrelated_and_style_warnings_stay_advisory(self) -> None:
-        self.assertEqual(_corroborated_review_findings([
-            finding("entrypoint", "New path is unreachable: no caller."),
-            finding("data_flow", "New path is unreachable: no caller."),
-        ]), [])
-        self.assertEqual(_corroborated_review_findings([
-            finding("entrypoint", "New path is unreachable: no caller."),
-            finding("entrypoint", "New path is unreachable: no caller."),
-            finding("entrypoint", "New path is unreachable: no caller."),
-        ]), [])
-        self.assertEqual(_corroborated_review_findings([
-            finding("entrypoint", "New path is unreachable: no caller."),
-            finding("data_flow", "Argument order is wrong: values are swapped."),
-            finding("metrics", "Validation command is absent: no run evidence."),
-        ]), [])
-        self.assertEqual(_corroborated_review_findings([
-            finding(cluster, "Line wrapping is inconsistent: use the project style.", category="style")
-            for cluster in ("entrypoint", "data_flow", "metrics")
-        ]), [])
+    def test_matching_model_concerns_leave_validation_reachable(self):
+        from pathlib import Path
+        import tempfile
+        from unittest.mock import patch
+        from simple_ar.code_task import initialize_code_task, validate_code_task
+        from simple_ar.code_task.review import review_code_task_changes
+        from simple_ar.code_task.runtime.state import code_task_paths
+        from simple_ar.core.artifacts import read_json
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source"
+            source.mkdir()
+            (source / "helper.py").write_text("def value():\n    return 42\n")
+            (source / "main.py").write_text("import helper\nassert helper.value() == 42\n")
+            task = root / "task.md"
+            task.write_text("Check the actual helper call. Do not change tests.\n")
+            run = initialize_code_task(code_root=source, task_file=task, run_dir=root / "run").run_dir
+            rows = [finding(cluster, "New path is unreachable: no caller.")
+                    for cluster in ("entrypoint", "data_flow", "metrics")]
+            with patch("simple_ar.code_task.review._layered_llm_findings", return_value=rows):
+                review = review_code_task_changes(run)
+            self.assertEqual(review.blocking_count, 0)
+            self.assertEqual(review.warning_count, 1)
+            self.assertEqual(validate_code_task(run).status, "passed")
+            report = read_json(review.report_path)
+            self.assertFalse(any(row["source"] == "code-task.review-consensus" for row in report["findings"]))
+            # Advisory does not mean correct: a real broken API still blocks.
+            (code_task_paths(run).workspace_dir / "main.py").write_text("import helper\nhelper.absent()\n")
+            with patch("simple_ar.code_task.review._layered_llm_findings", return_value=rows):
+                failed = review_code_task_changes(run)
+            self.assertEqual(failed.status, "failed")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Any, Callable
 
 from simple_ar.code_task.editing.scope import (
@@ -50,10 +48,10 @@ def review_code_task_changes(
 ) -> CodeTaskReviewResult:
     """Review the current code-task patch and write structured findings.
 
-    A single model finding is advisory. Independent review clusters that
-    corroborate the same concrete correctness defect can stop execution;
-    deterministic scope violations remain independently blocking. Findings
-    are recorded into task memory for later repair.
+    Model findings remain advisory, even when overlapping source windows yield
+    matching wording. Agreement is not an observed failure. Deterministic scope,
+    interface and recorded validation defects still block execution. Findings
+    remain in task memory for behavioral validation and later repair.
     """
 
     root = Path(run_dir)
@@ -99,12 +97,10 @@ def review_code_task_changes(
         max_source_chars_per_file=max_source_chars_per_file,
         message_callback=message_callback,
     )
-    corroborated = _corroborated_review_findings(llm_findings) if phase == "post_apply" else []
-
     report = build_review_artifact(
         reviewer="code-task-reviewer",
         subject=phase,
-        findings=[*deterministic, *llm_findings, *corroborated],
+        findings=[*deterministic, *llm_findings],
         metadata={
             "phase": phase,
             "changed_files": changed_files,
@@ -115,7 +111,6 @@ def review_code_task_changes(
             "review_index": _relative_meta_path(phase, "review_index"),
             "review_clusters": _relative_meta_path(phase, "review_clusters"),
             "review_cluster_count": len(review_clusters),
-            "corroborated_issue_count": len(corroborated),
         },
     )
     report_path = paths.meta_dir / ("review_report.json" if phase == "post_apply" else f"review_report_{phase}.json")
@@ -304,57 +299,6 @@ def _layered_llm_findings(
             )
         )
     return findings[:16]
-
-
-_CORRECTNESS_CATEGORIES = frozenset({
-    "logic", "data_flow", "interface", "degenerate_implementation", "execution",
-    "runtime", "metrics", "correctness", "contract",
-    "benchmark_integrity", "scope",
-})
-
-
-def _corroborated_review_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
-    """Escalate only a matching correctness claim from three distinct clusters.
-
-    The opening clause is a deliberately conservative, auditable signature.
-    It may miss differently worded reports; it cannot turn a lone model
-    judgment or three unrelated warnings into an execution blocker.
-    Validation requests are advisory: a pre-validation review cannot require
-    the missing downstream result to authorize its own validation. Actual
-    failed validation is independently blocking in deterministic findings.
-    """
-
-    groups: dict[tuple[str, tuple[str, ...]], list[ReviewFinding]] = defaultdict(list)
-    for finding in findings:
-        category = finding.category.strip().lower()
-        if finding.severity not in {"blocking", "warning"} or category not in _CORRECTNESS_CATEGORIES:
-            continue
-        if not finding.source.startswith("code-task.llm-reviewer."):
-            continue
-        opening = re.split(r"[:;.]", finding.summary, maxsplit=1)[0]
-        signature = tuple(re.findall(r"[\w]+", opening.lower())[:6])
-        if len(signature) < 3:
-            continue
-        groups[(category, signature)].append(finding)
-    corroborated: list[ReviewFinding] = []
-    for (category, signature), matching in sorted(groups.items()):
-        sources = {finding.source for finding in matching}
-        if len(sources) < 3:
-            continue
-        representative = matching[0]
-        corroborated.append(ReviewFinding(
-            key=f"corroborated:{category}:{'-'.join(signature)}",
-            severity="blocking",
-            category=category,
-            summary=f"Review clusters reported the same concern: {representative.summary}",
-            evidence=list(dict.fromkeys(path for finding in matching for path in finding.evidence))[:12],
-            recommendation=(
-                "Resolve this specific correctness concern and re-review the patch before "
-                "running the candidate. " + representative.recommendation
-            ).strip(),
-            source="code-task.review-consensus",
-        ))
-    return corroborated
 
 
 def _review_prompt(

@@ -125,8 +125,11 @@ prefer concise paragraphs or a short comparison list instead of one dense
 block. A short conclusion may need only one paragraph; do not pad it.
 For multi-source survey reports, synthesize across papers: build taxonomies,
 contrast assumptions, compare evaluation settings, and state boundary conditions.
-For a single-source review, assess that source directly; do not manufacture a
-method family, baseline comparison, or cross-paper consensus.
+For a single-source review, assess that source's evidence, including its own
+controls, ablations and method comparisons. One source can report several
+methods: preserve a supported matched comparison within its tested setting,
+without generalizing it to every task. Do not invent absent comparisons or
+cross-paper consensus.
 When many sources are available, use them to improve coverage and confidence;
 do not make the report grow linearly by writing one paragraph per paper.
 Never write prompt-planning language such as "Hint:", "Use this paper as", or

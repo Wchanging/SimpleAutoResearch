@@ -19,6 +19,12 @@ available when the accepted plan selects them; explicit summary, assessment,
 design and experiment requests keep their evidence dependencies. This does not
 certify source comprehension or paper quality. Recovery follows the saved plan.
 
+When the accepted task contains neither search nor evidence reading, query
+planning retains the deterministic source handoff without a second model call.
+The Writer still receives originals and may read relevant passages. This does
+not merge sources or invent evidence: one paper can report multiple methods,
+controls and ablations, whose comparisons remain limited to their tested settings.
+
 ### Changed-source review coverage
 
 Existing-project review allocates its existing cluster/file allowance to changed
@@ -30,6 +36,12 @@ with range and partial-coverage labels. Generated-project review without a diff
 retains separate head/tail views, not a fabricated contiguous source excerpt.
 Protected source remains read-only; review does not authorize edits or replace
 runtime validation. This changes input selection, not the number of model rounds.
+
+Model concerns are advisory, including matching concerns from several groups.
+Repeated wording is not independent failure evidence. Scope violations, definite
+missing interfaces and recorded validation failures remain blocking. Only an
+already-authorized command may run; neither a warning nor a passing static check
+certifies behavior. Existing failed review records are not rewritten on recovery.
 
 ### Initial source defects versus new defects
 

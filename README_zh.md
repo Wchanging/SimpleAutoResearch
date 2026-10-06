@@ -84,10 +84,10 @@ OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://your-provider.example/v1
 SIMPLE_AR_MODEL=your_model_id
 SIMPLE_AR_LLM_API=chat
-SIMPLE_AR_LLM_STREAM=true
+SIMPLE_AR_LLM_STREAM=false
 ```
 
-接口格式须与服务商兼容，也支持 `responses`。不要提交密钥。
+接口格式须与服务商兼容，也支持 `responses`。流式返回可选，仅在服务商可靠支持时启用。不要提交密钥。
 `.env` 只放全局模型与传输设置；项目路径、解释器、数据和任务限制放在对应任务配置。
 [高级配置](docs/CONFIG_REFERENCE_zh.md)按需使用。
 

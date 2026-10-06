@@ -96,6 +96,14 @@ class SessionArguments:
     data_analysis: dict | None
 
 
+def data_options_supplied(args: argparse.Namespace) -> bool:
+    """Detect nondefault table options using the same mapping as configuration."""
+    from simple_ar.result_analysis.table import TableSpec
+    defaults = {"file": None, "value_columns": [], "observation_unit": "", **TableSpec.defaults()}
+    return any(hasattr(args, destination) and getattr(args, destination) != defaults[key]
+               for key, (destination, _) in FIELDS["analysis"].items())
+
+
 def data_settings(args: argparse.Namespace) -> dict:
     """Validate table settings shared by guided and direct session input."""
     from simple_ar.result_analysis.table import TableSpec, read_table_source, validate_table_columns

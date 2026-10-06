@@ -239,7 +239,15 @@ def run_research_plan_capability(
                     kind="task_plan_proposals", producer="research.task_planning",
                 )
     if not request.task_plan_only:
-        result = build_requested_research_plan(request)
+        # Query/question generation serves search and evidence reading, not
+        # direct writing from supplied originals. Retain the ordinary handoff
+        # for ingestion/recovery without paying for an unused model plan.
+        research_request = request
+        if task_plan is not None and not any(
+            step.capability in {"search", "read"} for step in task_plan.steps
+        ):
+            research_request = replace(request, use_llm=False)
+        result = build_requested_research_plan(research_request)
         output = context.store.write_json(
             "research_plan.json",
             result.to_handoff_dict(),

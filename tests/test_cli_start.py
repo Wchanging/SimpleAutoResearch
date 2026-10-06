@@ -18,6 +18,25 @@ from simple_ar.code_task.runtime.config import load_code_task_init_options, load
 
 
 class StartTests(unittest.TestCase):
+    def test_table_options_share_owner_defaults_and_choices(self):
+        from simple_ar.cli.intake_dialogue import CHOICES
+        from simple_ar.cli.research_config import FIELDS, data_options_supplied
+        from simple_ar.result_analysis.table import TABLE_CHOICES, TableSpec
+        parser = build_parser()
+        args = parser.parse_args(["start", "--kind", "survey"])
+        self.assertFalse(data_options_supplied(args))
+        for name, default in TableSpec.defaults().items():
+            destination = FIELDS["analysis"][name][0]
+            self.assertEqual(getattr(args, destination), default)
+        for name, choices in TABLE_CHOICES.items():
+            destination = FIELDS["analysis"][name][0]
+            if destination in CHOICES:
+                self.assertEqual(CHOICES[destination], set(choices))
+        for flag, value in (("--data-mode", "values"), ("--data-max-mb", "0"),
+                            ("--data-association", "pearson"), ("--group-column", "group")):
+            with self.subTest(flag=flag):
+                self.assertTrue(data_options_supplied(parser.parse_args(["start", flag, value])))
+
     def test_new_guided_survey_plans_document_from_evidence_without_changing_existing_config(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

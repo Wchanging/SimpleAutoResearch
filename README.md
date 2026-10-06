@@ -89,10 +89,11 @@ OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://your-provider.example/v1
 SIMPLE_AR_MODEL=your_model_id
 SIMPLE_AR_LLM_API=chat
-SIMPLE_AR_LLM_STREAM=true
+SIMPLE_AR_LLM_STREAM=false
 ```
 
 Use an API format supported by your provider; `responses` is also supported.
+Streaming is optional; enable it only when your provider handles it reliably.
 Keep secrets out of Git. `.env` holds global model/transport settings; project
 paths, interpreters, data and task limits belong in task configuration.
 [Advanced settings](docs/CONFIG_REFERENCE.md) are optional.
