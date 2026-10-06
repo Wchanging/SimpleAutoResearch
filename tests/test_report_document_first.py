@@ -459,7 +459,7 @@ class JointDraftingTests(unittest.TestCase):
                 for payload in prompts[1:-1]:
                     self.assertIn('divided by exposure time', json.dumps(payload['extra_tool_context']))
                 self.assertIn('divided by exposure time', json.dumps(prompts[-1]['supplementary_evidence']))
-                self.assertFalse(prompts[1].get('source_reading', {}).get('available', False))
+                self.assertEqual(prompts[1].get('source_reading', {}).get('available', False), scope == 'document')
                 self.assertEqual(kwargs['gateway'].documents.to_handoff_dict(), original)
                 self.assertTrue(saved[0]['memory']['outline_planning']['context_requests'])
                 self.assertEqual(saved[0]['tool_results'], [])
@@ -477,6 +477,38 @@ class JointDraftingTests(unittest.TestCase):
         self.assertNotIn('report-outline-planner', labels)
         self.assertIn('divided by exposure time', json.dumps(prompts[0]['extra_tool_context']))
         self.assertEqual(len(result.tool_results), 1)
+
+        # Old checkpoints shared the planning and Writer batch. Preserve their
+        # spent allowance, rather than replaying it under the new outline owner.
+        legacy = copy.deepcopy(saved[-1])
+        for event in legacy['iterations']:
+            if event['action'] == 'writer_context' and event['summary'] == 'outline_evidence':
+                event['summary'] = 'initial_document'
+        labels, prompts = [], []
+        with patch.object(kwargs['gateway'], 'call', side_effect=AssertionError('Do not replay legacy reads')):
+            run_report_agent(**kwargs, client=self.planned_client(plan, labels, prompts), completed_checkpoint=legacy)
+        self.assertFalse(prompts[0]['source_reading']['available'])
+
+    def test_outline_read_does_not_consume_independent_writer_gap_lookup(self):
+        kwargs, plan = self.planning_inputs()
+        labels, prompts = [], []
+        regular = self.planned_client(plan, labels, prompts)
+        class Client:
+            def ask_json(self, system, prompt, *, label='', **options):
+                payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                if label == 'report-writer-document' and payload['source_reading']['available']:
+                    self.assert_initial = 'divided by exposure time' in json.dumps(payload['extra_tool_context'])
+                    return {'context_requests': [{'tool_name': 'search_source_chunks', 'arguments': {
+                        'handle': 'material:comparison', 'query': 'density normalization bin width'}}]}
+                return regular.ask_json(system, prompt, label=label, **options)
+        client = Client()
+        result = run_report_agent(**kwargs, client=client)
+        self.assertTrue(client.assert_initial)
+        self.assertEqual(kwargs['gateway'].call_counts['search_source_chunks'], 2)
+        self.assertEqual([row.summary for row in result.iterations if row.action == 'writer_context'],
+                         ['outline_evidence', 'initial_document'])
+        self.assertEqual(len(result.tool_results), 2)
+        self.assertFalse(prompts[1]['source_reading']['available'])
 
     def test_planned_read_allocation_interruption_does_not_replan_or_replay(self):
         kwargs, plan = self.planning_inputs()
@@ -496,7 +528,7 @@ class JointDraftingTests(unittest.TestCase):
             result = run_report_agent(**kwargs, client=self.planned_client(plan, labels, prompts), completed_checkpoint=saved[-1])
         self.assertNotIn('report-outline-planner', labels)
         self.assertEqual(result.tool_results[0].status, 'blocked')
-        self.assertFalse(prompts[0]['source_reading']['available'])
+        self.assertTrue(prompts[0]['source_reading']['available'])
         self.assertIn('not source evidence', result.tool_results[0].summary)
 
     def test_disabled_or_unregistered_planning_reads_stay_in_existing_correction_allowance(self):

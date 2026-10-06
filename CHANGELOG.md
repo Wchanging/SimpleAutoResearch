@@ -6,6 +6,13 @@ This file records implemented, user-visible changes in reverse chronological ord
 
 ## 2026-10-06
 
+- Material writing keeps outline lookups separate from the Writer's bounded
+  gap lookup, so preparing an outline does not consume the author's opportunity
+  to read missing passages. Both use the existing tool allowance and checkpoints;
+  historical tasks retain their already-consumed read batches.
+- New review responses use literal JSON Pointers for evidence references instead
+  of a second short-anchor representation. Existing saved references remain
+  readable; field ownership and strict quotation validation are unchanged.
 - Code review keeps model concerns advisory rather than promoting matching
   wording across review groups into a blocking verdict. Scope violations,
   definite missing interfaces and recorded validation failures still block;

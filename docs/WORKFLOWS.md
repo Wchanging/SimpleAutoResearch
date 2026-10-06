@@ -25,6 +25,14 @@ The Writer still receives originals and may read relevant passages. This does
 not merge sources or invent evidence: one paper can report multiple methods,
 controls and ablations, whose comparisons remain limited to their tested settings.
 
+For material writing, outline lookups and the Writer's optional gap lookup are
+separate bounded batches under the same tool allowance. An outline read does not
+disable the author's later request for a missing passage. Checkpoints retain
+both results; historical tasks keep their already-consumed batch rather than
+replaying it. Review evidence references use actual JSON Pointers to supplied
+fields. Resolving a field establishes its location and ownership, not scientific
+support; quotations and old saved references retain their validation rules.
+
 ### Changed-source review coverage
 
 Existing-project review allocates its existing cluster/file allowance to changed

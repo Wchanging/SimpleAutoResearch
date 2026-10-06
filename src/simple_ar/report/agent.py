@@ -289,15 +289,23 @@ def run_report_agent(
         # Consume the same initial read batch before composing, not another
         # planning call or a second read/recovery ledger.
         initial_requests = current.outline_planning.get("context_requests", [])
-        initial_evidence = writer_reads([ReportToolCall.model_validate(row) for row in initial_requests]
-            if initial_requests else None) if completed_count < len(current.section_plan) else []
+        # An outline lookup is not the Writer's independent gap-read batch.
+        # Legacy checkpoints used initial_document for both; retain their
+        # accepted batch rather than replaying it under a new owner.
+        legacy_reads = (completed_checkpoint is not None and any(
+            row.action == "writer_context" and row.summary == "initial_document" for row in iterations
+        ) and not any(row.action == "writer_context" and row.summary == "outline_evidence" for row in iterations))
+        initial_evidence = (_writer_evidence_reads(owner="outline_evidence",
+            requests=[ReportToolCall.model_validate(row) for row in initial_requests] if initial_requests else None,
+            gateway=gateway, iterations=iterations, all_results=all_tool_results, checkpoint=checkpoint)
+            if completed_count < len(current.section_plan) and not legacy_reads else [])
         if (config.draft_scope == "document" and len(current.section_plan) > 1
                 and pending_draft is None and completed_count < len(current.section_plan)):
             remaining = _draft_sequence(current.section_plan)[completed_count:]
             _emit(emit, f"Writer jointly drafting {len(remaining)} remaining section(s).")
             joint = _draft_document_with_recovery(client=client, context=context, template=template,
                 memory=current, config=config, sections=remaining, adopted_sections=sections, emit=emit,
-                read_context=writer_reads)
+                extra_context=initial_evidence, read_context=writer_reads)
             # Validate the whole returned set before adopting anything. The
             # existing checkpoint is the sole commit/recovery boundary.
             for section_index, (section, draft) in enumerate(zip(remaining, joint), start=completed_count + 1):

@@ -211,7 +211,7 @@ class EvidenceSelectionTests(unittest.TestCase):
             template=load_report_template_bundle(report_mode=context.report_mode, config=config), label="field-recovery")
         self.assertEqual(len(seen), 2)
         self.assertEqual(seen[0]["output_schema"], seen[1]["output_schema"])
-        self.assertEqual(set(seen[0]["output_schema"]["findings"][0]["evidence_quotes"][0]), {"anchor"})
+        self.assertEqual(set(seen[0]["output_schema"]["findings"][0]["evidence_quotes"][0]), {"pointer"})
         reference = result.findings[0].evidence_quotes[0]
         self.assertEqual((reference.pointer, reference.quote, reference.role, reference.mode),
             ("/execution_evidence/execution_records/0/cwd", "/actual-copy", "executor_record", "field_reference"))
@@ -274,7 +274,7 @@ class EvidenceSelectionTests(unittest.TestCase):
                 example = (view["output_schema"]["section_reviews"][0]
                     if "section_reviews" in view["output_schema"] else view["output_schema"])
                 for row in [*example.get("findings", []), *example.get("finding_checks", [])]:
-                    assert set(row["evidence_quotes"][0]) == {"anchor"}
+                    assert set(row["evidence_quotes"][0]) == {"pointer"}
                 if "section_reviews" in view["output_schema"]:
                     if view.get("historical_findings_to_check"):
                         check = view["historical_findings_to_check"][0]
