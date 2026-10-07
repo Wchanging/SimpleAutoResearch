@@ -18,18 +18,19 @@ existing results need not repeat an experiment.
 
 ## What can you do with it?
 
-| Task | Minimum input | Delivery and current scope |
+| Task | Bring | Get |
 | --- | --- | --- |
-| Research a direction | Question, scope, model API; optional local papers | Sources, reading notes, comparisons and Markdown report. Reading depth depends on available material. |
-| Repair a codebase | Project, allowed edit scope, validation command, model API | Isolated edited workspace, patch/review records and actual validation. Intended for bounded tasks, not arbitrary unattended engineering. |
-| Analyse and plot data | CSV/TSV or JSON records, columns and row/unit meanings | Descriptive statistics, explicitly paired differences or supplied values; editable bar/box/line/scatter/matrix-heatmap SVGs, vector PDFs, PNG previews and rebuilding inputs. No API needed; uncertainty requires matched observation semantics, not guessed significance. |
-| Write from material | Notes, draft, JSON producer records or descriptive-analysis package; model API | Reviewed report or evidence-limited paper-style draft, references and reusable figures. No new experiment or online research is implied. |
-| Reproduce a specified conclusion | Local paper, existing project/data, accepted command and evaluation protocol | Confirm a source-backed command and producer-file contract, optionally prepare a task venv, then deliver measurements and a report draft. Not arbitrary whole-paper reproduction. |
-| Export a saved report | Report artifacts and Pandoc; SVG conversion tools when needed; TeX for optional compilation | Editable ACM acmart demonstration project, bibliography and figures, through separate `report-export`. Compilation and content quality are separate checks. |
+| Research a direction | A question, scope and optional papers | Source-backed comparisons, reading notes and a report |
+| Repair a codebase | A repository, problem, allowed edits and validation command | An edited workspace, change records and validation results |
+| Analyse and plot data | A table, selected columns and their meanings | Descriptive statistics, paired comparisons and editable SVG/PDF/PNG figures |
+| Write from material | Papers, notes, a draft or saved analysis | A reviewed report or paper-style draft, references and reused figures |
+| Reproduce a specified conclusion | A paper, prepared project/data and agreed protocol | Recorded measurements and an account of the reproduction scope |
+| Export a saved report | Report artifacts and export tools | An editable ACM LaTeX project, with optional PDF compilation |
 
-The first five tasks have guided `start` entries. Export consumes an existing
-report; it is not a sixth setup choice. Research improvement remains experimental
-and is described with the prepared cases below.
+Analysis can run without a model API. Research, code repair and writing require
+one; reproduction requires the target scientific environment. The first five tasks
+have guided `start` entries, while `report-export` uses an existing report.
+See [current boundaries](#current-boundaries) for the supported scope.
 
 ### Why use an assistant around these tasks?
 
@@ -97,6 +98,9 @@ Streaming is optional; enable it only when your provider handles it reliably.
 Keep secrets out of Git. `.env` holds global model/transport settings; project
 paths, interpreters, data and task limits belong in task configuration.
 [Advanced settings](docs/CONFIG_REFERENCE.md) are optional.
+
+For multiple providers or separate text/code models, use a [named model catalog](docs/CONFIG_REFERENCE.md#named-model-connections).
+Each profile owns its URL, model and credential reference; `simple-ar models` checks the local setup without sending a request.
 
 ### 4. Start your own task
 

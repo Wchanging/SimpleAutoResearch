@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import json
+import logging
 import os
 import re
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Sequence, TypeVar
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ import litellm
 from dotenv import load_dotenv
 
 from simple_ar.core.budget import BudgetError, BudgetLedger
+from simple_ar.integrations.model_profiles import ModelCatalog, ModelConfigError, load_model_catalog
 
 
 T = TypeVar("T")
@@ -90,7 +92,7 @@ class LLMSettings:
     """
 
     model: str = "gpt-4o-mini"
-    api_key: str = ""
+    api_key: str = field(default="", repr=False)
     base_url: str = ""
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
@@ -180,6 +182,9 @@ class LLMClient:
         budget_ledger: BudgetLedger | None = None,
         budget_session_id: str = "",
         budget_attempt_id: str = "",
+        model_catalog: ModelCatalog | None = None,
+        profile_name: str = "",
+        purpose: str = "text",
     ) -> None:
         """Create a client from validated LLM settings.
 
@@ -202,6 +207,9 @@ class LLMClient:
         self._openai_model = settings.model.strip()
         self._provider_model = _litellm_model(settings)
         self._settings = settings
+        self._model_catalog = model_catalog
+        self._profile_name = profile_name
+        self._purpose = purpose
         self._usage_callback = usage_callback
         self._budget_ledger = budget_ledger
         self._budget_session_id = budget_session_id
@@ -224,6 +232,8 @@ class LLMClient:
         budget_ledger: BudgetLedger | None = None,
         budget_session_id: str = "",
         budget_attempt_id: str = "",
+        models_config: str | None = None,
+        purpose: str = "text",
     ) -> "LLMClient":
         """Load provider settings from ``.env`` and environment variables.
 
@@ -239,6 +249,22 @@ class LLMClient:
             Configured ``LLMClient`` instance.
         """
         load_dotenv()
+        try:
+            catalog = load_model_catalog(models_config)
+            if catalog is not None:
+                name, profile = catalog.select(model, purpose=purpose)
+                values = profile.text_settings()
+                if api_mode is not None and api_mode != values["api_mode"]:
+                    raise ModelConfigError("api_mode conflicts with the selected model profile")
+                if max_output_tokens is not None:
+                    values["max_output_tokens"] = max_output_tokens
+                return cls(LLMSettings(**values), model_catalog=catalog, profile_name=name, purpose=purpose,
+                    usage_callback=usage_callback, budget_ledger=budget_ledger,
+                    budget_session_id=budget_session_id, budget_attempt_id=budget_attempt_id)
+            if model and model.startswith(("profile:", "route:")):
+                raise ModelConfigError("Named models require a model catalog; set SIMPLE_AR_MODELS_CONFIG")
+        except ModelConfigError as exc:
+            raise LLMError(str(exc)) from None
         settings = LLMSettings(
             model=model or os.environ.get("SIMPLE_AR_MODEL", "gpt-4o-mini"),
             api_key=os.environ.get("OPENAI_API_KEY", ""),
@@ -370,16 +396,39 @@ class LLMClient:
             budget_ledger=budget_ledger,
             budget_session_id=session_id or self._budget_session_id,
             budget_attempt_id=attempt_id or self._budget_attempt_id,
+            model_catalog=self._model_catalog, profile_name=self._profile_name,
+            purpose=self._purpose,
         )
+
+    def connection_binding(self) -> dict[str, Any]:
+        """Non-secret named configuration for the existing task snapshot.
+
+        Key values are deliberately absent; rotating them does not invalidate a
+        saved task. Pin this connection and its nested code route, not unrelated
+        image profiles that may be registered while a text task is paused.
+        """
+        if self._model_catalog is None:
+            return {}
+        catalog = self._model_catalog
+        code_name = (self._profile_name if self._purpose == "code"
+                     else catalog.routes.get("code") or catalog.routes.get("default"))
+        code = catalog.profiles.get(code_name or "")
+        return {
+            "profile": self._profile_name,
+            "api_key_env": catalog.profiles[self._profile_name].api_key_env,
+            "settings": {key: value for key, value in vars(self._settings).items() if key != "api_key"},
+            "code_route": {"profile": code_name, "connection": code.model_dump(mode="json")} if code else None,
+        }
 
     @classmethod
     def for_task(
         cls, *, client: "LLMClient | None" = None,
         model: str | None = None, usage_callback: UsageCallback | None = None,
+        purpose: str = "code",
     ) -> "LLMClient":
         """Use an injected session client while preserving task usage reporting."""
         if client is None:
-            return cls.from_env(model=model, usage_callback=usage_callback)
+            return cls.from_env(model=model, usage_callback=usage_callback, purpose=purpose)
 
         def observe(usage: LLMUsage) -> None:
             if client._usage_callback is not None:
@@ -387,12 +436,33 @@ class LLMClient:
             if usage_callback is not None and usage_callback is not client._usage_callback:
                 usage_callback(usage)
 
+        settings = replace(client._settings, model=model or client.model)
+        name = client._profile_name
+        if client._model_catalog is not None:
+            try:
+                # Existing owners propagate the parent model. It is not a
+                # command to combine that model with the code connection.
+                selector = None if model == client.model else model
+                if selector is None and client._purpose == purpose:
+                    selector = f"profile:{client._profile_name}"
+                name, profile = client._model_catalog.select(selector, purpose=purpose)
+                settings = LLMSettings(**profile.text_settings())
+            except ModelConfigError as exc:
+                raise LLMError(str(exc)) from None
+        elif model and model.startswith(("profile:", "route:")):
+            routed = cls.from_env(model=model, purpose=purpose)
+            settings, name = routed._settings, routed._profile_name
+            return cls(settings, model_catalog=routed._model_catalog, profile_name=name, purpose=purpose,
+                usage_callback=observe, budget_ledger=client._budget_ledger,
+                budget_session_id=client._budget_session_id, budget_attempt_id=client._budget_attempt_id)
         return cls(
-            replace(client._settings, model=model or client.model),
+            settings,
             usage_callback=observe,
             budget_ledger=client._budget_ledger,
             budget_session_id=client._budget_session_id,
             budget_attempt_id=client._budget_attempt_id,
+            model_catalog=client._model_catalog, profile_name=name,
+            purpose=purpose,
         )
 
     def _build_request(self, system: str, user: str) -> dict[str, Any]:
@@ -468,6 +538,11 @@ class LLMClient:
                     if mode_request.get("stream") is True:
                         response = _collect_chat_stream(response)
                     return response, provider_attempts, reservation_id
+                except (KeyboardInterrupt, SystemExit):
+                    self._mark_budget_unknown(
+                        reservation_id, reason="Provider request cancelled; final usage unavailable"
+                    )
+                    raise
                 except Exception as exc:
                     last_error = exc
                     self._reconcile_failed_budget_attempt(
@@ -484,7 +559,12 @@ class LLMClient:
                         and _is_response_transport_disconnect(exc)
                     ):
                         break
-                    time.sleep(_retry_delay(self._settings, attempt))
+                    delay = _retry_delay(self._settings, attempt)
+                    logging.getLogger(__name__).warning(
+                        "LLM %s failed (%s); retry %s/%s in %.1fs",
+                        label or api_mode, type(exc).__name__, attempt + 1, attempts, delay,
+                    )
+                    time.sleep(delay)
             if last_error is None:
                 continue
             mode_attempts.append((api_mode, attempted, last_error))
@@ -1048,10 +1128,14 @@ def _collect_chat_stream(stream_response: object) -> dict[str, Any]:
         # The response has already opened: a failure here may be billable even
         # when a gateway uses a generic exception with unfamiliar wording.
         # Never adopt the partial draft as a successfully completed response.
-        raise LLMStreamError(
-            f"Response stream interrupted: content_chars={sum(len(part) for part in parts)}, "
-            f"finish_reason={finish_reason!r}, usage_received={usage is not None}; {exc}"
-        ) from exc
+        if finish_reason is None:
+            raise LLMStreamError(
+                f"Response stream interrupted: content_chars={sum(len(part) for part in parts)}, "
+                f"finish_reason={finish_reason!r}, usage_received={usage is not None}; {exc}"
+            ) from exc
+        # Generation completed explicitly; a missing accounting tail must not
+        # resend an already completed generation. Use the estimated usage path.
+        usage = None
     finally:
         close = getattr(stream_response, "close", None)
         if callable(close):
@@ -1061,6 +1145,11 @@ def _collect_chat_stream(stream_response: object) -> dict[str, Any]:
                 # Cleanup must not replace the response or its original error.
                 pass
 
+    if finish_reason is None:
+        raise LLMStreamError(
+            f"Response stream ended without a completion marker: "
+            f"content_chars={sum(len(part) for part in parts)}, usage_received={usage is not None}"
+        )
     message: dict[str, Any] = {"content": "".join(parts)}
     response: dict[str, Any] = {
         "choices": [{"message": message, "finish_reason": finish_reason}],
@@ -1418,11 +1507,15 @@ def _call_openai_sdk(api_mode: str, request: dict[str, Any]) -> object:
         client_kwargs["base_url"] = str(base_url)
     client = OpenAI(**client_kwargs)
     payload = _drop_none_values(payload)
-    if api_mode == "responses":
-        return client.responses.create(**payload)
-    if api_mode == "chat":
-        return client.chat.completions.create(**payload)
-    raise ValueError(f"Unsupported LLM API mode: {api_mode}")
+    try:
+        if api_mode == "responses":
+            return client.responses.create(**payload)
+        if api_mode == "chat":
+            response = client.chat.completions.create(**payload)
+            return _collect_chat_stream(response) if payload.get("stream") else response
+        raise ValueError(f"Unsupported LLM API mode: {api_mode}")
+    finally:
+        client.close()
 
 
 def _request_for_api_mode(
@@ -1447,6 +1540,12 @@ def _request_for_api_mode(
         )
         if stream:
             converted["stream"] = True
+            # SSE is incremental. Ask intermediaries not to compress/buffer it;
+            # preserve an explicit caller override, as with other extra headers.
+            headers = dict(converted.get("extra_headers") or {})
+            if not any(key.lower() == "accept-encoding" for key in headers):
+                headers["Accept-Encoding"] = "identity"
+            converted["extra_headers"] = headers
         else:
             converted.pop("stream", None)
         return converted

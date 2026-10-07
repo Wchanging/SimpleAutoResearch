@@ -319,9 +319,15 @@ class ResearchApplication:
         deterministic and model-backed capabilities in those legacy sessions.
         Read-only inspection through ``load``/``view`` remains available.
         """
+        runtime = _read_runtime_config(self.controller)
+        saved_connections = runtime.get("model_connections")
+        if saved_connections and saved_connections != _model_connection_bindings(self.services):
+            raise ResearchApplicationError(
+                "Named model connections differ from this saved session. Restore the catalog/profile "
+                "used for the task, or start a new task with the changed connections; credentials may rotate."
+            )
         if self.services.llm_client is not None:
             return
-        runtime = _read_runtime_config(self.controller)
         saved_requirement = runtime.get("llm_required")
         used_llm = include_legacy_usage and any(
             entry.actual_source != "user_authorization"
@@ -3603,6 +3609,7 @@ class ResearchApplication:
                     "idea_limit": self.services.idea_limit,
                     "budget_limits": _json_safe(self.services.budget_limits),
                     "llm_required": self.services.llm_client is not None,
+                    "model_connections": _model_connection_bindings(self.services),
                 }, kind="runtime_config", schema="research_application_config.v1",
                 producer="research_application",
             ),
@@ -5528,6 +5535,13 @@ def _raise_on_errors(diagnostics: tuple[Diagnostic, ...]) -> None:
     errors = [item.message for item in diagnostics if item.severity == "error"]
     if errors:
         raise ResearchApplicationError("; ".join(errors))
+
+
+def _model_connection_bindings(services: ResearchApplicationServices) -> dict[str, Any]:
+    from simple_ar.integrations.llm import LLMClient
+
+    return {name: client.connection_binding() for name in ("llm_client", "feasibility_llm_client")
+            if isinstance(client := getattr(services, name), LLMClient) and client.connection_binding()}
 
 
 def _read_runtime_config(controller: SessionController) -> Mapping[str, Any]:

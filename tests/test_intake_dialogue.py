@@ -55,6 +55,19 @@ class AnalysisReportProposalTests(unittest.TestCase):
 
 
 class IntakeDialogueTests(unittest.TestCase):
+    def test_invalid_proposals_can_be_clarified_without_automatic_extra_calls(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            bad = proposal('survey', options={'data_mode': 'observations'})
+            good = proposal('survey', options={'sources': 'search'})
+            client = Client(bad, bad, good)
+            result = self.converse(self.args(root), client, ['Only survey existing sources.', 'y'])
+            self.assertEqual(result.kind, 'survey')
+            state = read_json(self.draft(root))
+            self.assertEqual(len(state['rejected_proposals']), 2)
+            self.assertIn('Only survey existing sources.', state['user_messages'])
+            self.assertEqual(len(client.requests), 3)
+
     def test_empty_requirements_retain_current_environment_without_installation(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -276,8 +289,8 @@ class IntakeDialogueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             args = self.args(Path(folder))
             invented = proposal(options={"data_attribution": "Invented university dataset"})
-            with self.assertRaisesRegex(ValueError, "human-provided"):
-                self.converse(args, Client(invented, invented), [])
+            self.assertIsNone(self.converse(args, Client(invented, invented), ['stop']))
+            self.assertIn('human-provided', read_json(self.draft(Path(folder)))['rejected_proposals'][-1]['error'])
 
     def args(self, root, *options, locked=()):
         args = build_parser().parse_args(["start", "--chat", "--goal", "Describe my measurements",
@@ -388,8 +401,7 @@ class IntakeDialogueTests(unittest.TestCase):
             root = Path(folder)
             client = Client(proposal(options={"command": "delete everything"}),
                             proposal(options={"timeout_sec": 10000}))
-            with self.assertRaisesRegex(ValueError, "no paths or commands"):
-                self.converse(self.args(root), client, [])
+            self.assertIsNone(self.converse(self.args(root), client, ['stop']))
             state = read_json(self.draft(root))
             self.assertEqual(len(state['rejected_proposals']), 2)
             self.assertIn("timeout_sec", state["rejected_proposals"][-1]["response"]["options"])
@@ -411,8 +423,8 @@ class IntakeDialogueTests(unittest.TestCase):
             root = Path(folder)
             malicious = proposal(assets=[{"role": "data", "path_quote": "/etc/passwd"}])
             client = Client(malicious, malicious)
-            with self.assertRaisesRegex(ValueError, "verbatim"):
-                self.converse(self.args(root), client, [])
+            self.assertIsNone(self.converse(self.args(root), client, ['stop']))
+            self.assertIn('verbatim', read_json(self.draft(root))['rejected_proposals'][-1]['error'])
             self.assertEqual(read_json(self.draft(root))["arguments"]["data_file"], None)
 
     def test_locked_defaults_and_function_specific_options_cannot_be_overridden(self):

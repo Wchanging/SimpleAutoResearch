@@ -186,6 +186,7 @@ class LLMParsingTests(unittest.TestCase):
 
         request = call.call_args.args[1]
         self.assertTrue(request["stream"])
+        self.assertEqual(request["extra_headers"]["Accept-Encoding"], "identity")
 
     def test_completed_stream_with_final_usage_does_not_wait_for_transport_eof(self):
         observed = []
@@ -219,6 +220,58 @@ class LLMParsingTests(unittest.TestCase):
             client = LLMClient.from_env()
 
         self.assertTrue(client._settings.stream)
+
+    def test_clean_eof_without_completion_is_not_adopted(self):
+        ledger = BudgetLedger({"llm_requests": 1})
+        client = LLMClient(LLMSettings(api_key="test", api_mode="chat", stream=True,
+                                      retry_attempts=1), budget_ledger=ledger)
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=iter([
+            {"choices": [{"delta": {"content": '{"looks_complete": true}'}}]},
+        ])):
+            with self.assertRaisesRegex(LLMError, "without a completion marker"):
+                client.ask("system", "user")
+        self.assertEqual(ledger.entries[0].status, "unknown")
+
+    def test_finished_generation_with_failed_accounting_tail_is_not_retried(self):
+        observed = []
+        client = LLMClient(LLMSettings(api_key="test", api_mode="chat", stream=True,
+                                      retry_attempts=3), usage_callback=observed.append)
+        def stream():
+            yield {"choices": [{"delta": {"content": "complete"}, "finish_reason": "stop"}]}
+            raise TimeoutError("accounting tail did not arrive")
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=stream()) as call:
+            self.assertEqual(client.ask("system", "user"), "complete")
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(observed[0].source, "estimated")
+
+    def test_cancelled_provider_request_does_not_remain_inflight_or_retry(self):
+        ledger = BudgetLedger({"llm_requests": 3})
+        client = LLMClient(LLMSettings(api_key="test", api_mode="chat", retry_attempts=3),
+                           budget_ledger=ledger)
+        with patch("simple_ar.integrations.llm._call_openai_sdk", side_effect=KeyboardInterrupt) as call:
+            with self.assertRaises(KeyboardInterrupt):
+                client.ask("system", "user")
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(ledger.entries[0].status, "unknown")
+
+    def test_sdk_client_lives_until_stream_consumed_and_closes_on_failure(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), patch("openai.OpenAI") as factory:
+                client = factory.return_value
+                def chunks():
+                    client.close.assert_not_called()
+                    if fail:
+                        raise KeyboardInterrupt()
+                    yield {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+                client.chat.completions.create.return_value = chunks()
+                request = {"api_key": "test", "model": "test", "stream": True, "messages": []}
+                if fail:
+                    with self.assertRaises(KeyboardInterrupt):
+                        _call_openai_sdk("chat", request)
+                else:
+                    response = _call_openai_sdk("chat", request)
+                    self.assertEqual(response["choices"][0]["message"]["content"], "ok")
+                client.close.assert_called_once()
 
     def test_optional_chat_thinking_switch_reaches_provider(self) -> None:
         client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", thinking_mode="disabled"))

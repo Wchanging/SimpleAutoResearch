@@ -161,7 +161,6 @@ def edit_joint_document(
             findings = [row for check in (checked, verified) if check
                         for review in check.section_reviews for row in review.findings]
             all_findings.extend(findings)
-            memory.reviewer_findings.extend(row for row in findings if row not in memory.reviewer_findings)
             acceptable = (closed and verified is not None
                           and not any(needs_change(row) or row.context_requests
                                       for check in (checked, verified) if check for row in check.section_reviews))
@@ -170,6 +169,10 @@ def edit_joint_document(
                 event.status, event.adopted = "verified", True
                 resolved = [row for review in active for row in review.findings]
                 memory.reviewer_findings = [row for row in memory.reviewer_findings if row not in resolved]
+                # Candidate observations belong to the delivered manuscript
+                # only after atomic adoption. Rejected observations remain in
+                # the iteration history and guide the next candidate instead.
+                memory.reviewer_findings.extend(row for row in findings if row not in memory.reviewer_findings)
                 memory.reviewer_findings = [row for row in memory.reviewer_findings
                     if not (row.type in DOCUMENT_CONTROL_FINDING_TYPES and row.finding_id.startswith("joint-revision-"))]
                 checkpoint()

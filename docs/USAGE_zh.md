@@ -21,6 +21,8 @@
 并保存澄清用量；`--resume-setup PATH` 恢复草稿，不重开计费记录。这不是通用编程 Agent，
 代码/复现的执行命令和范围仍需明确。不能与承诺不调用 API 的 `--prepare-only` 同用。
 尚未确定的可选项不写成实际赋值；先回答影响结果的选择，完整确认配置仍在执行前校验。
+修正后仍无效时，可以继续补充说明或输入 `stop` 保存退出。配对分析需要同一行中的
+基线、候选数值列；长表的方法行须先按实际配对关系整理，工具不会自行关联或透视。
 
 改码可用 `--project-python /path/to/project-venv/bin/python`（Windows 用
 `C:\path\project-venv\Scripts\python.exe`）指定已有项目环境，无须手改 TOML。
@@ -56,6 +58,11 @@ requirements 的安装指令、包含文件或截断行仍未解析，版本匹�
 - 如果要运行 LLM 支持的 planning、notes、synthesis、report 或 code edits，需要一个 OpenAI 兼容 API key。
 
 ## 安装
+
+数据图沿用 Matplotlib 的字体配置。中文等非拉丁标签需要安装覆盖相应字符的字体，并在
+`matplotlibrc` 设置 `font.family`（两种字体均已安装时，例如 `DejaVu Sans, Noto Sans CJK SC`）。
+预览版不会自动下载字体；出现缺字警告时应检查 PNG/PDF 标签，分析成功不等于视觉质量通过。
+详见 [Matplotlib 字体回退说明](https://matplotlib.org/stable/users/explain/text/fonts.html)。
 
 克隆当前预览分支，与 [README](../README_zh.md) 一致：
 
@@ -112,6 +119,8 @@ SIMPLE_AR_LLM_STREAM=true
   流式传输；客户端会在解析前拼接 chunks，服务商提供最终 usage 时仍会记录它。Responses
   调用保持非流式。完成标记和最终用量齐全后不再等待连接关闭；中断错误显示已收字符数及
   完成/用量状态，不记录响应文本。流式可以减少兼容网关的长时间非流式连接卡顿，但不会取消服务商或客户端超时。
+  流式请求默认要求不压缩传输。生成已明确完成而用量尾包失败时，保留正文并估算用量；
+  未收到完成标记的残缺流仍判失败。取消请求将用量记为未知并关闭 SDK 连接；重试显示次数和等待时间。
 - `SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM` 可选地指定 Chat Completions 的输出参数名：`max_tokens` 或 `max_completion_tokens`；`auto` 会在可能时根据模型名选择。
 - `SIMPLE_AR_LLM_REASONING_EFFORT` 是可选的、由模型文档定义的推理强度，例如 `low` 或 `high`，只会通过 Chat Completions 的 provider 扩展字段转发。`SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` 仅在调用方和客户端均未设置输出上限时作为兜底上限，不会覆盖显式的单次调用上限。
 - `SIMPLE_AR_LLM_THINKING` 可选，通过 Chat Completions 的 `extra_body` 传入 `thinking.type=enabled` 或 `disabled`，默认不传。仅对明确支持该参数的模型启用；强制思考模型不能关闭，`disabled` 也不能同时设置 `SIMPLE_AR_LLM_REASONING_EFFORT`。

@@ -11,7 +11,7 @@ from simple_ar.report.narrative import _compact_execution_results, evidence_outl
 from simple_ar.result_analysis.table import TableSpec, describe_table
 from simple_ar.report.schema import (
     ReportContext, ReportDocumentPlan, ReportMemory, ReportRuntimeConfig,
-    ReportSectionDraft, ReportSectionPlan, SourceHandle,
+    ReportSectionDraft, ReportSectionPlan, ReportVisualIntent, SourceHandle,
 )
 from simple_ar.report.templates import load_report_template_bundle
 
@@ -25,6 +25,9 @@ class DataDeliveryTests(unittest.TestCase):
         section = ReportSectionPlan(section_id="observations", heading="Observations", goal="Compare supplied values",
             evidence_handles=["material:data"], target_words=300)
         memory = ReportMemory(section_plan=[section], document_plan=ReportDocumentPlan(sections=[section]))
+        memory.document_plan.visual_intents = [ReportVisualIntent(visual_id="main", kind="figure",
+            title="Supplied values", purpose="Compare observations", section_id=section.section_id,
+            evidence_handles=["material:data"], view="supplied-data", figure_paths=["figures/bar.svg"])]
         result = {"document_id": "data", "row_count": 2, "evidence_role": "recomputed_from_user_supplied_data",
             "records": [{"group": "A", "column": "score", "count": 2, "missing": 0,
                          "mean": 4.0, "sample_std": 1.0, "min": 3.0, "max": 5.0}],
@@ -94,6 +97,18 @@ class DataDeliveryTests(unittest.TestCase):
             supplied_data_delivery(context, config=config, plan=memory.document_plan, section_ids=[section.section_id])
         self.assertEqual(result, original)
 
+    def test_unselected_figures_remain_linked_instead_of_filling_the_body(self):
+        from simple_ar.report.data_delivery import supplied_data_delivery
+        context, memory, section, config = self.objects()
+        memory.document_plan.visual_intents = []
+        before = copy.deepcopy(context.model_dump())
+        block = supplied_data_delivery(context, config=config, plan=memory.document_plan,
+            section_ids=[section.section_id])[0]
+        self.assertNotIn("![", block["markdown"])
+        self.assertIn("analysis.md", block["markdown"])
+        self.assertIn("analysis.json", block["markdown"])
+        self.assertEqual(context.model_dump(), before)
+
     def test_document_review_counts_additions_separately_and_preserves_draft(self):
         context, memory, section, config = self.objects()
         from simple_ar.report.data_delivery import supplied_data_delivery
@@ -152,6 +167,7 @@ class DataDeliveryTests(unittest.TestCase):
 
     def test_ambiguous_placement_and_figure_off_keep_provenance_without_fake_owner(self):
         context, memory, section, config = self.objects(enabled=False)
+        memory.document_plan.visual_intents = []
         from simple_ar.report.data_delivery import supplied_data_delivery
         second = section.model_copy(update={"section_id": "discussion", "heading": "Discussion"})
         memory.document_plan.sections.append(second)

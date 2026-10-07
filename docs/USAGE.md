@@ -36,6 +36,9 @@ setup usage. It is not a general coding Agent; prepared reproduction/code execut
 still requires explicit commands and scope. It cannot be combined with `--prepare-only`.
 Unresolved optional settings stay out of the draft configuration until clarified;
 the complete confirmed configuration is still validated before task execution.
+If correction still fails, clarify the task or enter `stop` to save and exit.
+Paired analysis needs baseline and candidate numeric columns in the same row;
+long-format method rows must be matched and reshaped beforehand.
 For a first no-API run, use
 `uv run simple-ar research-session --config examples/data-curves/research.toml`.
 Saved analysis packages can then become writing material. Export is a separate
@@ -76,6 +79,13 @@ advanced option below. See [guided setup](CONFIG_REFERENCE.md#guided-setup).
 - An OpenAI-compatible API key if you want LLM-backed planning, notes, synthesis, report writing, or code edits.
 
 ## Installation
+
+Data figures use Matplotlib's font configuration. For Chinese or other non-Latin
+labels, install a font covering those characters and configure `font.family` in
+your `matplotlibrc` (for example, `DejaVu Sans, Noto Sans CJK SC` when both are
+installed). The preview does not download fonts automatically. Missing-glyph
+warnings mean PNG/PDF labels need checking; successful analysis is not a visual
+quality check. See [Matplotlib's font fallback guide](https://matplotlib.org/stable/users/explain/text/fonts.html).
 
 Clone the current preview branch (also shown in the [README](../README.md)):
 
@@ -141,6 +151,10 @@ Transport and recovery notes (optional expert reference):
   waiting for connection closure. Interruptions report received character counts
   and terminal/usage state, not response text. This can avoid long non-stream connection stalls on compatible
   gateways, but it does not remove provider or client timeouts.
+  Streaming requests ask for uncompressed transport. If generation explicitly finishes but the
+  accounting tail fails, completed text is retained with estimated usage; an incomplete stream
+  without a finish marker remains an error. Cancellation records unknown usage and closes the
+  SDK connection. Retries display their attempt number and delay.
 - `SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM` optionally selects `max_tokens` or
   `max_completion_tokens` for Chat Completions; `auto` selects from the model
   name when possible.

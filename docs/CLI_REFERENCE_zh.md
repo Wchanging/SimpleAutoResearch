@@ -6,6 +6,10 @@
 
 ## 引导入口
 
+`simple-ar models [--config PATH] [--profile NAME --purpose text|code|vision|image]`
+本地检查命名连接和凭据是否配置，不调用 API、不显示密钥。
+启用与路由见[模型配置](CONFIG_REFERENCE_zh.md#命名模型连接)。
+
 ```bash
 uv run simple-ar start
 uv run simple-ar start --chat

@@ -4,6 +4,24 @@
 
 This file records implemented, user-visible changes in reverse chronological order. Usage and technical references live in `docs/`; future plans and private acceptance records are not release claims.
 
+## 2026-10-07
+
+- Named TOML model profiles keep URL, model and credential reference together, with separate
+  text/code routes and local inspection through `simple-ar models`. Existing `.env` setup remains
+  supported; research-session recovery detects connection changes without storing secret keys.
+- New report plans inline only selected analysis figures; other charts remain in the linked analysis package.
+  Package links are consolidated, while recorded legacy visual intents retain their meaning. Findings from
+  rejected joint revisions stay in editing history rather than becoming defects of the delivered original.
+- Chat setup explains same-row pairing and lets users clarify a rejected proposal or save
+  and stop after correction fails. Paired-difference figures leave room around uncertainty
+  endpoints. Recorded RCP CSVs, figure previews and an example analysis report make the
+  data-to-report workflow inspectable; reanalysing the CSVs needs no API.
+- API streaming requests disable HTTP compression by default while preserving explicit header overrides.
+  Completed generations survive a failed usage tail with estimated accounting; streams without a completion
+  marker remain failures. Provider retries now report the attempt and delay.
+- SDK connections close after response consumption or failure. Cancelling a provider request records unknown
+  usage instead of leaving it in flight, without starting another attempt.
+
 ## 2026-10-06
 
 - Writing delivery surfaces unresolved findings from the current adopted draft, without counting

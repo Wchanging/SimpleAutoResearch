@@ -875,6 +875,31 @@ class JointRevisionTests(unittest.TestCase):
         self.assertEqual(sections[0].draft_markdown, 'Original method')
         self.assertEqual(iterations[0].status, 'unavailable')
 
+    def test_rejected_candidate_findings_are_history_not_original_manuscript_defects(self):
+        from simple_ar.report.editor import historical_opinion_handles
+        from simple_ar.report.schema import ReportFindingCheck
+        sections = [ReportSectionDraft(section_id='method', heading='Method', draft_markdown='Original')]
+        original = ReviewerFinding(finding_id='organization', section_id='method', type='style',
+            severity='major', message='Clarify organization.')
+        candidate_issue = ReviewerFinding(finding_id='invented-result', section_id='method', type='factual',
+            severity='major', message='Candidate invents a result.')
+        reviews = [ReportSectionReview(section_id='method', verdict='revise_required', findings=[original])]
+        memory, history, iterations = ReportMemory(), [], []
+        def inspect(candidate, prior):
+            if prior:
+                return [ReportSectionReview(section_id='method', verdict='pass', finding_checks=[
+                    ReportFindingCheck(finding_id=key[1], status='resolved', explanation='Organization corrected.',
+                        draft_quotes=['Candidate']) for key in historical_opinion_handles(prior)])]
+            return [ReportSectionReview(section_id='method', verdict='revise_required', findings=[candidate_issue])]
+        edit_joint_document(memory=memory, config=ReportRuntimeConfig(max_review_iterations=1), sections=sections,
+            iterations=iterations, reviews=reviews, all_findings=history, checkpoint=lambda: None,
+            draft=lambda event, baseline: [baseline[0].model_copy(update={'draft_markdown': 'Candidate'})], inspect=inspect)
+        self.assertEqual(sections[0].draft_markdown, 'Original')
+        self.assertIn(original, memory.reviewer_findings)
+        self.assertNotIn(candidate_issue, memory.reviewer_findings)
+        self.assertIn(candidate_issue, history)
+        self.assertTrue(any(candidate_issue in review.findings for event in iterations for review in event.section_reviews))
+
     def test_legacy_rounds_and_unchecked_old_findings_are_not_erased(self):
         for legacy in (False, True):
             with self.subTest(legacy=legacy):

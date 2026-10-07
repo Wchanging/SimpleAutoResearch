@@ -10,11 +10,54 @@
 
 | 设置 | 位置 |
 | --- | --- |
-| 服务连接、密钥 | 全局 `.env` |
+| 命名连接和用途路由 | 可选模型目录 TOML |
+| 连接密钥／旧单连接配置 | 环境变量或私有 `.env` |
 | 目标、输入、交付、资源限制 | 研究 TOML |
 | 编辑项目、保护、项目解释器 | 引用的 CodeTask TOML |
 
 优先级为默认值 → TOML → 明确 CLI；CLI 列表替换文件列表。路径按对应字段从配置位置解析，命令 argv 保持字面含义；对话不能暗改用户明确选择。
+
+### 命名模型连接
+
+复制[模型目录示例](../examples/model-profiles/models.toml)到私有位置，在环境或私有 `.env`
+设置 `SIMPLE_AR_MODELS_CONFIG` 为绝对路径，另配置 `CCTQ_API_KEY`（或自己指定的变量）。
+也可使用 `~/.config/simple-ar/models.toml`；一次只加载一个目录，不合并多份文件。
+TOML 保存名称、URL、模型及密钥变量名，不保存密钥本身。
+
+```bash
+simple-ar models                       # 本地检查，不调用 API
+simple-ar models --config /path/models.toml
+simple-ar start --chat --model profile:daily
+```
+
+`models --config` 只检查指定文件，不会替后续命令启用它。`--model env` 选 `text` 路由，
+没有时选 `default`；CodeTask 选 `code`，再回到能力匹配的 `default`。
+`profile:名称` 选择完整连接，`route:用途` 选择路由，任务 TOML 的 `[model].name` 也接受这两种值。
+嵌套代码任务默认使用代码路由；任务明确指定的代码连接会保留给子调用。
+
+每个 profile 必填 `api`、`base_url`、`model`、`api_key_env`、`capabilities`。
+文本接口支持 `openai_chat`、`openai_responses`，目前仅 Chat 支持 `stream=true`。
+可选字段：`request_timeout_sec`、`max_output_tokens`、`retry_attempts`、
+`retry_base_delay_sec`、`retry_max_delay_sec`、`reasoning_effort`、`thinking_mode`、
+`reasoning_output_tokens`、`json_response_format`、`chat_token_limit_param`、
+`input_price_per_million`、`output_price_per_million`。
+超时、等待和显式 token 上限须为正值；重试次数包含首次请求，单次调用仍可指定输出上限。
+推理、JSON 等参数是否被服务商接受需要实测，不由模型名称保证。
+
+能力声明不是探针结果。可以登记 `openai_images` 连接和 `vision`／`image` 路由，
+但本次配置改动尚未实现图像生成、编辑或多模态检查执行器；Images 不能用作文本客户端，
+也不能继承文本的流式、token、JSON 或 token 单价参数。
+
+启用目录后，旧环境中的模型、URL、密钥等设置不覆盖 profile。未知名称、缺失密钥、
+能力不匹配会报错，不自动切换服务商；不同的裸模型名覆盖也会拒绝，请另建 profile。
+没有目录时旧 `.env` 方式不变；不会自动迁移或删除用户配置。
+
+新研究会话和对话草稿在已有快照中保存非秘密连接绑定；恢复时检查当前连接及嵌套代码路由。
+同一变量中的密钥可轮换；换连接需要恢复原配置或开始新任务。添加无关图像连接不影响文本任务。
+旧会话和独立 CodeTask 操作没有追溯补建的连接冻结，请在运行期间保持目录不变。
+
+迁移顺序：复制示例→填写当前非秘密连接→保留 `.env` 密钥→本地检查→用小型新任务验证。
+确认后才手工清理不用的旧变量。目前没有交互式连接登记或自动迁移命令。
 
 改码 `--project-python PATH` 在 CodeTask 写入 `[environment] mode="external"` 和 `python="..."`，省略仍 current；只选择已有解释器，不安装依赖。
 

@@ -1,0 +1,31 @@
+# Copy to a private location and set SIMPLE_AR_MODELS_CONFIG to its absolute path.
+# Credentials remain in environment variables or your private .env, never here.
+version = 1
+
+[routes]
+default = "daily"
+code = "daily"
+image = "paper_art"
+
+[profiles.daily]
+api = "openai_chat"
+base_url = "https://www.cctq.ai/v1"
+model = "gpt-5.6-luna"
+api_key_env = "CCTQ_API_KEY"
+capabilities = ["text", "code"]
+stream = true
+request_timeout_sec = 180
+retry_attempts = 3
+
+# Registration only: the image generation/editing executor is a later batch.
+# Confirm this provider's real Images protocol; a Chat example is not proof.
+[profiles.paper_art]
+api = "openai_images"
+base_url = "https://www.cctq.ai/v1"
+model = "gpt-image-2"
+api_key_env = "CCTQ_API_KEY"
+capabilities = ["image_generate", "image_edit"]
+
+# Add any custom name, URL, model and credential reference, then point a route
+# to it. Text calls can explicitly use --model profile:YOUR_NAME. Do not put
+# text stream/token/JSON settings into an Images profile.

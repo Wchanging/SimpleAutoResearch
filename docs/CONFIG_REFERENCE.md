@@ -10,11 +10,60 @@ This is the field reference for task configuration. Start with [Usage](USAGE.md)
 
 | Setting | Location |
 | --- | --- |
-| Provider connection and secret | Global `.env` |
+| Named provider connections and routing | Model catalog TOML (optional) |
+| Provider secrets / legacy single connection | Environment or private `.env` |
 | Goal, inputs, delivery and resource limits | Research TOML |
 | Editable project, protection and project interpreter | Referenced CodeTask TOML |
 
 Precedence is built-in defaults → TOML → explicit CLI options. CLI lists replace file lists. Paths resolve from the configuration location where documented; command argv remains literal. Confirmed chat settings cannot silently replace explicit user choices.
+
+### Named model connections
+
+Copy [the model catalog example](../examples/model-profiles/models.toml) to a private location.
+Set `SIMPLE_AR_MODELS_CONFIG` to its absolute path and put `CCTQ_API_KEY` (or your chosen variable)
+in the environment/private `.env`. Alternatively use `~/.config/simple-ar/models.toml`.
+Only one catalog is loaded; files are not merged. Secrets never belong in the TOML.
+
+```bash
+simple-ar models                       # local inspection, no API calls
+simple-ar models --config /path/models.toml
+simple-ar start --chat --model profile:daily
+```
+
+`--config` on `models` inspects a file; it does not activate it for later commands.
+`--model env` uses the `text` route, then `default`; CodeTask selects `code`, then `default`.
+`--model profile:NAME` selects a complete connection; `route:NAME` selects a route.
+Existing task TOML `[model].name` accepts these selectors too. Nested code tasks use the code route
+unless their own model selector is explicit. A selected code connection survives its child calls.
+
+Each profile requires `api`, `base_url`, `model`, `api_key_env` and `capabilities`.
+Text adapters are `openai_chat` and `openai_responses`; Chat supports `stream=true`.
+Supported optional fields: `request_timeout_sec`, `max_output_tokens`, `retry_attempts`,
+`retry_base_delay_sec`, `retry_max_delay_sec`, `reasoning_effort`, `thinking_mode`,
+`reasoning_output_tokens`, `json_response_format`, `chat_token_limit_param`,
+`input_price_per_million`, and `output_price_per_million`.
+Timeouts/delays and supplied token caps are positive; retry count includes the first request.
+Per-call output limits still apply. Provider support for reasoning/JSON parameters must be checked.
+
+Capabilities are declarations, not probe results. `openai_images` profiles and `vision`/`image`
+routes can be registered, but image generation/editing and multimodal inspection executors are
+not implemented by this configuration change. An Images profile cannot be used as a text client.
+Image profiles do not accept text stream/token/JSON or token-price settings.
+
+With a catalog, legacy model/URL/key environment settings do not override profile values.
+Missing profiles, credentials or incompatible capabilities fail without switching providers.
+A different bare model override is rejected: define another profile instead of mixing connections.
+Without a catalog, existing environment configuration works unchanged; no `.env` is deleted or migrated.
+
+New research sessions and chat drafts save non-secret connection bindings in their existing snapshots.
+Resume rejects changes to the selected connection or nested code route; rotate the value behind the
+same credential variable freely. Restore the old connection or start a new task to change providers.
+Adding an unrelated image profile does not invalidate a text session. Legacy sessions and standalone
+CodeTask operations do not gain retrospective connection pinning. Keep their catalog fixed during a run.
+
+Migration is opt-in: copy the example, register current non-secret settings, keep keys in `.env`,
+inspect with `models`, and test a small new task before removing any unused legacy variables.
+There is no interactive registration wizard or automatic migration command yet.
 
 For repair, `--project-python PATH` writes `[environment] mode="external"` and `python="..."` in CodeTask TOML. Omission keeps current. This selects an existing interpreter, without installing dependencies.
 

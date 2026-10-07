@@ -1358,6 +1358,10 @@ def _validated_outline_delivery(
         bound_visuals = []
         for raw in visuals:
             row = dict(raw)
+            if row.get("view") == "supplied-data" and row.get("figure_paths") is None:
+                # New plans must select charts; omission means linked-only.
+                # Restored plans bypass this constructor and retain old intent.
+                row["figure_paths"] = []
             if "section_key" in row:
                 key = row.pop("section_key")
                 if not isinstance(key, str) or key not in keys:

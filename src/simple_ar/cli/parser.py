@@ -12,6 +12,10 @@ def build_parser(
 ) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="simple-ar")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    models = subparsers.add_parser("models", help="Inspect named model connections locally; no API calls.")
+    models.add_argument("--config", type=Path, help="Model catalog TOML; otherwise SIMPLE_AR_MODELS_CONFIG or user config.")
+    models.add_argument("--profile", help="Inspect one profile name, without exposing its credential.")
+    models.add_argument("--purpose", choices=("text", "code", "vision", "image"), default="text")
 
     from simple_ar.cli.start import add_start_parser
     add_start_parser(subparsers)

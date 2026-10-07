@@ -90,6 +90,29 @@ def main(argv: Sequence[str] | None = None) -> None:
     except (OSError, ValueError) as exc:
         raise SystemExit(f"Invalid research configuration: {exc}") from exc
     args = parser.parse_args(arguments)
+    if args.command == "models":
+        from dotenv import load_dotenv
+        from simple_ar.integrations.model_profiles import load_model_catalog, ModelConfigError
+        load_dotenv()
+        try:
+            catalog = load_model_catalog(args.config)
+            if catalog is None:
+                print_line("No named catalog configured; existing .env connection remains available.")
+            else:
+                selected = [catalog.select(f"profile:{args.profile}", purpose=args.purpose)] if args.profile else list(catalog.profiles.items())
+                for name, profile in selected:
+                    try:
+                        profile.credential()
+                        credential = "set"
+                    except ModelConfigError:
+                        credential = "missing"
+                    print_line(f"{name}: {profile.api} / {profile.model} / {profile.base_url}; "
+                               f"capabilities={','.join(profile.capabilities)}; credential={credential}")
+                print_line(f"Routes: {dict(catalog.routes)}")
+                print_line("Local configuration only; provider capabilities have not been probed.")
+        except ModelConfigError as exc:
+            raise SystemExit(str(exc)) from None
+        return
     if args.command == "project-info":
         from simple_ar.core.capabilities import ArtifactStore
         from simple_ar.research.preparation import inspect_project_preparation, project_preparation_markdown

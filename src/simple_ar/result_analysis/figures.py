@@ -145,7 +145,7 @@ def _value_figures(result: dict, output_dir: Path) -> list[dict]:
         for offset in range(0, len(selected), 12):
             page = selected[offset:offset + 12]
             fig, ax = _figure(spec, max(2.5, .55 * len(page) + 1.6))
-            scale = _numeric_axis(ax, "x", axis_values, zero=not box, errors=errors, pad=box)
+            scale = _numeric_axis(ax, "x", axis_values, zero=not box, errors=errors, pad=box or difference)
             labels = [_label(f"{r['group']} (n={r['count']}; missing={r['missing']})"
                              if difference or box else r["group"], 30 if spec["width"] == "wide" else 18) for r in page]
             positions = list(range(len(page)))

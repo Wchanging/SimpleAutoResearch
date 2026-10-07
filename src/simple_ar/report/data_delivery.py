@@ -36,15 +36,14 @@ def analysis_delivery_block(
     from simple_ar.result_analysis.table import data_attribution_markdown, table_values_markdown
 
     prefix = f"analyses/analysis-{index:03d}"
-    blocks = [f"Descriptive analysis of {result['row_count']} supplied rows; "
-              f"[copied data, numerical records and editable figures]({prefix}/analysis.md).",
+    blocks = [f"Supplied data ({result['row_count']} rows): "
+              f"[analysis and editable figures]({prefix}/analysis.md), "
+              f"[numerical records]({prefix}/analysis.json). "
               "Arithmetic was rechecked; data collection and scientific validity were not independently verified."]
     if attribution := data_attribution_markdown(dict(result)):
         blocks.append(attribution)
     if config.data_tables == "full":
         blocks.extend(["", table_values_markdown(dict(result))])
-    else:
-        blocks.append(f"[Complete numerical records]({prefix}/analysis.json); full row tables are not repeated in this prose report.")
     intents = [row for row in plan.visual_intents
                   if handle and row.kind == "figure" and row.view == "supplied-data"
                   and row.evidence_handles == [handle]] if plan else []
@@ -52,7 +51,9 @@ def analysis_delivery_block(
     owners = placements or ([row.section_id for row in plan.sections if handle and handle in row.evidence_handles] if plan else [])
     owner = owners[0] if len(owners) == 1 and owners[0] in section_ids else ""
     figures = []
-    selected = intents[0].figure_paths if len(intents) == 1 else None
+    # A plan that does not select a visual is not a request for every chart.
+    # Explicit legacy intents with figure_paths=None retain their saved meaning.
+    selected = intents[0].figure_paths if len(intents) == 1 else ([] if plan else None)
     if selected is not None and set(selected) - {row["path"] for row in result["figures"]}:
         raise ValueError("Selected figure_paths must belong to the registered analysis package")
     if config.figures.enabled and config.figures.mode != "off":

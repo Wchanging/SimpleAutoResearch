@@ -6,6 +6,10 @@ Use this page to look up command syntax and effects. For a first task, follow [U
 
 ## Guided entry
 
+`simple-ar models [--config PATH] [--profile NAME --purpose text|code|vision|image]`
+inspects named connections and credential presence locally, without API calls or showing keys.
+See [model configuration](CONFIG_REFERENCE.md#named-model-connections) for activation and routing.
+
 ```bash
 uv run simple-ar start
 uv run simple-ar start --chat

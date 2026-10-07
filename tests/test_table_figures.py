@@ -26,6 +26,10 @@ class BoxFigureTests(unittest.TestCase):
                 self.assertFalse(low <= 0 <= high)
                 self.assertLess(low, min(sign * 99, sign * 105))
                 self.assertGreater(high, max(sign * 99, sign * 105))
+                paired = result['paired_comparisons'][0]
+                low, high = drawn[-1].axes[0].get_xlim()
+                self.assertLess(low, min(0, paired['mean_difference'] - paired['standard_error']))
+                self.assertGreater(high, max(0, paired['mean_difference'] + paired['standard_error']))
 
     def test_paired_box_shows_marginal_distributions_and_separately_matched_differences(self):
         rows = [{'baseline': a, 'candidate': b} for a, b in ((0, 1), (100, 99), (2, 3), (3, 4))]

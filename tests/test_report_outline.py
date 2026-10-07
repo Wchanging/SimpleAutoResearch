@@ -155,9 +155,20 @@ class EvidenceOutlineTests(unittest.TestCase):
         self.assertTrue(visual_requirements(frozen.document_plan, frozen.document_plan.sections[1])["figures"][0]["assembly_owned"])
         self.assertEqual(client.ask_json.call_count, 1)
         self.assertIs(_resolve_document_plan(frozen, config=config, context=ReportContext(topic="Moved", report_mode="supplied_materials")), frozen)
+        # Omitted/null chart selection in a new outline means links only,
+        # whereas an already frozen legacy intent keeps its original value.
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                if missing:
+                    self.response["visual_intents"][0].pop("figure_paths", None)
+                else:
+                    self.response["visual_intents"][0]["figure_paths"] = None
+                planned = _resolve_document_plan(self.adapt(client, config), config=config, context=self.context)
+                self.assertEqual(planned.document_plan.visual_intents[0].figure_paths, [])
+        calls = client.ask_json.call_count
         self.memory = frozen
         self.assertIs(self.adapt(client, config), frozen)
-        self.assertEqual(client.ask_json.call_count, 1)
+        self.assertEqual(client.ask_json.call_count, calls)
 
     def test_invalid_supplied_visual_owner_uses_only_existing_one_correction(self):
         for visual in (

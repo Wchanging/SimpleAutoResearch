@@ -360,6 +360,12 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
                     write_json(root / "setup.json", state)
                 client = LLMClient.from_env(model=None if args.model == "env" else args.model, max_output_tokens=3000,
                     budget_ledger=ledger, budget_session_id=root.name, budget_attempt_id="setup", usage_callback=usage)
+                binding = client.connection_binding() if isinstance(client, LLMClient) else {}
+                if state.get("model_connection") and state["model_connection"] != binding:
+                    raise ValueError("Setup model connection changed; restore the saved profile/catalog or start a new setup.")
+                if binding:
+                    state["model_connection"] = binding
+                    write_json(root / "setup.json", state)
             payload = {"user_messages": state["user_messages"], "explicit_options": {key: getattr(args, key) for key in explicit if key not in {"resume_setup", "chat"}},
                        "assets": facts, "asset_decisions": state.get("asset_decisions", []),
                        "previous_proposal": state["proposals"][-1] if state["proposals"] else None,
@@ -378,7 +384,7 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
                                        "value_column": {"type": "list of column-name strings"},
                                        "requirements": {"type": "list of inspected project-relative requirements declaration paths; reproduction with venv only"},
                                        "install_project": {"type": "boolean; reproduction venv only, after inspecting a root packaging declaration; default false"}},
-                           "native_paired_analysis": "paired_baseline is ONE baseline column; other selected columns are candidates. Use observations with data_plot bar for marginal means or box for marginal distributions. Both add separate candidate-minus-baseline mean/standard error plots from complete matched rows; no extra scatter chart or categorical x_column is needed."}}
+                           "native_paired_analysis": "paired_baseline is ONE numeric baseline COLUMN; other selected columns are candidates of the same quantity/unit. It is never a method/group value. Native pairing uses values already aligned on the same row; it cannot join or pivot long-format rows by an ID. If the requested operation requires such reshaping, explain this limitation and ask for a matched wide table or an explicitly agreed simpler task, omitting unsupported settings while questions remain. Use observations with data_plot bar or box for paired analysis; coordinate scatter/line instead require values mode and no paired_baseline."}}
             for correction in range(2):
                 raw = client.ask_json(system, json.dumps(payload, ensure_ascii=False, default=str),
                                       label="assistant-setup-correction" if correction else "assistant-setup")
@@ -395,8 +401,18 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
                     state.setdefault("rejected_proposals", []).append({"response": raw, "error": str(exc)})
                     write_json(root / "setup.json", state)
                     if correction:
-                        raise
+                        print_line(f"Cannot form a runnable proposal / 暂未形成可运行配置: {exc}")
+                        answer = input("Clarify the task or stop to save / 补充说明，或输入 stop 保存退出: ").strip()
+                        if not answer or answer.lower() in {"stop", "quit"}:
+                            return None
+                        state["user_messages"].append(answer)
+                        state["status"] = "discussing"
+                        write_json(root / "setup.json", state)
+                        proposal = None
+                        break
                     payload.update(validation_error=str(exc), rejected_response=raw)
+            if proposal is None:
+                continue
             state["proposals"].append(proposal)
             state["status"] = "awaiting_reply"
             write_json(root / "setup.json", state)
