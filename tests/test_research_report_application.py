@@ -196,6 +196,14 @@ class ResearchReportApplicationTests(unittest.TestCase):
         self.assertEqual((by_label["baseline"].unit, by_label["baseline"].direction), ("percent", "lower"))
         self.assertEqual(by_label["candidate"].measurement_id, "candidate-2")
         self.assertEqual(by_label["baseline"].measurement_id, "baseline-1")
+        candidate["comparisons"] = [{"metrics": [{"name": "accuracy", "delta": -79.2}]}]
+        separate = metric_sources_from_execution(candidate, artifact="result.json",
+            metric_artifacts={"baseline": "baseline.json", "comparison_delta": "comparison.json"})
+        self.assertEqual({row.label: row.artifact for row in separate},
+            {"candidate": "result.json", "baseline": "baseline.json", "comparison_delta": "comparison.json"})
+        self.assertEqual([row.value for row in separate], [0.8, 80, -79.2])
+        embedded = metric_sources_from_execution(candidate, artifact="embedded.json")
+        self.assertTrue(all(row.artifact == "embedded.json" for row in embedded))
         legacy = metric_sources_from_execution({"metrics": {"accuracy": 0.5}}, artifact="old.json")[0]
         self.assertEqual(legacy.source_kind, "legacy_unverified")
         self.assertIsNone(legacy.measurement_id)

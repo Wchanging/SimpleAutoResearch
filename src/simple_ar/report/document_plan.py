@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
+from simple_ar.research.contracts import COMPARISON_SCOPE_RULE
 
 from simple_ar.report.schema import (
     ReportDocumentPlan,
@@ -64,6 +65,7 @@ ARGUMENT_PLAN_SCHEMA = {
 }
 
 ARGUMENT_PLANNING_RULES = (
+    COMPARISON_SCOPE_RULE,
     "Return argument_plan alongside the sections: a question, evidence-supported answer, and reasoning steps with primary owning section keys. A list of topics or cautious summaries is not an argument.",
     "For each substantive point distinguish what the evidence shows from your interpretation, conditions that matter, and counterevidence. Compare at the smallest supported common setting: different overall protocols do not invalidate an explicitly matched subset, while that subset does not establish universal superiority. A single source can report multiple methods, controls and ablations. Incompatible settings do not prove a contradiction. Do not manufacture points or consensus when the sources are insufficient.",
     "Give every section and planned figure a distinct argumentative job. Put shared scope in one primary section; repeat a qualification elsewhere only when necessary to interpret that local assertion. Use direct supported statements rather than generic disclaimers in every paragraph.",
@@ -221,6 +223,7 @@ def visual_requirements(plan: ReportDocumentPlan | None, section: ReportSectionP
             payload["view"] = intent.view
             payload["assembly_owned"] = intent.view == "supplied-data"
             if payload["assembly_owned"]:
+                payload["figure_paths"] = intent.figure_paths
                 payload["delivery"] = "Existing figures are attached after drafting in this frozen owning section. Explain recorded values; do not generate image paths or duplicate the chart. Missing image links in a pre-assembly draft are not a missing deliverable."
             output["figures"].append(payload)
     return output
@@ -463,10 +466,15 @@ def _normalize_visual_intents(
                 raise ValueError("supplied-data placement requires one registered analysis figure source in its owning section")
             if evidence[0] in assigned_sources:
                 raise ValueError("A supplied figure source cannot have multiple placement owners")
+            paths = raw.get("figure_paths")
+            if paths is not None and (not isinstance(paths, list)
+                    or any(not isinstance(path, str) or not path for path in paths)
+                    or len(set(paths)) != len(paths)):
+                raise ValueError("figure_paths must be distinct exact registered paths, or null for legacy package placement")
             assigned_sources.add(evidence[0])
             intents.append(ReportVisualIntent(visual_id=f"figure-{index:02d}", kind="figure",
                 title=title, purpose=purpose, section_id=section.section_id,
-                evidence_handles=evidence, view="supplied-data"))
+                evidence_handles=evidence, view="supplied-data", figure_paths=paths))
             continue
         if kind not in counts:
             continue

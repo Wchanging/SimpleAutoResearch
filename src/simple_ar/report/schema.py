@@ -209,6 +209,9 @@ class ReportVisualIntent(ReportModel):
     evidence_handles: list[str] = Field(default_factory=list)
     view: str = ""
     columns: list[str] = Field(default_factory=list)
+    # None preserves old whole-package placement; an explicit list selects
+    # inline figures without discarding the complete linked analysis package.
+    figure_paths: list[str] | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ReportArgumentPoint(ReportModel):
@@ -414,6 +417,7 @@ class ReportSectionReview(ReportModel):
     """Reviewer output for one drafted report section."""
 
     section_id: str
+    revision_scope: Literal["section", "document"] = Field(default="section", exclude_if=lambda value: value == "section")
     verdict: Literal["pass", "warning", "revise_required", "fail"] = "warning"
     findings: list[ReviewerFinding] = Field(default_factory=list)
     context_requests: list[ReportToolCall] = Field(default_factory=list)

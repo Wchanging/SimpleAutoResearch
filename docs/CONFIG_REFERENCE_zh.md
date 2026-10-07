@@ -33,6 +33,24 @@ timeout_sec = 300
 
 默认仍当前环境、不安装。准备共用进程额度与日志，失败不进入测量；构建可能执行代码和联网，不是 OS 沙箱或通用环境准备。见[工作流](WORKFLOWS_zh.md#明确选择的任务依赖准备)。
 
+明确选择的短运行检查可以直接使用当前环境：
+
+```toml
+[execution.environment]
+mode = "current"
+check_command = ["python", "check_inputs.py"] # 项目实际提供的检查，不是内置脚本
+timeout_sec = 30
+```
+
+复现引导可在最后的 `--command` 前添加
+`--check-argv '["python", "check_inputs.py"]'`。venv 配置也可添加
+`check_command`，裸 Python 别名使用准备好的解释器。显式 baseline 命令中的裸 Python 别名
+也使用同一任务 venv；其参数和明确指定的其他解释器保持不变。current 保持两条命令原样，
+不安装或替换解释器。非零退出或超时会停止正式测量并保留日志，检查输出不进入科研指标。
+成功只证明该检查正常退出，不保证完整实验成功。专家配置需为检查分配进程额度，引导自动计入。
+复现对话也可依据已查看的项目说明，在执行建议中展示可选检查；确认后由同一序列化入口
+保存。设置对话不执行这两条命令，也不替换用户明确指定的 argv。
+
 来源访问中，`materials_only` 禁止在线检索；`--fulltext` 允许在线调研尽力获取远程全文。不可得或截断材料仍需说明。
 
 ## 已有材料写作
@@ -239,7 +257,7 @@ value_unit = "秒"
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
 | `[execution]` | `command`、`cwd`、`timeout_sec`、`code_task_config` | 选择一个执行边界：literal argv `command` 加已存在的绝对 `cwd`，或 CodeTask TOML 引用。只调研时两者都省略；`timeout_sec` 在 CLI/应用边界提供默认值。 |
-| `[execution.environment]` | `mode`、`requirements`、`install_project`、`python_executable`、`timeout_sec` | 可选的单命令任务虚拟环境：`mode = "venv"`；项目相对依赖文件列表默认空，`install_project` 默认 false，基础 Python 默认当前运行时，每步超时默认 300 秒。省略沿用当前环境；专家 TOML 须明确预留准备进程额度，引导入口会计入。 |
+| `[execution.environment]` | `mode`、`requirements`、`install_project`、`python_executable`、`timeout_sec`、`check_command` | 可选的单命令准备：venv 创建任务环境；current 必须明确检查 argv，不安装或替换 Python。依赖列表默认空，项目安装默认 false，venv 基础 Python 默认当前运行时，每步超时默认 300 秒；可选检查在准备后执行。省略保持普通当前环境执行，专家 TOML 预留准备额度，引导计入。 |
 | `[execution]` | `primary_metric`、`metrics`、`metric_directions` | 可选测量 schema；方向为 `higher`、`lower`、`resource` 或 `ignore`。 |
 | `[execution]` | `output_files` | 可选映射，最多八个附件名称，对应进程 `SIMPLE_AR_OUTPUT_DIR` 内的相对 POSIX 文件路径。仅登记每个不超过 2 MiB 的 UTF-8 普通文件，提供有界预览与读取句柄；缺失或不可读附件独立于执行成功状态记录。 |
 | `[execution]` | `pairs`、`seeds`、`seed_flag`、`seed_count` | 可选的显式比较输入。`pairs` 每行包含唯一整数 `seed` 与 literal `baseline_command`/`candidate_command`；compact seed 必须有 literal command 和显式 seed flag/count，不解析自然语言 seed。 |

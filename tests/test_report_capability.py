@@ -23,6 +23,9 @@ from simple_ar.report.schema import (
     ReportSectionDraft,
     ReportSectionPlan,
     ReportVisualIntent,
+    ReportArgumentPlan,
+    ReportArgumentPoint,
+    MetricSource,
 )
 
 
@@ -49,14 +52,45 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             figure = result.figures[0]
             self.assertEqual(figure.source_artifacts, ["baseline.json", "candidate.json"])
             svg = ET.parse(root / figure.path)
-            circles = svg.findall(".//{http://www.w3.org/2000/svg}circle")
-            self.assertEqual([c.attrib["cx"] for c in circles], ["460.00", "700.00"])
+            text = " ".join(svg.getroot().itertext())
+            self.assertIn("Seed 0", text)
+            self.assertIn("baseline", text)
+            self.assertIn("candidate", text)
+            for suffix in ("pdf", "png"):
+                self.assertEqual(figure.exports[suffix], str(Path(figure.path).with_suffix("." + suffix)))
+                self.assertTrue((root / figure.exports[suffix]).is_file())
             self.assertIn("fraction", figure.title)
             self.assertIn(figure.path, result.report_markdown)
             self.assertIn(figure.path, result.report_body_markdown)
             from dataclasses import replace
             absent = assemble_report_document(replace(request, paired_summaries=()), report_dir=root / "no-data")
             self.assertEqual(absent.figures, ())
+            # Figure ownership follows IDs even after a translated heading;
+            # there is no second generic comparisons section in that case.
+            owned = replace(request, sections=(ReportSectionDraft(section_id="results", heading="实测表现",
+                draft_markdown="Measured results."), ReportSectionDraft(section_id="discussion", heading="Discussion",
+                draft_markdown="Interpretation.")), document_plan=ReportDocumentPlan(argument_plan=ReportArgumentPlan(
+                question="What was measured?", answer="Recorded pairs.", points=[ReportArgumentPoint(
+                    claim="Measured accuracy", section_id="results", metric_ids=["observed-accuracy"])])),
+                experiment_context=ReportContext(topic="Measured results", report_mode="experiment", metric_sources=[MetricSource(
+                    metric_id="observed-accuracy", name="accuracy", value=1., artifact="candidate.json")]))
+            placed = assemble_report_document(owned, report_dir=root / "owned")
+            self.assertEqual(placed.figures[0].anchor, "实测表现")
+            self.assertNotIn("## Measured comparisons", placed.report_body_markdown)
+            self.assertLess(placed.report_body_markdown.index("paired-1.svg"), placed.report_body_markdown.index("## Discussion"))
+            ambiguous_plan = owned.document_plan.model_copy(deep=True)
+            ambiguous_plan.argument_plan.points.append(ReportArgumentPoint(claim="Interpretation", section_id="discussion",
+                metric_ids=["observed-accuracy"]))
+            ambiguous = assemble_report_document(replace(owned, document_plan=ambiguous_plan), report_dir=root / "ambiguous")
+            self.assertEqual(ambiguous.figures[0].anchor, "Measured comparisons")
+            registry = CapabilityRegistry()
+            registry.register("report", run_report_capability)
+            controller = SessionController.create(root / "session", session_id="paired-report", topic="Recorded pairs",
+                profile="paper_audit", registry=registry)
+            delivery = controller.execute_attempt("report", attempt_id="report-1", request=owned)
+            self.assertEqual(delivery.status, "completed")
+            exported = {Path(ref.path).suffix for ref in delivery.artifacts if ref.kind == "figure"}
+            self.assertEqual(exported, {".svg", ".pdf", ".png"})
 
     def test_default_paired_figures_keep_task_metric_order_without_domain_bias(self):
         metrics = [

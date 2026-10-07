@@ -1,4 +1,4 @@
-"""Opt-in project venv preparation through the existing process backend.
+"""Opt-in environment preparation and checks through the existing process backend.
 
 The preparation attempt owns the environment and receipts; this is not another
 executor, installer service or environment database. Installation is executable
@@ -15,14 +15,19 @@ from typing import Any
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.experiment.execution.backend import ExecutionBackend, LocalExecutionBackend
-from simple_ar.code_task.execution.environment import resolve_code_task_command
 
 
 def environment_profile(value: Any, *, project: Path | None = None) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) - {"mode", "requirements", "install_project", "python_executable", "timeout_sec"}:
-        raise ValueError("execution.environment accepts mode, requirements, install_project, python_executable and timeout_sec only.")
-    if value.get("mode") != "venv":
-        raise ValueError('execution.environment.mode must be "venv"; omit the table to use the current environment.')
+    if not isinstance(value, Mapping) or set(value) - {"mode", "requirements", "install_project", "python_executable", "timeout_sec", "check_command"}:
+        raise ValueError("execution.environment accepts mode, requirements, install_project, python_executable, timeout_sec and check_command only.")
+    mode = value.get("mode")
+    check = value.get("check_command", [])
+    if not isinstance(check, (list, tuple)) or any(not isinstance(item, str) or not item.strip() for item in check):
+        raise ValueError("environment.check_command must be an argv list of nonempty strings, without shell interpretation.")
+    if mode not in ("current", "venv") or (mode == "current" and not check):
+        raise ValueError('Use mode="venv", or mode="current" with an explicit check_command; otherwise omit the table.')
+    if mode == "current" and (value.get("requirements") or value.get("install_project") or "python_executable" in value):
+        raise ValueError("Current-environment checks do not install dependencies or override the interpreter; select it in the command itself.")
     requirements = value.get("requirements", [])
     if not isinstance(requirements, (list, tuple)) or any(not isinstance(item, str) or not item.strip() for item in requirements):
         raise ValueError("environment.requirements must list project-relative requirements files.")
@@ -46,38 +51,48 @@ def environment_profile(value: Any, *, project: Path | None = None) -> dict[str,
     timeout = value.get("timeout_sec", 300)
     if type(timeout) is not int or timeout < 1:
         raise ValueError("environment.timeout_sec must be positive.")
-    return {"mode": "venv", "requirements": list(dict.fromkeys(requirements)), "install_project": install_project,
-            "python_executable": python, "timeout_sec": timeout}
+    return {"mode": mode, "requirements": list(dict.fromkeys(requirements)), "install_project": install_project,
+            **({"python_executable": python} if mode == "venv" else {}), "timeout_sec": timeout,
+            **({"check_command": list(check)} if check else {})}
 
 
 def prepare_project_environment(*, context: CapabilityContext, request: Any,
                                 backend: ExecutionBackend | None = None) -> CapabilityResult:
     config = dict(request.execution)
     if request.run is None or "code_task" in config or "dataset" in config or config.get("pairs"):
-        raise ValueError("Venv preparation currently supports a single declared command, not CodeTask, text-baseline or paired execution.")
+        raise ValueError("Environment preparation supports a single declared command, not CodeTask, text-baseline or paired execution.")
     project = request.run.cwd.resolve()
     profile = environment_profile(config["environment"], project=project)
     if not project.is_dir():
         raise ValueError(f"Execution project not found: {project}")
     # Only the ordinary 'python' aliases are substituted. An explicit binary,
     # uv/conda launcher or shell remains the user's selected execution protocol.
-    if request.run.command[0] not in {"python", "python3", "python.exe", "python3.exe"}:
+    isolated = profile["mode"] == "venv"
+    aliases = {"python", "python3", "python.exe", "python3.exe"}
+    if isolated and request.run.command[0] not in aliases:
         raise ValueError("Task venv requires the command's first argument to be python/python3; explicit interpreters and non-Python launchers are not silently replaced.")
     directory = context.store.root / "environment"
-    if directory.exists():
+    if directory.exists() or (context.store.root / "environment_setup.json").exists():
         raise ValueError("Preparation environment already exists; use its recorded result or an explicit new attempt, not an in-place replay.")
     python = directory / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    steps = [[profile["python_executable"], "-m", "venv", str(directory)]]
-    if profile["requirements"] or profile["install_project"]:
+    steps = [[profile["python_executable"], "-m", "venv", str(directory)]] if isolated else []
+    if isolated and (profile["requirements"] or profile["install_project"]):
         steps.append([str(python), "-m", "pip", "install", "--disable-pip-version-check",
                       *[arg for path in profile["requirements"] for arg in ("-r", str(project / path))],
                       *([str(project)] if profile["install_project"] else [])])
-    steps.append([str(python), "-m", "pip", "check"])
+    if isolated:
+        steps.append([str(python), "-m", "pip", "check"])
+    if profile.get("check_command"):
+        check = list(profile["check_command"])
+        if isolated and check[0] in aliases:
+            check[0] = str(python)
+        steps.append(check)
     observed = []
     refs = []
     selected_backend = backend or LocalExecutionBackend()
-    limitations = ["Isolated task venv; not an OS sandbox. Approved requirements/project installation may run build code, access package indexes and write build metadata in the source project.",
+    limitations = [("Isolated task venv; not an OS sandbox. Approved requirements/project installation may run build code, access package indexes and write build metadata in the source project." if isolated else "Current environment; no dependency installation or interpreter replacement. Checks execute project code, not in an OS sandbox."),
                    "Successful installation and pip check do not prove project imports, binary/GPU compatibility, data splits or scientific validity.",
+                   "A check proves only its observed exit status; its outputs are preparation records, not scientific measurements. No automatic shortening or retry of the scientific command.",
                    "No automatic data download, framework-directed project-code edits or changes to the scientific command's arguments."]
     for number, argv in enumerate(steps, 1):
         # Allocate before launch. An interrupted attempt retains this unknown
@@ -96,10 +111,17 @@ def prepare_project_environment(*, context: CapabilityContext, request: Any,
             return CapabilityResult(status="failed", artifacts=(*refs, ref),
                 diagnostics=(f"Environment preparation step {number} {result.status}; the scientific command was not run.",))
     config.pop("environment")
-    config["command"] = resolve_code_task_command(request.run.command, env_mode="external", python_executable=str(python))
+    config["command"] = list(request.run.command)
+    if isolated:
+        config["command"][0] = str(python)
+        baseline = config.get("baseline")
+        if isinstance(baseline, Mapping) and isinstance(baseline.get("command"), (list, tuple)):
+            argv = list(baseline["command"])
+            if argv and argv[0] in aliases:
+                config["baseline"] = {**baseline, "command": [str(python), *argv[1:]]}
     prepared = context.store.write_json("execution.json", {"schema_version": "prepared_execution.v1",
         "execution": config, "source_project": str(project), "workspace": str(project),
-        "environment": {"python_executable": str(python), "setup_ref": ref.to_dict(), "requirements": profile["requirements"],
+        "environment": {"mode": profile["mode"], **({"python_executable": str(python)} if isolated else {}), "setup_ref": ref.to_dict(), "requirements": profile["requirements"],
                         "install_project": profile["install_project"]},
         "limitations": limitations}, kind="prepared_execution", schema="prepared_execution.v1", producer="research.preparation")
     return CapabilityResult(status="completed", artifacts=(*refs, ref, prepared))

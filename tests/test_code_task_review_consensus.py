@@ -20,12 +20,12 @@ class ReviewConsensusTests(unittest.TestCase):
         import simple_ar.code_task.review as review
         from simple_ar.code_task import initialize_code_task
         from simple_ar.core.artifacts import read_json
-        for use_llm in (True, False):
-            with self.subTest(use_llm=use_llm), tempfile.TemporaryDirectory() as folder:
+        for use_llm, broken in ((True, False), (True, True), (False, True)):
+            with self.subTest(use_llm=use_llm, broken=broken), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 source = root / 'source'
                 source.mkdir()
-                (source / 'main.py').write_text('import helper\nhelper.missing()\n')
+                (source / 'main.py').write_text('import helper\nhelper.' + ('missing' if broken else 'present') + '()\n')
                 (source / 'helper.py').write_text('def present():\n    return 42\n')
                 task = root / 'task.md'
                 task.write_text('Preserve the public interface\n')
@@ -42,13 +42,15 @@ class ReviewConsensusTests(unittest.TestCase):
                      patch.object(review, 'run_llm_review', side_effect=capture):
                     result = review.review_code_task_changes(run, use_llm=use_llm)
                 self.assertEqual(scan.call_count, 1)
-                self.assertEqual(contract.call_count, 1 if use_llm else 0)
+                self.assertEqual(contract.call_count, 1 if use_llm and not broken else 0)
                 report = read_json(result.report_path)
-                self.assertEqual(result.status, 'failed')
-                self.assertTrue(any(row['category'] == 'interface_compatibility' for row in report['findings']))
-                self.assertEqual(len(prompts), 2 if use_llm else 0)
+                self.assertEqual(result.status, 'failed' if broken else 'passed')
+                self.assertEqual(any(row['category'] == 'interface_compatibility' for row in report['findings']), broken)
+                self.assertEqual(len(prompts), 2 if use_llm and not broken else 0)
+                if use_llm and broken:
+                    self.assertEqual(report['metadata']['review_mode'], 'deterministic_blocked')
                 for context in prompts:
-                    self.assertEqual(context['local_api_mismatches'][0]['missing_symbol'], 'missing')
+                    self.assertEqual(context['local_api_mismatches'], [])
                     self.assertIn('def present()', context['local_api_contract']['helper.py'])
                 if prompts:
                     self.assertEqual(prompts[0]['local_api_mismatches'], prompts[1]['local_api_mismatches'])

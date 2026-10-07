@@ -187,6 +187,29 @@ class LLMParsingTests(unittest.TestCase):
         request = call.call_args.args[1]
         self.assertTrue(request["stream"])
 
+    def test_completed_stream_with_final_usage_does_not_wait_for_transport_eof(self):
+        observed = []
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", stream=True),
+                           usage_callback=observed.append)
+
+        class CompletedStream:
+            closed = False
+
+            def __iter__(self):
+                yield {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}}
+                yield {"choices": [{"delta": {"content": "complete"}, "finish_reason": "stop"}]}
+                yield {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}}
+                raise AssertionError("Do not wait for another event after terminal content and usage")
+
+            def close(self):
+                self.closed = True
+
+        stream = CompletedStream()
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=stream):
+            self.assertEqual(client.ask("system", "user"), "complete")
+        self.assertTrue(stream.closed)
+        self.assertEqual(observed[0].total_tokens, 5)
+
     def test_from_env_reads_stream_setting(self) -> None:
         with patch.dict(os.environ, {
             "OPENAI_API_KEY": "test-key",

@@ -15,6 +15,87 @@ from simple_ar.research.task_plan import TaskPlanRequest, default_task_steps, bu
 
 
 class ProjectEnvironmentTests(unittest.TestCase):
+    def test_session_reuses_completed_check_and_measures_only_the_formal_command(self):
+        from simple_ar.app.research_application import create_session, load_session, ResearchApplicationServices
+        from simple_ar.research.workflow_contracts import ResearchBrief
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'data.txt').write_text('0.5')
+            paper = root / 'paper.md'
+            paper.write_text('# Fixture\nMeasure the supplied value, not the preparation score.')
+            check = "from pathlib import Path; assert Path('data.txt').is_file(); Path('checks').write_text('once'); print('score: 999')"
+            formal = "from pathlib import Path; Path('runs').write_text('once'); print('score: ' + Path('data.txt').read_text())"
+            app = create_session(ResearchBrief(request_text='Measure supplied data', requested_outputs=('experiments',),
+                asset_requests=({'locator': str(paper), 'role': 'paper'},)), root=root / 'session',
+                services=ResearchApplicationServices(config={'research_task_kind': 'measurement', 'execution': {
+                    'command': [sys.executable, '-c', formal], 'cwd': str(root), 'timeout_sec': 5,
+                    'result_schema': {'primary_metric': 'score', 'required_metrics': ['score']},
+                    'environment': {'mode': 'current', 'check_command': [sys.executable, '-c', check], 'timeout_sec': 5}}},
+                    budget_limits={'process_invocations': 2, 'process_wall_seconds': 10}))
+            for _ in range(10):
+                if app.view().next_action == 'experiment':
+                    break
+                app.advance()
+            self.assertEqual(app.view().next_action, 'experiment', app.view().status_reason)
+            self.assertTrue((root / 'checks').exists())
+            self.assertFalse((root / 'runs').exists())
+            app = load_session(root / 'session')
+            view = app.advance(max_actions=10)
+            self.assertEqual(view.status, 'completed', view.status_reason)
+            measured = app.controller.store.read_json(view.state_refs['experiment'])
+            self.assertEqual(measured['metrics']['score'], 0.5)
+            self.assertEqual(app.budget_ledger.remaining('process_invocations'), 0)
+            snapshots = {name: (root / name).stat().st_mtime_ns for name in ('checks', 'runs')}
+            self.assertEqual(load_session(root / 'session').advance(max_actions=10).status, 'completed')
+            self.assertEqual(snapshots, {name: (root / name).stat().st_mtime_ns for name in snapshots})
+
+    def test_current_check_executes_without_installation_and_never_publishes_check_metrics(self):
+        from simple_ar.experiment.execution.backend import LocalExecutionBackend
+        for program, timeout, expected in (
+            ('print("score=999")', 5, 'completed'),
+            ('raise SystemExit(2)', 5, 'failed'),
+            ('import time; time.sleep(3)', 1, 'failed'),
+        ):
+            with self.subTest(program=program), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                context = self.context(root)
+                request = self.request(root, environment={'mode': 'current',
+                    'check_command': [sys.executable, '-c', program], 'timeout_sec': timeout})
+                result = run_preparation_capability(context=context, request=request, backend=LocalExecutionBackend())
+                self.assertEqual(result.status, expected)
+                self.assertFalse((context.store.root / 'environment').exists())
+                receipt = context.store.read_json('environment_setup.json')
+                self.assertEqual(len(receipt['steps']), 1)
+                self.assertFalse(any(ref.kind == 'experiment' for ref in result.artifacts))
+                if expected == 'completed':
+                    prepared = context.store.read_json('execution.json')
+                    self.assertEqual(prepared['execution']['command'], request.execution['command'])
+                    self.assertEqual(prepared['execution']['timeout_sec'], 19)
+                    self.assertNotIn('metrics', prepared['environment'])
+                else:
+                    self.assertFalse((context.store.root / 'execution.json').exists())
+                with self.assertRaisesRegex(ValueError, 'already exists'):
+                    run_preparation_capability(context=context, request=request, backend=LocalExecutionBackend())
+
+    def test_current_check_guided_config_and_budget_share_the_preparation_owner(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'paper.md').write_text('Reference')
+            args = build_parser().parse_args(['start', '--kind', 'reproduction', '--goal', 'Check conclusion',
+                '--document', str(root / 'paper.md'), '--project', str(root),
+                '--hypothesis', 'Claim', '--dataset', 'Fixed data', '--expected-outcome', 'Compare score',
+                '--metric', 'score', '--timeout-sec', '7', '--prepare-only', '--output-root', str(root / 'runs'),
+                '--check-argv', '["python", "check.py"]', '--command', 'python', 'run.py'])
+            with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'):
+                config = prepare_start(args)
+            defaults = research_defaults(['research-session', '--config', str(config)])
+            self.assertEqual(defaults['execution_details']['environment']['check_command'], ['python', 'check.py'])
+            self.assertEqual(defaults['process_invocations'], 2)
+            self.assertEqual(defaults['process_wall_seconds'], 14)
+            request = TaskPlanRequest(goal='Observe', request_text='Observe', task_kind='measurement',
+                requested_outputs=('experiments',), execution={**defaults['execution_details'], 'command': defaults['command_argv']}, execution_protocol_accepted=True)
+            self.assertEqual([row.action for row in build_task_plan(request).steps], ['prepare_execution', 'experiment', 'analysis'])
+
     def test_application_preparation_requires_declared_scope_not_fake_research_design(self):
         from simple_ar.app.research_application import create_session, ResearchApplicationServices
         from simple_ar.research.workflow_contracts import ResearchBrief
@@ -67,18 +148,28 @@ class ProjectEnvironmentTests(unittest.TestCase):
                         python.parent.mkdir(parents=True)
                         python.touch()
                     return RunResult(0, False, 'observed stdout', '', command=request.command, cwd=str(request.cwd))
-            result = run_preparation_capability(context=context, request=self.request(root), backend=Backend())
+            result = run_preparation_capability(context=context, request=self.request(root,
+                baseline={'command': ['python3', 'control.py', '--seed', '42'], 'label': 'control'},
+                environment={'mode': 'venv', 'requirements': ['requirements.txt'], 'timeout_sec': 7,
+                             'check_command': ['python.exe', 'check.py']}), backend=Backend())
             self.assertEqual(result.status, 'completed')
-            self.assertEqual(len(calls), 3)
+            self.assertEqual(len(calls), 4)
             self.assertTrue(all(row.timeout_sec == 7 and row.session_id == 'session' and row.attempt_id == 'prepare-1' for row in calls))
             self.assertEqual(calls[0].command[:3], [sys.executable, '-m', 'venv'])
             self.assertEqual(calls[1].command[-2:], ['-r', str(root / 'requirements.txt')])
             self.assertEqual(calls[2].command[-3:], ['-m', 'pip', 'check'])
+            self.assertEqual(calls[3].command, [calls[2].command[0], 'check.py'])
             payload = context.store.read_json(next(ref for ref in result.artifacts if ref.kind == 'prepared_execution'))
             self.assertNotIn('environment', payload['execution'])
             self.assertEqual(payload['execution']['command'][1:], ['run.py', '--fixed', '42'])
             self.assertTrue(payload['execution']['command'][0].startswith(str(context.store.root)))
             self.assertEqual(payload['execution']['timeout_sec'], 19)
+            from simple_ar.app.research_execution import execution_request
+            control = execution_request(payload['execution'], condition='baseline').run
+            candidate = execution_request(payload['execution']).run
+            self.assertEqual(control.command[0], candidate.command[0])
+            self.assertEqual(control.command[1:], ['control.py', '--seed', '42'])
+            self.assertEqual(control.label, 'control')
             self.assertIn('scientific validity', ' '.join(payload['limitations']))
 
     def test_project_install_is_opt_in_and_requires_a_declared_package_before_launch(self):
@@ -117,6 +208,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
                         return RunResult(0, False, 'observed', '', command=request.command)
                 context = self.context(root)
                 result = run_preparation_capability(context=context, request=self.request(root,
+                    baseline={'command': ['explicit-baseline-python', 'control.py']},
                     environment={'mode': 'venv', 'requirements': requirements, 'install_project': True}), backend=Backend())
                 self.assertEqual(result.status, 'completed')
                 self.assertEqual(len(calls), 3)
@@ -126,6 +218,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
                 payload = context.store.read_json('execution.json')
                 self.assertTrue(payload['environment']['install_project'])
                 self.assertEqual(payload['execution']['command'][1:], ['run.py', '--fixed', '42'])
+                self.assertEqual(payload['execution']['baseline']['command'], ['explicit-baseline-python', 'control.py'])
 
     def test_project_build_failure_cannot_publish_a_prepared_scientific_command(self):
         with tempfile.TemporaryDirectory() as folder:

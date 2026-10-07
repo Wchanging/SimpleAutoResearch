@@ -13,6 +13,7 @@ from simple_ar.report.document_plan import visual_plan_for_renderer
 from simple_ar.report.schema import ReportDocumentPlan, ReportFigureConfig
 # Retain the old import surface; data rendering no longer depends on reporting.
 from simple_ar.result_analysis.figures import render_table_figures as render_table_figures
+from simple_ar.result_analysis.figures import render_measurement_pairs
 
 
 _DEFAULT_PAIRED_FIGURE_LIMIT = 4
@@ -27,6 +28,7 @@ class ReportFigureRecord(BaseModel):
     anchor: str
     caption: str = ""
     source_artifacts: list[str] = Field(default_factory=list)
+    exports: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
 
 
 class ReportFigureResult(BaseModel):
@@ -78,7 +80,8 @@ _FIGURE_SPECS: tuple[_FigureSpec, ...] = (
 
 
 def add_paired_measurement_figures(*, report_markdown: str, report_dir: Path,
-                                 comparisons: list[dict], summaries: list[dict], config: ReportFigureConfig) -> ReportFigureResult:
+                                 comparisons: list[dict], summaries: list[dict], config: ReportFigureConfig,
+                                 anchors: dict[str, str] | None = None) -> ReportFigureResult:
     """Plot declared-comparable measured pairs, not values extracted from prose."""
     if not config.enabled or config.mode == "off":
         return ReportFigureResult(report_markdown=report_markdown)
@@ -94,6 +97,8 @@ def add_paired_measurement_figures(*, report_markdown: str, report_dir: Path,
             if group is not None:
                 groups[group].append((comparison, metric))
     figures, blocks = [], []
+    placed_blocks = defaultdict(list)
+    body = report_markdown
     ordered_groups = list(groups.items())
     if config.max_figures <= 0:
         # Keep the evidence producer's metric order; no domain-specific metric
@@ -104,42 +109,23 @@ def add_paired_measurement_figures(*, report_markdown: str, report_dir: Path,
     for index, ((group_id, name, unit), pairs) in enumerate(ordered_groups):
         if index >= limit:
             break
-        values = [row[role] for _, row in pairs for role in ("baseline", "candidate")]
-        low, high = min(0, min(values)), max(0, max(values))
-        if high == low:
-            high = low + 1
-        def x(value):
-            return 220 + 480 * (value - low) / (high - low)
-        height = 140 + len(pairs) * 38
         title = f"{name} ({unit or 'unit not recorded'}) — condition group {group_id}"
-        svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="800" height="{height}" viewBox="0 0 800 {height}" role="img">',
-               f'<title>{html.escape(title)}</title>', '<rect width="100%" height="100%" fill="white"/>',
-               '<g font-family="sans-serif" font-size="14" fill="#17212b">',
-               f'<text x="24" y="28" font-size="20">{html.escape(title)}</text>',
-               '<text x="24" y="54">Gray: baseline · Blue: candidate · Lines join one seed, not confidence intervals</text>']
-        sources = []
-        for row_index, (comparison, metric) in enumerate(pairs):
-            y = 86 + 38 * row_index
-            a, b = x(metric["baseline"]), x(metric["candidate"])
-            svg.extend([f'<text x="24" y="{y + 5}">Seed {comparison["seed"]}</text>',
-                f'<line x1="{a:.2f}" y1="{y}" x2="{b:.2f}" y2="{y}" stroke="#95a1ad" stroke-width="2"/>',
-                f'<circle cx="{a:.2f}" cy="{y}" r="5" fill="#687583"/>',
-                f'<circle cx="{b:.2f}" cy="{y}" r="4" fill="#1268b3"/>'])
-            sources.extend(comparison[f"{role}_ref"]["path"] for role in ("baseline", "candidate"))
-        axis_y = height - 44
-        svg.append(f'<line x1="220" y1="{axis_y}" x2="700" y2="{axis_y}" stroke="#687583"/>')
-        for i in range(5):
-            value = low + (high - low) * i / 4
-            svg.append(f'<text x="{x(value):.2f}" y="{axis_y + 22}" text-anchor="middle">{value:.4g}</text>')
-        svg.append('</g></svg>')
-        filename = f"paired-{index + 1}.svg"
-        write_text(report_dir / "figures" / filename, "\n".join(svg))
-        caption = "Per-seed measured pairs under their declared conditions; descriptive only, without an aggregate or significance claim."
-        record = ReportFigureRecord(figure_id=f"paired-{index + 1}", title=title, path=f"figures/{filename}",
-            anchor="Measured comparisons", caption=caption, source_artifacts=list(dict.fromkeys(sources)))
+        rendered = render_measurement_pairs(
+            [{"seed": comparison["seed"], "baseline": metric["baseline"], "candidate": metric["candidate"]}
+             for comparison, metric in pairs], title=title, unit=unit, output_dir=report_dir,
+            filename=f"figures/paired-{index + 1}.svg")
+        sources = [comparison[f"{role}_ref"]["path"] for comparison, _ in pairs for role in ("baseline", "candidate")]
+        record = ReportFigureRecord(figure_id=f"paired-{index + 1}", title=title, path=rendered["path"],
+            anchor=(anchors or {}).get(name, "Measured comparisons"), caption=rendered["caption"], source_artifacts=list(dict.fromkeys(sources)),
+            exports=rendered["exports"])
         figures.append(record)
-        blocks.append(f"![{name.replace(']', '')}]({record.path})\n\n*{caption}*")
-    body = report_markdown
+        block = f"![{name.replace(']', '')}]({record.path})\n\n*{record.caption}*"
+        if name in (anchors or {}):
+            placed_blocks[record.anchor].append(block)
+        else:
+            blocks.append(block)
+    for anchor, owned_blocks in placed_blocks.items():
+        body = _insert_after_heading(body, f"## {anchor}", "\n\n" + "\n\n".join(owned_blocks) + "\n\n")
     if blocks:
         block = "\n\n## Measured comparisons\n\n" + "\n\n".join(blocks) + "\n"
         marker = re.search(r"^## References\s*$", body, re.MULTILINE)

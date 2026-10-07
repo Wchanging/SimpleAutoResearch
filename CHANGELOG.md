@@ -6,22 +6,93 @@ This file records implemented, user-visible changes in reverse chronological ord
 
 ## 2026-10-06
 
+- Writing delivery surfaces unresolved findings from the current adopted draft, without counting
+  resolved historical opinions or treating a usable draft as publication-ready.
+  Joint review distinguishes document-wide corrections from local edits, so overall length or
+  distributed repetition can be corrected across sections without moving finding ownership.
+  Saved revision candidates retain their original scope on recovery.
+  Complete canonical length counts now participate directly in joint revision decisions;
+  a model's pass cannot override a recorded hard-range violation. Soft targets and unavailable
+  counts remain advisory, and revision limits are unchanged.
+  Local bibliography extraction no longer treats dates explicitly labelled as draft,
+  receipt, acceptance or revision events as publication dates, even when the proposal omits the label.
+
+- Chat streaming closes after a finished choice and final usage have arrived,
+  rather than waiting for a gateway to close the connection. Separate usage
+  chunks are retained; interruption errors show received character counts and
+  terminal/usage state without logging source text. Partial responses are not accepted as complete.
+- Code-repair chat can inspect project instructions and propose a test command
+  for confirmation, reusing ordinary CodeTask configuration. Explicit commands,
+  edit scope and execution confirmation remain authoritative; setup runs nothing.
+  Research-design source reads can inspect a named workspace file omitted from
+  a bounded inventory, without changing edit scope or enlarging the read budget.
+- Adaptive report planning and drafting retain genre-specific writing principles
+  without restoring fallback chapter assignments. Seven built-in templates guide
+  argument, interpretation and figure/prose organization; these instructions are
+  not rendered as manuscript sections and do not add model calls.
+  Guided compact material, analysis and source-review reports default to joint
+  drafting and whole-document review; long/custom templates and saved tasks retain
+  their existing scope choices.
+  Shared comparison guidance assigns restrictions to their actual method or
+  evaluation, rather than treating a comparator's limits as another method's
+  limits or as evidence for recommending it outside its supported range.
+  Analysis writing distinguishes marginal column summaries from complete-pair
+  comparisons and asks for sample bases and counts to be labelled at the table,
+  rather than treating a later missing-data disclaimer as sufficient.
+- Document sectioning keeps numbered publication titles inside bibliography,
+  rejects trailing numeric table cells as implicit headings, and no longer
+  classifies descriptive body headings as bibliography merely for mentioning
+  references. Explicit sections and appendices still retain their source spans;
+  unsectioned material retains its leading title instead of silently discarding it.
+- Finite reproduction can run an explicitly configured short check before
+  measurement, in the current environment or after task-venv setup. Failure or
+  timeout preserves preparation logs and stops measurement; check output is not
+  scientific evidence. Guided setup includes the additional process budget.
+  Reproduction chat can propose a check from inspected project instructions for
+  confirmation, retaining explicit user commands and using the same configuration.
+  Task-venv preparation binds baseline and candidate Python aliases to the same
+  interpreter while preserving their arguments and explicitly selected binaries.
+- Experiment pair plots reuse the headless Matplotlib data renderer instead of
+  handwritten SVG coordinates. SVG, PDF and PNG are registered as one figure's
+  deliverables; an unambiguous metric owner in the accepted argument plan places
+  the figure in its section. Legacy or ambiguous plans keep the comparison appendix.
+  Article plans can select registered analysis charts for inline display while
+  retaining every chart and numerical record in the linked, editable package.
+  Old plans without a selection retain their existing whole-package placement.
 - Material writing keeps outline lookups separate from the Writer's bounded
   gap lookup, so preparing an outline does not consume the author's opportunity
   to read missing passages. Both use the existing tool allowance and checkpoints;
-  historical tasks retain their already-consumed read batches. Source overviews
-  preserve each section's actual best matching passage rather than replacing it
+  historical tasks retain their already-consumed read batches. Writing and section
+  review retain every supplied read result instead of dropping early results after
+  six lookups; existing tool and token budgets remain. Source overviews preserve
+  each section's actual best matching passage rather than replacing it
   with the section opening; the window budget and cross-section coverage remain.
+  Later overview windows prioritize query terms not yet represented, within the
+  same character budget; lexical coverage does not certify understanding.
+  Joint drafting, section drafting and format recovery receive the same saved
+  source comparisons and conditions, labelled as interpretations rather than
+  verified facts; independent review remains separate.
+  Writer calls share one assembly-content input across joint, section and format
+  recovery paths; section neighbor context no longer repeats that attachment view.
 - New review responses use literal JSON Pointers for evidence references instead
   of a second short-anchor representation. Existing saved references remain
   readable; field ownership and strict quotation validation are unchanged.
 - Code review keeps model concerns advisory rather than promoting matching
   wording across review groups into a blocking verdict. Scope violations,
-  definite missing interfaces and recorded validation failures still block;
+  definite missing interfaces and recorded validation failures still block and
+  are saved without model calls;
   authorized behavior checks provide actual evidence and can drive repair.
+  Batch editing retains located source windows instead of replacing them with
+  file prefixes. Editable scope and explicit patch approval remain unchanged.
+  Python-only patch review supplements changed files with indexed imports and
+  callers rather than unrelated role-ranked data/documents; whole-project,
+  non-Python and historical-index reviews retain their broader selection.
 - Accepted direct-material writing plans retain their ordinary source handoff
   without an unused model query-planning call. Search and evidence-reading
   plans retain query planning; saved task plans and recovery are unchanged.
+  Supplied-source report-only tasks also use the existing deterministic dispatch,
+  leaving content organization to the article planner rather than asking a model
+  to plan the same fixed route again. Assessment and execution tasks are unchanged.
   Writing distinguishes the number of sources from the number of methods:
   supported within-paper comparisons keep their matched conditions.
 - Section writing and review select detailed measurements from the accepted

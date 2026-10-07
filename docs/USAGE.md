@@ -137,7 +137,9 @@ Transport and recovery notes (optional expert reference):
 - `SIMPLE_AR_LLM_STREAM=true` uses streamed Chat Completions when
   `SIMPLE_AR_LLM_API=chat`. The client assembles chunks before parsing and
   records provider usage when the gateway supplies it; Responses calls remain
-  non-streamed. This can avoid long non-stream connection stalls on compatible
+  non-streamed. A finished choice plus final usage completes collection without
+  waiting for connection closure. Interruptions report received character counts
+  and terminal/usage state, not response text. This can avoid long non-stream connection stalls on compatible
   gateways, but it does not remove provider or client timeouts.
 - `SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM` optionally selects `max_tokens` or
   `max_completion_tokens` for Chat Completions; `auto` selects from the model
@@ -193,6 +195,14 @@ Transport and recovery notes (optional expert reference):
   calls are unchanged. `off` retains prompt-only parsing for providers that require it;
   `json_object` always sends the format. Existing `.env` files with `off` keep that choice.
 - Price fields are optional and only affect cost estimates in usage summaries.
+
+Provider-side generation success does not prove that the client received the complete response.
+For interrupted streams, inspect `content_chars`, `finish_reason`, and `usage_received`, then check
+the execution host's network route instead of relying on more retries or disabling timeouts.
+If a proxy is needed, configure a reachable `HTTPS_PROXY` (and `HTTP_PROXY` / `NO_PROXY` as needed)
+in the running process. A personal computer's `127.0.0.1` address is not that proxy on a remote server.
+Temporary SSH forwarding stops working when the tunnel closes; it is not an independent server deployment.
+Preserve the session and usage records, and confirm the old process has stopped before resuming.
 
 ## Choose a task and its smallest input
 

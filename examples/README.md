@@ -6,9 +6,9 @@ command and expected outputs. Run commands from the repository root.
 | Case | Goal | Entry and preparation |
 | --- | --- | --- |
 | [Survey](survey/README.md) | Literature survey, no training | `research-session --config examples/survey/research.toml`; configure model access |
-| [Data analysis](data-analysis/README.md) | Descriptive statistics and editable plots of existing data | `research-session --config examples/data-analysis/research.toml`; no model, GPU or plotting library |
-| [Data curves](data-curves/README.md) | Supplied numeric coordinates, explicit gaps, editable line/scatter figures | `research-session --config examples/data-curves/research.toml`; no model, GPU or plotting library |
-| [Paired data](data-paired/README.md) | Matched-row differences, joint missing counts and standard-error plots on artificial data | `research-session --config examples/data-paired/research.toml`; no model, GPU or plotting library; demonstration, not scientific evidence |
+| [Data analysis](data-analysis/README.md) | Descriptive statistics and editable plots of existing data | `research-session --config examples/data-analysis/research.toml`; no model or GPU; Matplotlib is installed with the package |
+| [Data curves](data-curves/README.md) | Supplied numeric coordinates, explicit gaps, editable line/scatter figures | `research-session --config examples/data-curves/research.toml`; no model or GPU; no separate plotting setup |
+| [Paired data](data-paired/README.md) | Matched-row differences, joint missing counts and standard-error plots on artificial data | `research-session --config examples/data-paired/research.toml`; no model or GPU; bundled plotting library; demonstration, not scientific evidence |
 | [Conformal reproduction](conformal_reproduction/README.md) | Low-cost, fixed-protocol synthetic check of a published conclusion | Download the supplied paper, then run the checked-in research config; standard-library simulation, no GPU |
 | [ICML 2025 RCP subset](rcp_reproduction/README.md) | Author-code-assisted House comparison, two fixed methods and ten paired seeds | Prepare the pinned author source, paper, data and scientific Python first; actual CPU measurement case, not whole-paper or benchmark reproduction. Review the report separately. |
 | [Continual learning](continual_learning/README.md) | Mammoth/CIFAR-100 research improvement | Prepare the case-declared project, data and split under `runs/assets`, then run the checked-in research config |

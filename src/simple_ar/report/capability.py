@@ -111,8 +111,21 @@ def assemble_report_document(
     renderer = figure_renderer or DeterministicFigureRenderer()
     if request.paired_comparisons and figure_renderer is None:
         from simple_ar.report.figures import add_paired_measurement_figures
+        # Bind by the accepted argument's exact metric IDs, never a heading
+        # keyword. Ambiguous ownership retains the legacy comparison appendix.
+        owners: dict[str, set[str]] = {}
+        if document_plan and document_plan.argument_plan and request.experiment_context:
+            names = {row.metric_id: row.name for row in request.experiment_context.metric_sources}
+            for point in document_plan.argument_plan.points:
+                for metric_id in point.metric_ids:
+                    if metric_id in names:
+                        owners.setdefault(names[metric_id], set()).add(point.section_id)
+        headings = {row.section_id: row.heading for row in request.sections}
+        anchors = {name: headings[next(iter(sections))] for name, sections in owners.items()
+                   if len(sections) == 1 and next(iter(sections)) in headings}
         rendered = add_paired_measurement_figures(report_markdown=report_body, report_dir=report_dir,
-            comparisons=list(request.paired_comparisons), summaries=list(request.paired_summaries), config=config.figures)
+            comparisons=list(request.paired_comparisons), summaries=list(request.paired_summaries),
+            config=config.figures, anchors=anchors)
     else:
         rendered = renderer.render(
             report_markdown=report_body,
@@ -307,19 +320,14 @@ def run_report_capability(
     diagnostics: list[str] = []
     figure_refs: list[ArtifactRef] = []
     for figure in result.figures:
-        status = "available" if context.store.exists(figure.path) else "missing"
-        figure_ref = context.store.ref(
-            figure.path,
-            kind="figure",
-            schema="report_figure.v1",
-            producer=f"report.{renderer.name}",
-            status=status,  # type: ignore[arg-type]
-        )
-        figure_refs.append(figure_ref)
-        if status == "missing":
-            diagnostics.append(
-                f"Figure renderer reported a missing artifact: {figure.path}."
-            )
+        for path in dict.fromkeys((figure.path, *figure.exports.values())):
+            status = "available" if context.store.exists(path) else "missing"
+            figure_refs.append(context.store.ref(
+                path, kind="figure", schema="report_figure.v1",
+                producer=f"report.{renderer.name}", status=status,  # type: ignore[arg-type]
+            ))
+            if status == "missing":
+                diagnostics.append(f"Figure renderer reported a missing artifact: {path}.")
     artifacts.extend(figure_refs)
     if result.figures:
         manifest_ref = context.store.write_json(

@@ -10,6 +10,26 @@ Do not write this as a pipeline run log. Search provenance, artifact paths,
 tool internals, and extraction/debug details belong in `manifest.json`,
 `report_audit.json`, or `report_memory.json`, not in the report body.
 
+## Writing Principles
+
+Organize the argument by the user's questions and supported comparison
+dimensions, not one section per source. Explain which assumptions, mechanisms,
+data and evaluation choices account for meaningful differences. Compare actual
+matched settings where available; separate agreement, conflicting findings and
+incompatible evidence rather than treating them all as uncertainty.
+
+Use a compact comparison table when several exact mappings would otherwise
+repeat in prose. The prose should interpret its important contrasts and trade-offs,
+not restate each cell. Develop recommendations conditionally from that comparison:
+which approach is useful for which needs, and what evidence could change the
+choice. Missing information stays a concrete unanswered question, not a claim
+that the original paper lacks it.
+
+Keep the introduction focused on motivation and scope, the body on evidence and
+reasoning, and the conclusion on the supported answer. Do not pad short reports
+with a forced taxonomy, generic background or repeated limitations. A longer
+survey may expand these arguments, but source count alone is not a length target.
+
 ## Writing Workflow
 
 Draft evidence-heavy sections before front matter. A good default order is:

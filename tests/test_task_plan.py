@@ -58,6 +58,16 @@ class TaskPlanTests(unittest.TestCase):
             self.assertIn('LLM client', view.status_reason)
             self.assertNotIn('read', view.state_refs)
             self.assertNotIn('synthesis', view.state_refs)
+            class UnexpectedPlanner:
+                model = 'no-routing-call'
+                def ask_json(self, *args, **kwargs):
+                    raise AssertionError('Fixed document-report routing needs no model call')
+            planned_app = create_session(brief, root=root / 'with-client', services=ResearchApplicationServices(
+                llm_client=UnexpectedPlanner(), config={**request.config,
+                    'research_local_documents': [str(source)], 'research_task_kind': 'survey'}))
+            planned_view = planned_app.advance(max_actions=1)
+            self.assertEqual(planned_view.next_action, 'document_ingest')
+            self.assertEqual(planned_app._load_task_plan().mode, 'deterministic')
             self.assertNotIn('summary', view.state_refs)
             context, memory = app.report_inputs()
             self.assertEqual(context.report_mode, 'supplied_materials')

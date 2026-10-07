@@ -27,10 +27,14 @@ uv run simple-ar start --kind writing --material notes.md --model env
 | `--hypothesis`、`--dataset`、`--expected-outcome`、`--metric` | 复现 | 结论、条件、输出指标 |
 | `--cwd`、`--timeout-sec`、`--output-files JSON` | 复现 | 目录、超时、登记输出文件 |
 | `--environment current\|venv`、`--requirements PATH`、`--install-project` | 复现 | 明确依赖准备 |
+| `--check-argv JSON` | 复现 | 明确的测量前短检查；不猜测命令，检查指标不进入测量结果 |
 | `--command ARGV...` | 复现 | 实际命令，必须最后提供 |
 | `--with-report` | 数据分析 | 附加写作，需要模型 |
 
 功能为 `survey`、`bug_fix`、`reproduction`、`writing`、`data_analysis`。结构化设置在执行前不调用模型；chat 设置本身需模型和终端，不能与 `--prepare-only` 同用。
+
+改码对话可只读查看项目文本并提出带原文依据的验证 argv；用户确认后序列化原 CodeTask
+验证命令，保留明确的 `--validate`。设置阶段不运行命令或安装依赖，普通引导仍确认修改范围与执行。
 
 改码默认当前解释器；`--project-python` 保留已有 venv 入口，不创建或安装环境。复现依赖准备是另一项显式选择。
 

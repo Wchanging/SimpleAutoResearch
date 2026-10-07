@@ -13,7 +13,7 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
-from simple_ar.code_task.analysis.interfaces import public_api_from_source, render_source_snippets
+from simple_ar.code_task.analysis.interfaces import public_api_from_source, render_source_snippets, _module_name, _resolve_import_module
 from simple_ar.code_task.analysis.index import is_python_environment
 from simple_ar.code_task.analysis.source_context import diff_source_anchors, source_context_for_files
 from simple_ar.reviewing.schema import ReviewFinding
@@ -76,7 +76,8 @@ def build_review_index(
         }
         if path.suffix == ".py":
             row["public_api"] = public_api_from_source(text)
-            row["imports"] = _python_imports(text)
+            row["imports"] = _python_imports(text, current=_module_name(project_dir, path),
+                                             is_package=path.name == "__init__.py")
             row["entrypoint_candidate"] = _is_entrypoint_candidate(rel, text)
         files.append(row)
 
@@ -119,10 +120,6 @@ def build_review_clusters(
     if max_clusters <= 0 or max_files_per_cluster <= 0:
         return []
     files = [row for row in review_index.get("files", []) if isinstance(row, Mapping)]
-    by_role: dict[str, list[Mapping[str, Any]]] = {}
-    for row in files:
-        by_role.setdefault(str(row.get("role") or "support"), []).append(row)
-
     cluster_defs = [
         ("entrypoint", "Entrypoint and orchestration", ["entrypoint", "orchestration"]),
         ("data_flow", "Data loading and preprocessing", ["data", "preprocess"]),
@@ -148,6 +145,27 @@ def build_review_clusters(
         used.update(paths)
         if len(clusters) >= max_clusters:
             return clusters
+    # A local patch needs its actual dependencies/callers, not arbitrary large
+    # data or documents sharing a filename role. Historical indexes without
+    # import observations and whole-project reviews retain their broad scope.
+    if relevant and all(path.endswith(".py") for path in relevant) and any("imports" in row for row in files):
+        modules = {str(row["path"]): str(PurePosixPath(str(row["path"])).with_suffix(""))
+                   .replace("/", ".").removesuffix(".__init__")
+                   for row in files if str(row.get("path", "")).endswith(".py")}
+        related = set(relevant)
+        for row in files:
+            imports = row.get("imports", [])
+            targets = {path for path, module in modules.items()
+                       if any(name == alias or name.startswith(alias + ".")
+                              for name in imports for alias in {module, module.removeprefix("src.")})}
+            if row.get("path") in relevant:
+                related.update(targets)
+            elif targets.intersection(relevant):
+                related.add(str(row["path"]))
+        files = [row for row in files if row.get("path") in related]
+    by_role: dict[str, list[Mapping[str, Any]]] = {}
+    for row in files:
+        by_role.setdefault(str(row.get("role") or "support"), []).append(row)
     for cluster_id, title, roles in cluster_defs:
         selected: list[Mapping[str, Any]] = []
         for role in roles:
@@ -324,17 +342,18 @@ def _required_metrics(schema: Mapping[str, Any]) -> list[str]:
     return metrics
 
 
-def _python_imports(source: str) -> list[str]:
+def _python_imports(source: str, *, current: str = "", is_package: bool = False) -> list[str]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
     imports: list[str] = []
-    for node in tree.body:
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imports.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            prefix = "." * int(node.level or 0) + (node.module or "")
+            prefix = _resolve_import_module(current, node.module, node.level, is_package)
+            imports.append(prefix)  # Includes star imports as a module dependency.
             imports.extend(f"{prefix}.{alias.name}".strip(".") for alias in node.names if alias.name != "*")
     return sorted(set(imports))[:40]
 

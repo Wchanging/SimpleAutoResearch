@@ -86,6 +86,31 @@ def render_table_figures(result: dict, output_dir: Path) -> list[dict]:
         return _value_figures(result, output_dir)
 
 
+def render_measurement_pairs(pairs: list[dict], *, title: str, unit: str,
+                             output_dir: Path, filename: str) -> dict:
+    """Render recorded pairs without averaging or inferring uncertainty."""
+    from matplotlib import rc_context
+
+    spec = {"width": "wide"}
+    caption = "Per-seed measured pairs under their declared conditions; descriptive only, without an aggregate or significance claim."
+    with rc_context({"svg.fonttype": "none", "svg.hashsalt": "simple-ar-data",
+                     "font.size": 9, "text.parse_math": False, "text.usetex": False}):
+        fig, ax = _figure(spec, max(2.5, .38 * len(pairs) + 1.6))
+        values = [row[role] for row in pairs for role in ("baseline", "candidate")]
+        scale = _numeric_axis(ax, "x", values, pad=True)
+        positions = list(range(len(pairs)))
+        ax.hlines(positions, [row["baseline"] / scale for row in pairs],
+                  [row["candidate"] / scale for row in pairs], color="#95a1ad", linewidth=1)
+        for role, color in (("baseline", "#687583"), ("candidate", "#1268b3")):
+            ax.scatter([row[role] / scale for row in pairs], positions, label=role, color=color)
+        ax.set(yticks=positions, yticklabels=[_label(f"Seed {row['seed']}") for row in pairs],
+               ylim=(len(pairs) - .5, -.5), xlabel=_label(unit or "unit not recorded"))
+        ax.set_title(_label(title, 55))
+        ax.legend()
+        return _save(fig, spec, output_dir, filename, caption,
+                     {"plot": "paired_points", "pairs": pairs, "uncertainty": "not_shown"})
+
+
 def _value_figures(result: dict, output_dir: Path) -> list[dict]:
     spec = result["spec"]
     box_requested = spec.get("plot") == "box"

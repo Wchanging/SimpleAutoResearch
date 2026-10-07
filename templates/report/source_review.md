@@ -7,6 +7,15 @@ critical review of supplied material, not a literature-wide survey or a new
 experimental paper. Keep it concise and match the source's actual evidentiary
 strength. Never invent a competing method family or an observed baseline.
 
+## Writing Principles
+
+Explain the source's question, mechanism, evidence and implications in relation
+to the user's needs. Compare methods or controls actually evaluated within the
+source when relevant, without pretending one source establishes field-wide
+consensus. Separate the authors' interpretation from what their evidence shows.
+Identify a precise unresolved issue and the observation needed to resolve it;
+do not replace analysis with a list of generic caveats or paraphrased summaries.
+
 ## Writing Workflow
 
 Draft supported claims and limitations before the summary. Cite the source near

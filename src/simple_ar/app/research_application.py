@@ -57,6 +57,7 @@ from simple_ar.research.task_plan import (
     TaskPlanResult,
     append_research_followup,
     insert_implementation_refinement,
+    report_from_documents,
 )
 from simple_ar.app.research_interaction import (
     INTERACTION_MODES,
@@ -1197,14 +1198,9 @@ class ResearchApplication:
             search=search, documents=documents, execution=execution,
             analysis=analysis.analysis, brief_ref=refs["synthesis"], execution_ref=analysis.execution_ref,
             analysis_ref=analysis_ref, design=design, design_ref=design_ref,
+            metric_artifacts={label: ref.path for label, ref in (
+                ("baseline", baseline_ref), ("comparison_delta", refs.get("comparison"))) if ref is not None},
         )
-        # The legacy context embedded baseline/comparison in one execution file.
-        # New application measurements are independent immutable artifacts.
-        metrics = [row.model_copy(update={"artifact": baseline_ref.path})
-                   if row.label == "baseline" and baseline_ref is not None else
-                   row.model_copy(update={"artifact": refs["comparison"].path})
-                   if row.label == "comparison_delta" and "comparison" in refs else row
-                   for row in context.metric_sources]
         handles = list(context.source_handles)
         for key in ("baseline", "comparison", "preparation"):
             if key in refs:
@@ -1217,7 +1213,6 @@ class ResearchApplication:
                 artifact=diagnosis_ref.path,
                 summary="Captured failed-run diagnosis and stderr tail; not a scientific verdict.",
             ))
-        context.metric_sources, memory.metric_sources = metrics, metrics
         context.source_handles, memory.source_handles = handles, handles
         implementation_ref = self._artifact_ref(execution.get("implementation_ref"))
         if implementation_ref is not None:
@@ -1311,6 +1306,12 @@ class ResearchApplication:
             use_llm=use_llm,
             llm_client=self.services.llm_client,
         )
+        # This boundary already fixes the route: supplied documents to a report,
+        # without search, execution, assessment or an intermediate deliverable.
+        # Let the article planner organize its content, not re-plan this dispatch.
+        if report_from_documents(task_plan):
+            use_llm = False
+            task_plan = replace(task_plan, use_llm=False)
         return self._execute(
             "plan", "plan",
             ResearchPlanRequest(

@@ -103,6 +103,16 @@ def apply_bibliographic_note(paper: Mapping[str, Any], record: DocumentRecord,
         details = bibliographic_details(Paper.from_row(candidate))
         if field == "published" and not details["year"]:
             continue
+        if field == "published":
+            # Match the saved source line, not just a model-selected date substring.
+            # A real date can still describe a manuscript lifecycle event rather
+            # than publication. Do not promote an explicitly labelled such event.
+            date_lines = [line for line in section.text[:FRONT_MATTER_CHARS].splitlines()
+                          if value in " ".join(line.split())]
+            if date_lines and all(re.search(
+                r"\b(?:draft|received|accepted|revised|submitted|updated|copyright)\b", line, re.I
+            ) for line in date_lines):
+                continue
         if field == "doi" and not details["doi"]:
             continue
         row = candidate

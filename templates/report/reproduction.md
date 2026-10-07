@@ -7,6 +7,24 @@ existing method. This is a writing structure, not an environment installer or
 experiment runner. Describe the declared reproduction scope; omit unsupported
 ablations rather than suggesting they were performed.
 
+## Writing Principles
+
+Lead with the source conclusion being checked, its relevance, and the precise
+scope of this reproduction. Explain enough of the original mechanism for a
+reader to understand what the local implementation actually tests. Attribute
+source-paper claims separately from local observations.
+
+Compare source and local conditions before interpreting result differences:
+data, preprocessing, method, evaluation, repetitions and available resources.
+Discuss the effect of known deviations without assuming that they caused every
+gap. Organize measured results around the checked conclusion, with a table or
+figure when it makes the comparison clearer; do not repeat every number in prose.
+
+Explain what succeeded, failed or remains inconclusive and why it matters.
+Distinguish technical inability to run from a valid result that differs from
+the paper. Provide a focused next validation, not an invented successful repair
+or a generic future-work list. Keep execution receipts in existing attachments.
+
 ## Writing Workflow
 
 Draft order: Target Method And Claimed Result -> Local Setup -> Reproduction Result -> Ablation Matrix -> Failure Modes -> Limitations -> Abstract / Executive Summary

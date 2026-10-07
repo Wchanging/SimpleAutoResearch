@@ -293,6 +293,8 @@ class ReportObjectiveTests(unittest.TestCase):
         import simple_ar.report.agent as agent
         from simple_ar.report.schema import ReportToolResult
         context, config, template, memory, section, draft = self.objects()
+        context.source_comparisons = [{"dimension": "Matched conditions", "relation": "conditional_difference",
+            "conditions": ["Subgroup results do not imply full-dataset superiority."]}]
         before = memory.model_dump(mode="json")
         extra = [ReportToolResult(tool_name="search_source_chunks", content={"text": f"passage {i}"})
                  for i in range(9)]
@@ -301,12 +303,15 @@ class ReportObjectiveTests(unittest.TestCase):
         normal = payload(agent._writer_prompt(**common, template=template,
             source_batch_index=1, source_batch_count=1, include_previous_draft=True, draft_mode="section"))
         recovery = payload(agent._writer_recovery_prompt(**common, draft_mode="section"))
-        for key in ("objective", "document_plan", "narrative_context", "section_constraints",
+        for key in ("objective", "document_plan", "source_comparisons", "comparison_status", "assembly_owned_content", "narrative_context", "section_constraints",
                     "length_requirement", "visual_requirements", "source_handles", "metric_sources",
                     "extra_tool_context", "extra_tool_context_omitted", "review_findings",
                     "review_findings_status", "review_instructions", "revision_preservation_requirement"):
             self.assertEqual(normal[key], recovery[key], key)
-        self.assertEqual(normal["extra_tool_context_omitted"], 3)
+        self.assertEqual(normal["extra_tool_context_omitted"], 0)
+        self.assertEqual(len(normal["extra_tool_context"]), len(extra))
+        self.assertEqual(normal['source_comparisons'], context.source_comparisons)
+        self.assertNotIn('source_comparisons', normal['narrative_context'])
         self.assertNotIn("template_markdown", recovery)
         self.assertNotIn("global_research_context", recovery)
         self.assertEqual(memory.model_dump(mode="json"), before)
@@ -345,6 +350,7 @@ class ReportObjectiveTests(unittest.TestCase):
         for prompt in prompts:
             self.assertEqual(payload(prompt)["objective"], context.problem_markdown)
             self.assertEqual(prompt.count("Deliver editable sources"), 1)
+            self.assertIn("recommended method's own applicability", prompt)
         global_context = payload(prompts[0])["global_research_context"]
         self.assertEqual(global_context["derived_context_status"]["independent_verification"], "not_performed")
         outline = evidence_outline_context(context, memory, config)

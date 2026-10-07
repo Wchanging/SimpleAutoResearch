@@ -33,6 +33,29 @@ timeout_sec = 300
 
 The default is current execution without installation. Preparation uses the shared process budget/logs and stops measurement on failure. Build code/network access is possible; this is not an OS sandbox or general provisioning. See [workflow boundaries](WORKFLOWS.md#explicit-task-dependency-preparation).
 
+An explicitly chosen short runtime check can use the current environment:
+
+```toml
+[execution.environment]
+mode = "current"
+check_command = ["python", "check_inputs.py"] # your project's real check, not a built-in script
+timeout_sec = 30
+```
+
+Guided reproduction accepts `--check-argv '["python", "check_inputs.py"]'`
+before the final `--command` option. A venv profile can also include
+`check_command`; bare Python aliases then use the prepared interpreter.
+An explicit baseline command's bare Python alias uses that same task venv;
+its arguments and any explicitly selected non-alias interpreter are retained.
+Current mode retains both commands as supplied and does not install or change
+interpreters. A nonzero exit or timeout stops measurement and preserves logs;
+check outputs never become scientific metrics. Success proves only that the
+chosen check exited successfully, not that the full experiment will succeed.
+Expert configurations must budget this additional process; guided setup counts it.
+Reproduction chat may include the optional check in its displayed execution
+proposal using inspected project instructions. Confirmation saves it through the
+same serializer; setup does not execute either command or replace explicit argv.
+
 For source access, `materials_only` excludes online search; `--fulltext` permits best-effort remote retrieval for an online survey. Unavailable or truncated material stays explicit.
 
 ## Writing from supplied material
@@ -315,7 +338,7 @@ external parsers must declare their own observed coverage.
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
 | `[execution]` | `command`, `cwd`, `timeout_sec`, `code_task_config` | Choose one execution boundary: literal argv `command` plus an existing absolute `cwd`, or a CodeTask TOML reference. Omit both for literature-only work. `timeout_sec` is optional and defaults at the CLI/application boundary. |
-| `[execution.environment]` | `mode`, `requirements`, `install_project`, `python_executable`, `timeout_sec` | Optional single-command task venv: `mode = "venv"`; project-relative requirements list defaults empty, `install_project` defaults false, base Python defaults to this runtime, per-step timeout defaults 300. Omission keeps current-environment execution. Allocate preparation process capacity explicitly in expert TOML; guided start includes it. |
+| `[execution.environment]` | `mode`, `requirements`, `install_project`, `python_executable`, `timeout_sec`, `check_command` | Optional single-command preparation: `venv` creates a task environment; `current` requires an explicit check argv and does not install or override Python. Requirements default empty, project installation false, base venv Python this runtime, per-step timeout 300. Optional check executes after setup. Omission keeps ordinary current execution. Expert TOML budgets preparation explicitly; guided start includes it. |
 | `[execution]` | `primary_metric`, `metrics`, `metric_directions` | Optional measurement schema; directions use `higher`, `lower`, `resource`, or `ignore`. |
 | `[execution]` | `output_files` | Optional mapping of at most eight attachment names to relative POSIX files under the process-owned `SIMPLE_AR_OUTPUT_DIR`. Only declared UTF-8 regular files up to 2 MiB each receive bounded previews and registered read handles; missing/unreadable attachments are recorded separately from execution success. |
 | `[execution]` | `pairs`, `seeds`, `seed_flag`, `seed_count` | Optional explicit comparison inputs. `pairs` contains unique integer `seed` plus literal `baseline_command` and `candidate_command`; compact seed expansion requires a literal command and explicit seed flag/count. Natural-language seed requests are not parsed. |

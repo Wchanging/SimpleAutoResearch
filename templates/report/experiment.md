@@ -6,6 +6,31 @@ Use this template when a run includes experiment, benchmark, or code-task
 artifacts. The report should connect literature evidence to recorded
 implementation and metric evidence without overclaiming.
 
+## Writing Principles
+
+Build the article around the research question and evidence-supported answer,
+not the sequence of tool actions. Explain why the question matters and how the
+tested change addresses it. State a contribution only when the supplied work
+supports it; a useful negative result does not require invented novelty.
+
+Explain the method as a mechanism: inputs, transformations, outputs and the
+reason for the relevant design choices. Distinguish the original method from
+the actual modification. Keep equations, pseudocode or implementation details
+only when they clarify that mechanism and can be grounded in the supplied work.
+
+Organize results by the questions they answer. Describe the main pattern and
+its interpretation rather than narrating every table cell. Connect each useful
+figure to a specific claim, explain axes and comparison conditions in its
+caption, and discuss uncertainty or failures where they affect interpretation.
+Propose additional experiments only as future work, not as completed evidence.
+
+Use related work to explain the relevant alternatives and the study's position,
+not a list of summaries. Keep the abstract and conclusion consistent with the
+actual body. Give shared limitations one primary home; repeat only qualifications
+needed to interpret a particular claim. Scientific setup belongs in the body;
+full commands, absolute paths and execution receipts belong in linked artifacts
+unless the user asks otherwise.
+
 ## Writing Workflow
 
 Draft order: Method -> Experimental Setup -> Results -> Discussion -> Related Work -> Introduction -> Limitations -> Abstract -> Conclusion
@@ -32,8 +57,9 @@ artifacts. Do not invent architecture or training details.
 
 ## Experimental Setup
 
-State command, dataset, benchmark, timeout, metric directions, and execution
-limits when available.
+Explain dataset, benchmark, comparison conditions, metric directions and
+material execution limits when available. Link full commands and receipts
+rather than reproducing a run log in the main text.
 
 ## Results
 

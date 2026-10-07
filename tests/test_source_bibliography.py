@@ -137,6 +137,19 @@ class SourceBibliographyTests(unittest.TestCase):
         fields = [{'field': 'published', 'value': '2025-99-99', 'quote': '2025-99-99', 'section_id': 'front'}]
         section = DocumentSection('front', 'doc', 'front_matter', '', '2025-99-99')
         self.assertEqual(self.project(section=section, note={'bibliographic_fields': fields}), (self.paper, {}))
+        for label in ('Draft version', 'Received', 'Accepted', 'Revised', 'Submitted', 'Updated', 'Copyright'):
+            for quote in ('2025-04-03', f'{label}: 2025-04-03'):
+                with self.subTest(label=label, quote=quote):
+                    section = DocumentSection('front', 'doc', 'front_matter', '', f'{label}: 2025-04-03')
+                    fields = [{'field': 'published', 'value': '2025-04-03',
+                               'quote': quote, 'section_id': 'front'}]
+                    self.assertEqual(self.project(section=section, note={'bibliographic_fields': fields}), (self.paper, {}))
+        section = DocumentSection('front', 'doc', 'front_matter', '',
+                                  'Received: 2025-04-03\nPublished online: 2025-04-03')
+        # Use the publication occurrence when the same calendar date has both roles.
+        fields[0]['quote'] = 'Published online: 2025-04-03'
+        row, _ = self.project(section=section, note={'bibliographic_fields': fields})
+        self.assertEqual(row['published'], '2025-04-03')
 
     def test_fields_roundtrip_and_reach_shared_references_and_bibtex(self):
         bundle = DocumentBundle([self.record], {}, {}, [self.header], [])

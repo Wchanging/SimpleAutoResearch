@@ -271,7 +271,9 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
     query = " ".join([request.get("query", ""), *request.get("symbols", []), literal]).strip()
     known = {str(item["path"]) for item in index.get("files", [])}
     requested_files = request.get("files", [])
-    candidates = [path for path in requested_files if path in known]
+    # The bounded inventory is a search aid, not a read authorization list.
+    # A literal workspace path may be absent because the inventory was capped.
+    candidates = list(requested_files)
     if not requested_files and query:
         candidates.extend(select_relevant_files(index, query, max_files=max_files))
     previous: dict[str, list[tuple[int, int]]] = {}
@@ -291,9 +293,13 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
         if remaining <= 0:
             break
         rel = Path(relative)
-        path = (workspace / rel).resolve()
-        if (rel.is_absolute() or ".." in rel.parts or not path.is_relative_to(workspace)
-                or not path.is_file() or path.name.startswith(".env")):
+        path = workspace_file(workspace, relative)
+        if (path is None or not path.is_file() or path.name.startswith(".env")
+                or (relative not in known and (
+                    path.suffix.lower() not in CONTEXT_SUFFIXES or path.stat().st_size > 500_000))
+                or any(part in IGNORED_DIR_NAMES or part.startswith(".") for part in rel.parts[:-1])
+                or any(is_python_environment(workspace.joinpath(*rel.parts[:depth]))
+                       for depth in range(1, len(rel.parts)))):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         size = min(max_chars, remaining)

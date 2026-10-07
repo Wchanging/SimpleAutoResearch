@@ -194,6 +194,7 @@ def build_research_report_inputs(
     analysis_ref: ArtifactRef,
     design: ResearchDesignResult | None = None,
     design_ref: ArtifactRef | None = None,
+    metric_artifacts: Mapping[str, str] | None = None,
 ) -> tuple[ReportContext, ReportMemory]:
     """Build experiment-report inputs from canonical persisted artifacts."""
 
@@ -243,6 +244,7 @@ def build_research_report_inputs(
     metric_sources = metric_sources_from_execution(
         execution,
         artifact=execution_ref.path,
+        metric_artifacts=metric_artifacts,
     )
     selected_papers = search.selected_papers
     citation_key_map = _citation_key_map(selected_papers)
@@ -792,9 +794,15 @@ def metric_sources_from_execution(
     execution: Mapping[str, Any],
     *,
     artifact: str,
+    metric_artifacts: Mapping[str, str] | None = None,
 ) -> list[MetricSource]:
-    """Convert measured candidate, baseline, and comparison values to rows."""
+    """Convert values and their registered owners together, without rebinding later.
 
+    Legacy embedded records retain the enclosing artifact. Separate records
+    supply their actual owners by label; this does not change values or status.
+    """
+
+    owners = metric_artifacts or {}
     rows: list[MetricSource] = []
     for label, values in _metric_groups(execution):
         record = execution["baseline"] if label == "baseline" else execution
@@ -814,7 +822,7 @@ def metric_sources_from_execution(
                     metric_id=f"metric:{label}:{name}",
                     name=str(name),
                     value=value,
-                    artifact=artifact,
+                    artifact=owners.get(label, artifact),
                     label=label,
                     direction=str(
                         directions.get(name)
@@ -857,7 +865,7 @@ def metric_sources_from_execution(
                         metric_id=f"metric:comparison:{index}:{name}",
                         name=name,
                         value=value,
-                        artifact=artifact,
+                        artifact=owners.get("comparison_delta", artifact),
                         label="comparison_delta",
                         direction=str(metric_row.get("direction") or ""),
                         source_kind="derived_comparison",

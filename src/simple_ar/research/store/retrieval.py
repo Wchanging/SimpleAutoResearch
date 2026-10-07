@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Mapping
 from typing import Any
 
 from simple_ar.research.contracts import TextChunk
@@ -154,7 +155,8 @@ def _source_window_start(text: str, query: str, limit: int) -> int:
 
 
 def source_chunk_views(chunks: list[TextChunk], *, query: str = "", max_chars: int = 4800,
-                       max_chunk_chars: int | None = None) -> list[dict[str, Any]]:
+                       max_chunk_chars: int | None = None,
+                       queries: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
     """Expose bounded source text and exact offsets; no identity/support verdict."""
     if max_chars < 1 or (max_chunk_chars is not None and max_chunk_chars < 1):
         raise ValueError("Source view character budgets must be positive.")
@@ -164,7 +166,7 @@ def source_chunk_views(chunks: list[TextChunk], *, query: str = "", max_chars: i
         limit = remaining // (len(chunks) - len(rows))
         if max_chunk_chars is not None:
             limit = min(limit, max_chunk_chars)
-        start = _source_window_start(chunk.text, query, limit)
+        start = _source_window_start(chunk.text, (queries or {}).get(chunk.chunk_id, query), limit)
         text = chunk.text[start:start + limit]
         remaining -= len(text)
         rows.append({"chunk_id": chunk.chunk_id, "document_id": chunk.document_id,
@@ -241,11 +243,24 @@ def material_overview_views(chunks: list[TextChunk], query: str, *, limit: int =
             ranked.append(row)
             sections_seen.add(section_id)
     chosen = {row.chunk_id for row in ranked}
-    ranked = (ranked + [row for row in ranked_pool if row.chunk_id not in chosen])[:available]
+    # Spend subsequent slots on still-unrepresented query terms, rather than
+    # rewarding the same dominant topic in every distinct section. This is
+    # lexical coverage only, not semantic completeness or a claim verdict.
+    pool = ranked + [row for row in ranked_pool if row.chunk_id not in chosen]
+    ranked, queries = [], {}
+    uncovered = source_query_terms(query)
+    while pool and len(ranked) < available:
+        gap_query = " ".join(sorted(uncovered))
+        gaps = rank_source_chunks(pool, gap_query, limit=1) if ranked and uncovered else []
+        row = gaps[0] if gaps else pool[0]
+        ranked.append(row)
+        pool.remove(row)
+        queries[row.chunk_id] = gap_query if gaps else query
+        uncovered -= source_query_terms(row.text) | source_query_terms(str(row.metadata.get("heading") or ""))
     matched = {row.chunk_id for row in ranked}
     selected = (ranked + [row for row in candidates if row.chunk_id not in matched])[:available]
     for row in source_chunk_views(selected, query=query, max_chars=max(1, remaining),
-                                  max_chunk_chars=max_chunk_chars):
+                                  max_chunk_chars=max_chunk_chars, queries=queries):
         row["selection"] = "task_lexical_match" if row["chunk_id"] in lexical_ids else "source_order_fallback"
         views.append(row)
     return views

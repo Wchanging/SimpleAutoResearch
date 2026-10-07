@@ -243,11 +243,19 @@ class JointDraftingTests(unittest.TestCase):
 
     def test_one_composition_contains_all_owners_then_independent_review(self):
         kwargs, labels, requests, saved = self.inputs(), [], [], []
+        comparisons = [{"dimension": "Matched subset", "relation": "conditional_difference",
+            "observations": ["Method A and B were measured on the same subset."],
+            "conditions": ["This does not establish a comparison on the unmatched full datasets."],
+            "interpretation": "Use the matched comparison, not a source-by-source summary."}]
+        kwargs['context'].source_comparisons = comparisons
         original = kwargs['memory'].model_dump(mode='json')
         result = run_report_agent(**kwargs, client=self.client(labels, requests), checkpoint_sink=saved.append)
         self.assertEqual(labels, ['report-writer-document', 'report-document-reviewer'])
         self.assertEqual([row.section_id for row in result.sections], ['comparison', 'interpretation', 'scope'])
         writer = requests[0]
+        self.assertEqual(writer['source_comparisons'], comparisons)
+        self.assertEqual(writer['comparison_status']['independent_verification'], 'not_performed')
+        self.assertNotIn('source_comparisons', requests[1])  # Independent review is not anchored to this interpretation.
         self.assertNotIn('section', writer)
         self.assertNotIn('narrative_context', writer)  # No competing single-section edit scope.
         self.assertEqual(writer['document_plan']['interpretation_rules'],
@@ -491,6 +499,9 @@ class JointDraftingTests(unittest.TestCase):
 
     def test_outline_read_does_not_consume_independent_writer_gap_lookup(self):
         kwargs, plan = self.planning_inputs()
+        plan['context_requests'] = [{'tool_name': 'search_source_chunks', 'arguments': {
+            'handle': 'material:comparison', 'query': query}} for query in
+            ('calibrated rate', 'raw counts', 'exposure time', 'density normalization', 'bin width', 'normalization')]
         labels, prompts = [], []
         regular = self.planned_client(plan, labels, prompts)
         class Client:
@@ -504,11 +515,13 @@ class JointDraftingTests(unittest.TestCase):
         client = Client()
         result = run_report_agent(**kwargs, client=client)
         self.assertTrue(client.assert_initial)
-        self.assertEqual(kwargs['gateway'].call_counts['search_source_chunks'], 2)
+        self.assertEqual(kwargs['gateway'].call_counts['search_source_chunks'], 7)
         self.assertEqual([row.summary for row in result.iterations if row.action == 'writer_context'],
                          ['outline_evidence', 'initial_document'])
-        self.assertEqual(len(result.tool_results), 2)
+        self.assertEqual(len(result.tool_results), 7)
         self.assertFalse(prompts[1]['source_reading']['available'])
+        self.assertEqual(len(prompts[1]['extra_tool_context']), 7)
+        self.assertEqual(prompts[1]['extra_tool_context'][0]['content'], result.tool_results[0].content)
 
     def test_planned_read_allocation_interruption_does_not_replan_or_replay(self):
         kwargs, plan = self.planning_inputs()
@@ -608,6 +621,84 @@ class JointDraftingTests(unittest.TestCase):
 
 
 class JointRevisionTests(unittest.TestCase):
+    def test_canonical_length_drives_joint_edit_even_when_model_review_passes(self):
+        for status, complete, corrected, expect_edit in (
+            ('above_range', True, True, True), ('below_range', True, True, True),
+            ('above_range', True, False, True), ('target_only', True, False, False),
+            ('above_range', False, False, False), ('unavailable', True, False, False),
+        ):
+            with self.subTest(status=status, complete=complete, corrected=corrected):
+                kwargs, labels = self.inputs(), []
+                kwargs['config'] = kwargs['config'].model_copy(update={'max_review_iterations': 1})
+
+                class Client:
+                    def ask_json(self, system, prompt, *, label='', **unused):
+                        labels.append(label)
+                        view = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                        if label in ('report-writer-document', 'report-document-joint-reviser'):
+                            revised = label == 'report-document-joint-reviser'
+                            return {'sections': [{'section_id': row['section']['section_id'],
+                                'heading': row['section']['heading'],
+                                'draft_markdown': ('Revised ' if revised else 'Original ') + row['section']['section_id']}
+                                for row in view['sections']]}
+                        if label in ('report-document-reviewer', 'report-document-verifier'):
+                            return {'section_reviews': []}
+                        raise AssertionError(label)
+
+                def observation(context, memory, sections, config, **unused):
+                    fits = corrected and all(row.draft_markdown.startswith('Revised') for row in sections)
+                    return {'preview_status': 'pre_render_text_preview' if complete else 'unavailable',
+                        'markdown_token_count': 900 if fits else 1067,
+                        'length_check': {'status': 'within_range' if fits else status, 'scope': 'whole_document',
+                            'min_words': 700, 'max_words': 1000, 'markdown_token_count': 900 if fits else 1067}}
+
+                with patch('simple_ar.report.agent.delivery_text_observation', side_effect=observation):
+                    result = run_report_agent(**kwargs, client=Client())
+                self.assertEqual('report-document-joint-reviser' in labels, expect_edit)
+                self.assertNotIn('report-document-finding-checker', labels)
+                self.assertTrue(all(row.draft_markdown.startswith('Revised' if expect_edit and corrected else 'Original')
+                                    for row in result.sections))
+                if expect_edit and not corrected:
+                    self.assertTrue(result.memory.reviewer_findings)
+                elif expect_edit:
+                    self.assertFalse(result.memory.reviewer_findings)
+
+    def test_document_edit_scope_is_explicit_bounded_and_saved(self):
+        for scope, action, expected in (
+            ('document', 'revise', {'method', 'result', 'scope'}),
+            ('section', 'revise', {'result'}),
+            ('document', 'verify', {'result'}),
+            ('document', 'advisory', {'result'}),
+        ):
+            with self.subTest(scope=scope, action=action):
+                sections = [ReportSectionDraft(section_id=sid, heading=sid,
+                    draft_markdown='Original ' + sid) for sid in ('method', 'result', 'scope')]
+                finding = ReviewerFinding(finding_id='overall-organization', section_id='result',
+                    type='style', severity='major', required_action=action,
+                    message='Distributed repetition needs a coordinated correction.')
+                review = ReportSectionReview(section_id='result', revision_scope=scope,
+                    verdict='revise_required', findings=[finding])
+                iterations = []
+
+                def draft(event, baseline):
+                    self.assertEqual({row.section_id for row in event.section_reviews}, expected)
+                    self.assertEqual(sum(len(row.findings) for row in event.section_reviews), 1)
+                    return [row.model_copy() for row in baseline if row.section_id in expected]
+
+                def interrupt(*args):
+                    raise RuntimeError('Saved candidate')
+
+                kwargs = dict(memory=ReportMemory(), config=ReportRuntimeConfig(max_review_iterations=1),
+                    sections=sections, iterations=iterations, all_findings=[], checkpoint=lambda: None)
+                with self.assertRaisesRegex(RuntimeError, 'Saved candidate'):
+                    edit_joint_document(**kwargs, reviews=[review], draft=draft, inspect=interrupt)
+                # Fresh review scope cannot expand an already saved candidate.
+                review.revision_scope = 'document'
+                with self.assertRaisesRegex(RuntimeError, 'Saved candidate'):
+                    edit_joint_document(**kwargs, reviews=[review],
+                        draft=lambda *args: self.fail('Recovery must reuse saved drafts'), inspect=interrupt)
+                self.assertEqual({row.section_id for row in iterations[0].section_reviews}, expected)
+
     def inputs(self):
         context = ReportContext(topic='Supported scientific interpretation', report_mode='supplied_materials')
         memory = ReportMemory(section_plan=[ReportSectionPlan(section_id=sid, heading=sid,

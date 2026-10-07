@@ -81,11 +81,21 @@ def edit_joint_document(
         if event is None:
             # A cross-section opinion can require changing its quoted neighbor,
             # not just the section that owns the opinion. Keep that identity
-            # once; only current, literally anchored prose adds an edit target.
+            # once; explicit document scope or literally anchored neighbors add targets.
             # Saved requests/candidates never acquire targets during recovery.
             current = {row.section_id: (row.heading, row.draft_markdown) for row in sections}
             related = []
             for review in active:
+                if review.revision_scope == "document" and any(
+                    finding_requires_resolution(row) and row.required_action == "revise"
+                    for row in review.findings
+                ):
+                    related.extend(ReportSectionReview(section_id=sid, verdict="revise_required",
+                        revision_instructions=[*review.revision_instructions,
+                            *[row.suggested_action for row in review.findings if row.suggested_action],
+                            "Coordinate the document-wide correction; retain unaffected prose unchanged."],
+                        notes=f"Document-wide edit requested by {review.section_id!r}; findings retain their original owner.")
+                        for sid in current if sid != review.section_id)
                 for finding in review.findings:
                     if not finding_requires_resolution(finding) or finding.required_action in {"advisory", "verify"}:
                         continue
@@ -188,9 +198,10 @@ def edit_joint_document(
         memory.reviewer_findings.append(finding)
         checkpoint()
 
-# Execution/review failures are owned by the controller, not model opinions.
+# Controller observations are recomputed, not closed as model opinions.
 DOCUMENT_CONTROL_FINDING_TYPES = frozenset({
     "document_review_unavailable", "document_revision_unavailable", "document_revision_unresolved",
+    "document_length_observation",
 })
 
 
@@ -247,6 +258,8 @@ def coalesce_document_reviews(reviews: list[ReportSectionReview]) -> list[Report
             grouped[review.section_id] = review.model_copy(deep=True)
             continue
         merged = grouped[review.section_id]
+        if review.revision_scope == "document":
+            merged.revision_scope = "document"
         if ranks[review.verdict] > ranks[merged.verdict]:
             merged.verdict = review.verdict
         for name in ("findings", "revision_instructions", "context_requests", "finding_checks"):
@@ -402,6 +415,7 @@ def review_document(
             *([] if prior else [
             "Find contradictions between sections about the same method, setting, result or conclusion.",
             "Find substantial repetition of protocol, metrics or limitations across sections; assign each fact a clear home.",
+            *( ["Set revision_scope=document only when an actionable revise finding requires coordinated edits across the article (for example overall length or distributed repetition). Keep the finding under one owning section; its quote anchors the observation, not the entire edit scope. Use section for local corrections, advisory observations and evidence-only verification. Document scope permits keeping unaffected prose unchanged; it never authorizes changing sources, measurements, the frozen plan or assembly-owned content."] if config.draft_scope == "document" else []),
             "Compare observed length with the requested document length and genre. Treat a substantial excess or shortfall as an actionable delivery defect, not optional polish; do not remove required facts or add unrelated material to meet length.",
             "Check that abstract and conclusion do not claim more than results, and that paper versus analysis-report tone matches the evidence.",
             ]),
@@ -414,6 +428,7 @@ def review_document(
         ],
         "output_schema": {"section_reviews": [{
             "section_id": "one of the supplied section ids",
+            "revision_scope": "section|document; document only for an actionable whole-article correction" if config.draft_scope == "document" else "section",
             "verdict": "pass|warning|revise_required|fail",
             "findings": [{"finding_id": "stable id", "type": "style|unsupported_claim|metric_mismatch|citation_misuse|missing_limitation|evidence_gap",
                           "severity": "info|minor|major|critical", "message": "specific cross-section issue",
@@ -501,6 +516,25 @@ def review_document(
                     f"Historical opinion checking omitted requested decisions: {sorted(missing)!r}; "
                     "return every requested check, using unresolved when it cannot be decided."
                 )
+        # A complete canonical count is already available. Do not delegate its
+        # range comparison to a model or ask a second model to close it. The
+        # normal candidate verifier will recompute it after editing.
+        observed = delivery_text_observation or {}
+        length = observed.get("length_check") or {}
+        if (not prior and sections and config.draft_scope == "document"
+                and observed.get("preview_status") == "pre_render_text_preview"
+                and not observed.get("pending_owner_sections")
+                and length.get("status") in {"above_range", "below_range"}):
+            owner = sections[0].section_id
+            message = (f"Canonical delivery contains {length['markdown_token_count']} whitespace-separated tokens; "
+                       f"the frozen {length['scope']} range is {length['min_words']}–{length['max_words']}. "
+                       "This checks the recorded counting convention, not scientific adequacy.")
+            reviews = coalesce_document_reviews([*reviews, ReportSectionReview(
+                section_id=owner, revision_scope="document", verdict="revise_required",
+                findings=[ReviewerFinding(finding_id="canonical-delivery-length", section_id=owner,
+                    type="document_length_observation", severity="minor", required_action="revise",
+                    message=message, suggested_action="Adjust article extent across sections while preserving required evidence and read-only assembly content.")],
+                revision_instructions=[message])])
         return reviews
     except (LLMResponseError, ValidationError) as exc:
         # Retain the parsed answer, not just its error, before the owner stops.

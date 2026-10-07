@@ -346,7 +346,7 @@ def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:
         # search attempt.  The downstream reader and report contracts still
         # consume the canonical document bundle.
         steps = [_row("document_ingest")]
-        if not _report_from_documents(request):
+        if not report_from_documents(request):
             steps.extend(_row(action) for action in ("read", "synthesize"))
     else:
         steps = [
@@ -710,7 +710,7 @@ def _required_output_actions(request: TaskPlanRequest) -> tuple[str, ...]:
     return tuple(actions)
 
 
-def _report_from_documents(request: TaskPlanRequest) -> bool:
+def report_from_documents(request: TaskPlanRequest) -> bool:
     """A supplied-source report needs original material, not an intermediate brief."""
     requested = {str(item).strip().lower() for item in request.requested_outputs}
     intents = {str(item).strip().lower() for item in request.intents}
@@ -728,7 +728,7 @@ def _prerequisites(request: TaskPlanRequest, action: str, *, actions: set[str]) 
     """One input rule shared by plan compilation and order validation."""
     if action == "document_ingest":
         return ("search",) if "search" in actions or not request.config.get("research_local_documents") else ()
-    if action == "report_write" and _report_from_documents(request):
+    if action == "report_write" and report_from_documents(request):
         # A selected note/brief is an actual Writer input, not post-delivery work.
         for producer in ("synthesize", "read"):
             if producer in actions:
@@ -855,7 +855,7 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
     if provided_only and not request.config.get("research_local_documents"):
         errors.append("Omitting search requires supplied local documents.")
     required = {"document_ingest"}
-    if not _report_from_documents(request):
+    if not report_from_documents(request):
         required.update(("read", "synthesize"))
     if not provided_only:
         required.add("search")
@@ -1095,7 +1095,7 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
         "material_boundary": {
             "provided_materials_only": _provided_materials_only(request),
             "search_allowed": not _provided_materials_only(request),
-            "report_from_original_documents": _report_from_documents(request),
+            "report_from_original_documents": report_from_documents(request),
             "supplied_asset_count": sum(
                 1 for asset in request.assets
                 if str(asset.get("role") or "").strip().lower() in {"paper", "document", "reference"}
@@ -1122,8 +1122,8 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
         "`prepare_execution` creates an isolated workspace, `implement` only locates/patches/validates "
         "authorized code, `experiment` measures a configured condition, `analysis` interprets completed "
         "measurements, and none of these actions is a substitute for research design or report writing. "
-        "For measurement, use exactly experiment then analysis; the supplied command is the accepted measurement protocol, not a research candidate. "
-        "For reproduction, use the supplied fixed-protocol suggested steps without research_design, assess_ideas or code edits; the user has already specified the reproduction scope and command. An explicitly configured task venv requires its prepare_execution step before measurement; do not omit it or add installation steps otherwise. "
+        "For measurement, use experiment then analysis, preceded by prepare_execution only when execution.environment is explicitly configured; the supplied command is the accepted measurement protocol, not a research candidate. "
+        "For reproduction, use the supplied fixed-protocol suggested steps without research_design, assess_ideas or code edits; the user has already specified the reproduction scope and command. Explicit environment preparation or a declared short check requires prepare_execution before measurement; do not omit it or invent installation/check commands otherwise. "
         "For bug_fix, use only prepare_execution (when required) and implement; implementation "
         "already includes validation and the repair explanation, so do not append summary or report steps. "
         "Do not invent dynamic indices, repair rounds, capabilities, processes, or parallel work. "

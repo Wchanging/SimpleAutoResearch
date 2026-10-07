@@ -89,6 +89,8 @@ class EvidenceOutlineTests(unittest.TestCase):
         frozen = _resolve_document_plan(self.adapt(client, config), config=config)
         guidance = drafting_template_guidance(template, frozen)
         self.assertIn('Describe the declared reproduction scope', guidance)
+        self.assertIn('## Writing Principles', guidance)
+        self.assertIn('Compare source and local conditions', guidance)
         self.assertNotIn('## Ablation Matrix', guidance)
         self.assertNotIn('Draft order:', guidance)
         self.assertEqual(frozen.document_plan.sections[1].heading, 'Coverage and cost')
@@ -99,6 +101,7 @@ class EvidenceOutlineTests(unittest.TestCase):
             draft_mode='initial')
         payload = json.loads(prompt[prompt.find('{'):])
         self.assertEqual(payload['template_markdown'], guidance)
+        self.assertNotIn('Writing Principles', [section.heading for section in self.memory.section_plan])
         self.assertEqual(payload['document_plan']['sections'][1]['heading'], 'Coverage and cost')
         restored = ReportMemory.model_validate(frozen.model_dump(mode='json'))
         self.assertEqual(drafting_template_guidance(template, restored), guidance)
@@ -139,12 +142,14 @@ class EvidenceOutlineTests(unittest.TestCase):
         self.response["sections"][0]["evidence_handles"] = ["run:1"]
         self.response["visual_intents"] = [{"kind": "figure", "view": "supplied-data",
             "section_heading": "Coverage and cost", "evidence_handles": ["run:1"],
+            "figure_paths": ["figures/chart.svg"],
             "title": "Observed comparison", "purpose": "Present the supplied coordinates"}]
         config = ReportRuntimeConfig(template="reproduction", outline_strategy="adaptive")
         client = Mock()
         client.ask_json.return_value = self.response
         frozen = _resolve_document_plan(self.adapt(client, config), config=config, context=self.context)
         intent = frozen.document_plan.visual_intents[0]
+        self.assertEqual(intent.figure_paths, ["figures/chart.svg"])
         self.assertEqual(intent.section_id, frozen.document_plan.sections[1].section_id)
         self.assertEqual(visual_plan_for_renderer(frozen.document_plan), [])
         self.assertTrue(visual_requirements(frozen.document_plan, frozen.document_plan.sections[1])["figures"][0]["assembly_owned"])
@@ -165,6 +170,22 @@ class EvidenceOutlineTests(unittest.TestCase):
             with self.assertRaises(LLMError):
                 self.adapt(client, ReportRuntimeConfig(template="reproduction", outline_strategy="adaptive"))
             self.assertEqual(client.ask_json.call_count, 2)
+
+    def test_unregistered_inline_figure_uses_existing_outline_correction(self):
+        self.memory.source_handles[0].metadata = {"document_id": "data-1"}
+        self.context.source_handles = self.memory.source_handles
+        self.context.results["supplied_analyses"] = [{"document_id": "data-1",
+            "evidence_role": "recomputed_from_user_supplied_data", "spec": {}, "records": [],
+            "figures": [{"path": "figures/chart.svg"}]}]
+        self.response["sections"][0]["evidence_handles"] = ["run:1"]
+        self.response["visual_intents"] = [{"kind": "figure", "view": "supplied-data",
+            "section_heading": "Coverage and cost", "evidence_handles": ["run:1"],
+            "title": "Comparison", "purpose": "Interpret values", "figure_paths": ["invented.svg"]}]
+        client = Mock()
+        client.ask_json.return_value = self.response
+        with self.assertRaises(LLMError):
+            self.adapt(client, ReportRuntimeConfig(template="reproduction", outline_strategy="adaptive"))
+        self.assertEqual(client.ask_json.call_count, 2)
 
     def test_invalid_title_uses_the_existing_bounded_retry_contract(self):
         for title in (["not text"], "# heading", "one\ntwo", "x" * 241):

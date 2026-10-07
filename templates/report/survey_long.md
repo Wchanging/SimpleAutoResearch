@@ -12,6 +12,19 @@ Do not write this as a pipeline run log. Search provenance, artifact paths,
 tool internals, extraction/debug details, and stage names belong in run
 artifacts, not in the report body.
 
+## Writing Principles
+
+Build a coherent account of the field around the user's questions: explain
+why approaches differ, which assumptions make them work, and where their
+evidence transfers. Organize comparisons by meaningful dimensions rather than
+source order. Distinguish contradictory findings from incomparable evaluations,
+and use matched subcases when the sources actually provide them.
+
+Let each table or diagram explain a relationship that prose alone would obscure;
+use the prose to interpret contrasts, not repeat entries. Connect open problems
+and recommendations to the preceding evidence. Expand the argument for a longer
+survey without padding it with generic background or repeated qualifications.
+
 ## Writing Workflow
 
 Write a field survey, not a paper-note summary. The report should:

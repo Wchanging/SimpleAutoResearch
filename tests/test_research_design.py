@@ -297,15 +297,34 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertIn("source config", result.diagnostics[0])
 
     def test_source_inventory_retains_declared_config_beyond_generic_limit(self):
-        from simple_ar.code_task.analysis.source_context import source_file_inventory
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "model.py").write_text("pass\n", encoding="utf-8")
             (workspace / "experiment.toml").write_text("[model]\nk = 32\n", encoding="utf-8")
+            (workspace / "z_worker.py").write_text("def compute():\n    return 42\n", encoding="utf-8")
             index = source_file_inventory(workspace, max_files=1,
                                           required_paths=("experiment.toml", "../outside.toml"))
             self.assertEqual([row["path"] for row in index["files"]], ["model.py", "experiment.toml"])
+            found = requested_source_context(workspace, index,
+                {"files": ["z_worker.py"], "symbols": ["compute"]},
+                supplied=[], max_files=1, max_chars=100)
+            self.assertEqual(len(found), 1)
+            self.assertIn("return 42", found[0]["text"])
+            self.assertEqual(found[0]["access_role"], "read_only")
+            self.assertEqual([row["path"] for row in index["files"]], ["model.py", "experiment.toml"])
+            # A named read bypasses only inventory truncation, not workspace,
+            # environment, binary or character-budget restrictions.
+            (workspace / ".env.txt").write_text("secret", encoding="utf-8")
+            (workspace / "image.png").write_bytes(b"not source text")
+            (workspace / "runtime").mkdir()
+            (workspace / "runtime/pyvenv.cfg").write_text("home = ignored", encoding="utf-8")
+            (workspace / "runtime/helper.py").write_text("secret", encoding="utf-8")
+            rejected = requested_source_context(workspace, index,
+                {"files": ["../outside.py", ".env.txt", "image.png", "runtime/helper.py", "missing.py"]},
+                supplied=[], max_files=5, max_chars=100)
+            self.assertEqual(rejected, [])
 
     def test_source_followup_uses_new_symbol_window_in_requested_file(self):
         from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory

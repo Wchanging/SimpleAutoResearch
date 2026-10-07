@@ -269,11 +269,18 @@ def propose_patch_edits(
             max_files=max_files,
         )
         selected = _limit_known_paths(allowed_edit_files, _known_paths(index), max_files=max_files)
-        snippets = read_source_snippets(
-            workspace_dir,
-            selected,
+        # Batch authorization narrows editable paths, not the source windows
+        # already located for them. Re-reading prefixes here loses definitions
+        # deep in a file and forces the editor to rediscover supplied evidence.
+        snippets = _context_pack_editable_snippets(
+            loaded_context, selected_files=selected,
             max_chars_per_file=max_source_chars_per_file,
-        )
+        ) if loaded_context is not None else []
+        visible = {row["path"] for row in snippets}
+        snippets.extend(read_source_snippets(
+            workspace_dir, [path for path in selected if path not in visible],
+            max_chars_per_file=max_source_chars_per_file,
+        ))
         if loaded_context is not None:
             reference_snippets = _context_pack_reference_snippets(
                 loaded_context,

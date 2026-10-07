@@ -111,6 +111,21 @@ class MaterialEvidenceSelectionTests(unittest.TestCase):
         for row in rows:
             self.assertEqual(row['text'], by_id[row['chunk_id']].text[row['character_start']:row['character_end']])
 
+    def test_overview_covers_secondary_query_aspects_without_growing_budget(self):
+        chunks = [self.chunk('quality', 'Accuracy quality precision recall.', 'results', 5),
+                  self.chunk('repeat', 'Accuracy quality precision.', 'discussion', 10),
+                  self.chunk('cost', 'Background ' * 200 + 'Latency memory constraints.', 'method', 15)]
+        before = copy.deepcopy(chunks)
+        rows = material_overview_views(chunks, 'accuracy quality precision recall latency memory',
+            limit=2, max_chars=500, max_chunk_chars=250)
+        self.assertEqual([row['chunk_id'] for row in rows], ['quality', 'cost'])
+        self.assertIn('Latency memory', rows[1]['text'])
+        self.assertLessEqual(sum(len(row['text']) for row in rows), 500)
+        self.assertEqual(chunks, before)
+        for row in rows:
+            source = next(chunk for chunk in chunks if chunk.chunk_id == row['chunk_id'])
+            self.assertEqual(row['text'], source.text[row['character_start']:row['character_end']])
+
     def test_overview_keeps_actual_hit_and_uses_spare_capacity_for_entry_context(self):
         entry = self.chunk('entry', 'Observations must be independent under the stated model.', 'method', 5)
         hit = self.chunk('interior', 'Calibration coverage comparison experiment results.', 'method', 10)

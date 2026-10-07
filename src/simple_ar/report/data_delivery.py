@@ -45,14 +45,20 @@ def analysis_delivery_block(
         blocks.extend(["", table_values_markdown(dict(result))])
     else:
         blocks.append(f"[Complete numerical records]({prefix}/analysis.json); full row tables are not repeated in this prose report.")
-    placements = [row.section_id for row in plan.visual_intents
+    intents = [row for row in plan.visual_intents
                   if handle and row.kind == "figure" and row.view == "supplied-data"
                   and row.evidence_handles == [handle]] if plan else []
+    placements = [row.section_id for row in intents]
     owners = placements or ([row.section_id for row in plan.sections if handle and handle in row.evidence_handles] if plan else [])
     owner = owners[0] if len(owners) == 1 and owners[0] in section_ids else ""
     figures = []
+    selected = intents[0].figure_paths if len(intents) == 1 else None
+    if selected is not None and set(selected) - {row["path"] for row in result["figures"]}:
+        raise ValueError("Selected figure_paths must belong to the registered analysis package")
     if config.figures.enabled and config.figures.mode != "off":
         for figure in result["figures"]:
+            if selected is not None and figure["path"] not in selected:
+                continue
             path = f"{prefix}/{figure['path']}"
             blocks.extend(["", f"![Descriptive data]({path})", "", figure["caption"]])
             figures.append({"path": path, "caption": figure["caption"]})

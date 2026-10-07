@@ -60,6 +60,9 @@ def review_code_task_changes(
     changed_files = _changed_files(manifest, paths)
     interface_mismatches = find_local_api_mismatches(paths.workspace_dir, relevant_paths=changed_files)
     deterministic = _deterministic_findings(root, manifest, changed_files, interface_mismatches=interface_mismatches)
+    # A confirmed scope/API/validation failure already determines the next
+    # action. Do not require a provider round-trip to persist that diagnosis.
+    model_review = use_llm and not any(row.severity == "blocking" for row in deterministic)
     contract = _contract_from_run(paths)
     review_index = build_review_index(
         paths.workspace_dir,
@@ -93,7 +96,7 @@ def review_code_task_changes(
         review_index=review_index,
         review_clusters=review_clusters,
         model=model,
-        use_llm=use_llm,
+        use_llm=model_review,
         max_source_chars_per_file=max_source_chars_per_file,
         message_callback=message_callback,
     )
@@ -107,7 +110,7 @@ def review_code_task_changes(
             "changed_files_outside_review_clusters": [path for path in changed_files
                 if not any(path in cluster.get("files", []) for cluster in review_clusters)],
             "patch_diff": "code_task/patch.diff" if (paths.task_dir / "patch.diff").is_file() else "",
-            "review_mode": "layered",
+            "review_mode": "deterministic_blocked" if use_llm and not model_review else "layered",
             "review_index": _relative_meta_path(phase, "review_index"),
             "review_clusters": _relative_meta_path(phase, "review_clusters"),
             "review_cluster_count": len(review_clusters),

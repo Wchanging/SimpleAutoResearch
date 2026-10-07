@@ -190,6 +190,27 @@ class ReviewSourceContextTests(unittest.TestCase):
         self.assertEqual([p for c in clusters for p in c['files']], paths[:6])
         self.assertEqual(build_review_clusters(index, relevant_paths=paths, max_clusters=0), [])
 
+    def test_local_review_follows_imports_not_unrelated_data_or_role_names(self):
+        from simple_ar.code_task.review_pipeline import build_review_index
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'pkg').mkdir()
+            (root / 'pkg/helper.py').write_text('from .dependency import value\nVALUE = value\n')
+            (root / 'pkg/dependency.py').write_text('value = 2\n')
+            (root / 'pkg/consumer.py').write_text('def use():\n    from .helper import VALUE\n    return VALUE\n')
+            (root / 'pkg/unrelated_model.py').write_text('value = 99\n')
+            (root / 'large_data.txt').write_text('Unrelated measurements\n' * 100)
+            (root / 'README.md').write_text('Unrelated project overview\n')
+            index = build_review_index(root)
+            clusters = build_review_clusters(index, relevant_paths=['pkg/helper.py'])
+            selected = {path for cluster in clusters for path in cluster['files']}
+            self.assertEqual(selected, {'pkg/helper.py', 'pkg/dependency.py', 'pkg/consumer.py'})
+            self.assertEqual(index['file_count'], 6)
+            broad = build_review_clusters(index)
+            self.assertIn('large_data.txt', {path for cluster in broad for path in cluster['files']})
+            non_python = build_review_clusters(index, relevant_paths=['README.md'])
+            self.assertIn('large_data.txt', {path for cluster in non_python for path in cluster['files']})
+
     def test_review_windows_share_limits_and_exact_source(self):
         cases = [
             ('+++ b/helper.py\n@@ -351,2 +351,2 @@\n', 700, None),

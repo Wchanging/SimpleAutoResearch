@@ -88,6 +88,7 @@ def add_start_parser(subparsers: argparse._SubParsersAction) -> None:
                         help="Venv: project-relative requirements file; repeatable. Defaults to requirements.txt when present, otherwise a bare venv. Installation can run build code; not an OS sandbox.")
     parser.add_argument("--install-project", action="store_true",
                         help="Reproduction venv: also install the execution project as a package, not editable. Requires a packaging declaration; may run build code/network and write source build metadata. Default: no project install.")
+    parser.add_argument("--check-argv", type=json.loads, help="Reproduction: explicitly authorized short check argv as JSON, run before measurement. No inferred command or scientific metrics; uses the preparation timeout.")
     parser.add_argument("--model", default="env", help="Default: use the model connection from .env.")
     parser.add_argument("--interaction", choices=("assisted", "checkpoints", "autonomous"), default="checkpoints")
     parser.add_argument("--output-root", type=Path, default=Path("runs/assistant"))
@@ -173,18 +174,24 @@ def _reproduction_rows(args: argparse.Namespace, *, interactive: bool) -> list[s
         raise ValueError("--timeout-sec must be positive.")
     environment_rows = []
     setup_steps = 0
-    if args.environment == "venv":
+    if getattr(args, "check_argv", None) is not None and not args.check_argv:
+        raise ValueError("--check-argv must name a nonempty check command; omit it to skip the check.")
+    if args.environment == "venv" or getattr(args, "check_argv", None) is not None:
         from simple_ar.research.project_environment import environment_profile
-        requirements = args.requirements or (["requirements.txt"] if (cwd / "requirements.txt").is_file() else [])
-        profile = environment_profile({"mode": "venv", "requirements": requirements,
-                                       "install_project": args.install_project, "timeout_sec": timeout}, project=cwd)
-        if argv[0] not in {"python", "python3", "python.exe", "python3.exe"}:
+        requirements = (args.requirements or (["requirements.txt"] if (cwd / "requirements.txt").is_file() else [])) if args.environment == "venv" else []
+        profile = environment_profile({"mode": args.environment, "requirements": requirements,
+                                       "install_project": args.install_project, "timeout_sec": timeout,
+                                       "check_command": getattr(args, "check_argv", None) or []}, project=cwd)
+        if args.environment == "venv" and argv[0] not in {"python", "python3", "python.exe", "python3.exe"}:
             raise ValueError("Task venv requires a python/python3 command alias; do not silently replace an explicit interpreter or launcher.")
-        setup_steps = 2 + bool(profile["requirements"] or profile["install_project"])
-        environment_rows = ["", "[execution.environment]", 'mode = "venv"',
+        setup_steps = (2 + bool(profile["requirements"] or profile["install_project"]) if args.environment == "venv" else 0) + bool(profile.get("check_command"))
+        environment_rows = ["", "[execution.environment]", f'mode = "{args.environment}"',
                             f"requirements = {_array(profile['requirements'])}",
                             f"install_project = {'true' if profile['install_project'] else 'false'}", f"timeout_sec = {timeout}"]
-        print_line(f"Task-local venv: selected requirements {profile['requirements']}; install project package: {profile['install_project']}; then pip check. {setup_steps} preparation invocations, each <= {timeout}s. Build code/network access and source build metadata writes may occur; not an OS sandbox.")
+        if profile.get("check_command"):
+            environment_rows.append(f"check_command = {_array(profile['check_command'])}")
+            print_line(f"Preparation check: {_command(profile['check_command'])}; failure or timeout stops measurement. Check outputs are not scientific results.")
+        print_line(f"Preparation: {args.environment}; requirements {profile['requirements']}; install project: {profile['install_project']}. {setup_steps} invocations, each <= {timeout}s. Venv installation may run build code/network; current mode does not install. Not an OS sandbox.")
     print_line("\n".join(f"{key}: {value}" for key, value in protocol.items()))
     print_line(f"Execution: {_command(argv)}\nDirectory: {cwd}\nOne invocation; timeout: {timeout}s; metrics: {', '.join(metrics)}")
     if not setup_steps:
@@ -224,6 +231,8 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
     if args.environment != "current" or args.requirements or args.install_project:
         if kind != "reproduction" or args.environment != "venv":
             raise ValueError("Environment/requirements/project installation requires --kind reproduction --environment venv.")
+    if getattr(args, "check_argv", None) is not None and kind != "reproduction":
+        raise ValueError("--check-argv requires --kind reproduction.")
     data_paths = [path.expanduser().resolve() for path in getattr(args, "data_path", [])]
     if data_paths and kind not in {"reproduction", "bug_fix"}:
         raise ValueError("--data-path requires --kind reproduction or bug_fix; table analysis uses --data-file.")
@@ -404,9 +413,12 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
             rows.append(f"materials = {_array([str(path) for path in materials])}")
     if kind in {"survey", "reproduction", "writing"} or args.with_report:
         rows.extend(["", "[report]", "document_review = true"])
-        if kind == "data_analysis":
+        if kind == "data_analysis" or (kind == "writing" and writing_template in {
+            MATERIAL_REPORT_TEMPLATE, "analysis_report", "source_review",
+        }):
             # Compose the explanation together, then inspect the complete
-            # argument. Saved/expert configs retain their accepted scopes.
+            # argument for compact genres. Long/custom templates and saved
+            # expert configs retain their section-oriented choices.
             rows.extend(['draft_scope = "document"', 'review_scope = "document"'])
         if args.max_cited_sources is not None:
             rows.append(f"max_cited_sources = {args.max_cited_sources}")

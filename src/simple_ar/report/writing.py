@@ -8,7 +8,7 @@ from typing import Any, Callable
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
 from simple_ar.report.agent import run_report_agent
 from simple_ar.report.memory import initialize_report_memory
-from simple_ar.report.schema import ReportContext, ReportMemory, ReportRuntimeConfig, ReportTemplateBundle
+from simple_ar.report.schema import ReportContext, ReportMemory, ReportRuntimeConfig, ReportTemplateBundle, finding_requires_resolution
 from simple_ar.report.tool_gateway import ReportToolGateway
 from simple_ar.research.documents.ingest import DocumentBundle
 
@@ -86,4 +86,8 @@ def run_report_writing_capability(*, context: CapabilityContext, request: Report
     payload.pop("report_body", None)
     payload.update(schema_version="report_agent_result.v1", input_snapshot=source.to_dict(), snapshot_id=snapshot["snapshot_id"])
     writer = context.store.write_json("writer.json", payload, kind="report_writer_result", schema="report_agent_result.v1")
-    return CapabilityResult(status="completed", artifacts=(*artifacts, writer))
+    pending = sum(finding_requires_resolution(row) for row in result.memory.reviewer_findings)
+    diagnostics = (f"Draft delivered with {pending} unresolved writing review finding(s); inspect {writer.path} before relying on it.",) if pending else ()
+    if diagnostics and request.emit is not None:
+        request.emit(diagnostics[0])
+    return CapabilityResult(status="completed", artifacts=(*artifacts, writer), diagnostics=diagnostics)

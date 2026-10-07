@@ -10,7 +10,7 @@ import json
 from typing import Any
 import re
 
-from simple_ar.research.contracts import CLAIM_SCOPE_RULES
+from simple_ar.research.contracts import CLAIM_SCOPE_RULES, COMPARISON_SCOPE_RULE
 from simple_ar.report.execution_evidence import report_execution_evidence
 from simple_ar.report.document_plan import ARGUMENT_PLAN_SCHEMA, ARGUMENT_PLANNING_RULES, LENGTH_REQUEST_RULE, LENGTH_REQUEST_SCHEMA, check_document_length, manuscript_body_tokens, reserve_document_words, supplied_figure_sources, validate_length_request
 from simple_ar.report.data_delivery import DELIVERY_RULES, attach_delivery_block, supplied_data_delivery
@@ -231,7 +231,7 @@ def evidence_outline_context(
             "If the request specifies an overall length, allocate target_words across sections within that total, not the same total to every section. Use fewer purposeful sections for short reports. Do not pad to template section lengths or repeat scope disclaimers to fill space.",
             LENGTH_REQUEST_RULE,
             "Propose a concise reader-facing title describing the actual scope, not a copy of task instructions or a stronger claim than the evidence. Give scope and validity details one primary section; other sections use brief qualifications without repeating the full disclaimer.",
-            "Do not propose fabricated data charts. For an existing supplied_figures package, optionally assign exactly one owner using visual_intents kind=figure, view=supplied-data and one exact registered handle. The owner must include that handle in its section evidence. One source cannot have multiple owners; other sections can still cite it. Assembly attaches the existing figures, not model-created paths.",
+            "For each supplied_figures package, use its document_id to read the figure inventory in results.supplied_analyses. Choose inline figures by their recorded captions and encoding, rather than displaying every chart. Assign at most one owner using visual_intents kind=figure, view=supplied-data and one exact registered handle present in that section's evidence. Use figure_paths with exact package-relative paths from that inventory; [] links the complete package without inline charts. All unselected data and editable figures remain in the linked package. Do not fabricate charts, paths or new measurements. Other sections can cite the same source without attaching it again.",
             "Return 2-12 sections as needed. References are appended separately. Do not return a References section.",
         ],
         "output_schema": {"title": "Concise evidence-scoped title",
@@ -242,7 +242,8 @@ def evidence_outline_context(
                                          "subsections": ["optional purposeful subsection"]}],
                           "visual_intents": [{"kind": "figure", "view": "supplied-data", "section_key": "exact key from your sections",
                               "title": "What the supplied data figure compares", "purpose": "Why this figure belongs here",
-                              "evidence_handles": ["one exact supplied_figures handle"]}]},
+                              "evidence_handles": ["one exact supplied_figures handle"],
+                              "figure_paths": ["Exact paths from results.supplied_analyses for that package; [] for linked-only"]}]},
     }
     if template is not None:
         payload["template_guidance"] = planning_template_guidance(template, config)
@@ -678,8 +679,13 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
             if "row_count" in original:
                 projected["input_row_count"] = original["row_count"]
             projected["records_scope"] = (
-                "Computed group/column summaries, not individual raw rows. The imported analysis package "
-                "retains its copied input separately; an uncomputed joint relationship is not evidence that row-level data are unavailable."
+                "Computed group/column summaries, not individual raw rows. Each record's count belongs to its "
+                "own retained rows and declared group/column/coordinate key. Column summaries can use different "
+                "nonmissing rows; paired_comparisons use only rows complete in both columns. A paired mean "
+                "difference is not the difference of marginal column means unless their row sets match. "
+                "Label these sample bases and their respective counts in a combined table, or separate the tables; "
+                "do not put a paired count beside unlabeled marginal means. The imported analysis package retains "
+                "its copied input separately; an uncomputed joint relationship is not evidence that row-level data are unavailable."
                 if original["spec"].get("mode", "observations") == "observations" else
                 "Supplied values/coordinates without inferred aggregation. Row meanings remain user-declared; "
                 "the short records preview is not the complete input or proof of independence."
@@ -894,6 +900,7 @@ def document_plan_context(memory: ReportMemory, *, independent_review: bool = Fa
     view = {
         "planning_status": dict(PLANNING_CONTEXT_STATUS),
         "interpretation_rules": [
+            COMPARISON_SCOPE_RULE,
             "Section purposes and the frozen document plan organize the work; they are not observed claims or source evidence. Follow the original task and supported sources when a planning interpretation overreaches. Do not add an unsupported assertion merely to fulfill a named item in the plan.",
             "Develop the planned argument using source passages and recorded results: explain what the comparison means and how it advances the reader's question. Correct or omit a planned point if its premise is unsupported; a frozen plan is not scientific truth. Section identities, title, delivery scope and edit ownership remain fixed, not the truth of a proposed explanation.",
         ],

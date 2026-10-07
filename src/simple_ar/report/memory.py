@@ -22,6 +22,7 @@ NON_DRAFT_SECTION_NAMES = {
     "review goal",
     "required checks",
     "writing workflow",
+    "writing principles",
     "writing order",
     "generation strategy",
     "references",

@@ -8,7 +8,14 @@ ResearchMode = Literal["lite", "standard", "strong"]
 ExtractionStatus = Literal["metadata_only", "pending", "parsed", "failed", "skipped"]
 
 # Shared interpretation boundary, not a semantic-verification certificate.
+COMPARISON_SCOPE_RULE = (
+    "Assign each condition to its actual method, dataset or comparison. A comparator's input limit "
+    "restricts the matched evaluation, not automatically the proposed method's capability. "
+    "A recommendation must be supported by the recommended method's own applicability; "
+    "missing comparative evidence does not show that the comparator works outside its limits."
+)
 CLAIM_SCOPE_RULES = (
+    COMPARISON_SCOPE_RULE,
     "Preserve the source claim's object, property, conditions and evidence kind; topic relevance or similar method names do not make different claims comparable.",
     "Separate theoretical guarantees, conjectures, empirical observations and proposals. A local conjecture or unobserved result is not a field-wide gap.",
     "Parsed documents, selected passages and model notes are different reading depths. Missing or unread evidence is not proof of absence; request original context for consequential uncertainty.",

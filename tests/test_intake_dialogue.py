@@ -476,10 +476,41 @@ class IntakeDialogueTests(unittest.TestCase):
                 validate_proposal(proposal(options={'data_plot': 'line', 'value_column': ['value'],
                     'observation_unit': 'one coordinate', 'x_column': 'step', 'data_mode': 'observations'}), args, set())
 
+    def test_code_repair_discovers_confirmed_validation_and_reuses_canonical_configuration(self):
+        import shlex
+        import tomllib
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            command = 'python -m unittest discover -s "tests with spaces"'
+            (root / 'README.md').write_text('Testing: ' + command + '\n')
+            (root / 'model.py').write_text('def compute():\n    return 1\n')
+            args = self.args(root, '--kind', 'bug_fix', '--project', str(root), '--allow', 'model.py')
+            execution = {'argv': shlex.split(command), 'basis': [{'path': 'README.md', 'quote': command}]}
+            client = Client(proposal('bug_fix', execution_proposal=execution))
+            with patch('subprocess.run', side_effect=AssertionError('setup must not execute')):
+                resolved = self.converse(args, client, ['y'])
+                resolved.prepare_only = True
+                with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'):
+                    config = prepare_start(resolved)
+            task_config = tomllib.loads((config.parent / 'code_task.toml').read_text())
+            self.assertEqual(shlex.split(task_config['benchmark']['command']), execution['argv'])
+            self.assertEqual(task_config['edit_scope']['allowed_patterns'], ['model.py'])
+            self.assertEqual(task_config['environment']['mode'], 'current')
+            self.assertIsNone(resolved.run_argv)
+            self.assertEqual(resolved.goal, args.goal)
+            facts = client.requests[0]['assets']
+            for changed in ({**execution, 'basis': []}, {**execution, 'timeout_sec': 900},
+                            {**execution, 'basis': [{'path': 'README.md', 'quote': 'python train.py'}]}):
+                with self.subTest(changed=changed), self.assertRaises(ValueError):
+                    validate_proposal(proposal('bug_fix', execution_proposal=changed), args, set(), facts=facts)
+            args.validate = 'python different.py'
+            with self.assertRaisesRegex(ValueError, 'explicit validate'):
+                validate_proposal(proposal('bug_fix', execution_proposal=execution), args, {'validate'}, facts=facts)
+
     def test_reproduction_proposal_from_inspected_project_serializes_one_confirmed_command(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            (root / 'README.md').write_text('Check fixture mean: python run.py --data values.csv\n')
+            (root / 'README.md').write_text('First check inputs: python check.py\nCheck fixture mean: python run.py --data values.csv\n')
             (root / 'run.py').write_text("# Writes rows.json under SIMPLE_AR_OUTPUT_DIR\nif __name__ == '__main__':\n    print('METRIC mean=3.0')\n")
             paper = root / 'paper.md'
             paper.write_text('# Source\nA mean calculation for a constructed example, not a published paper.\n')
@@ -488,8 +519,10 @@ class IntakeDialogueTests(unittest.TestCase):
             execution = {'hypothesis': 'Fixture mean is three', 'dataset': 'Supplied values.csv; constructed example',
                 'expected_outcome': 'Compare mean with three, not a paper reproduction score', 'metrics': ['mean'],
                 'argv': ['python', 'run.py', '--data', 'values.csv'],
+                'check_argv': ['python', 'check.py'],
                 'output_files': {'raw': 'rows.json'},
-                'basis': [{'path': 'README.md', 'quote': 'python run.py --data values.csv'}]}
+                'basis': [{'path': 'README.md', 'quote': 'python run.py --data values.csv'},
+                          {'path': 'README.md', 'quote': 'python check.py'}]}
             client = Client(proposal('reproduction', execution_proposal=execution))
             with patch('subprocess.run', side_effect=AssertionError('setup must not execute')):
                 resolved = self.converse(args, client, ['y'])
@@ -503,7 +536,9 @@ class IntakeDialogueTests(unittest.TestCase):
             self.assertEqual(values['execution_details']['output_files'], {'raw': 'rows.json'})
             self.assertEqual(values['report_outline_strategy'], 'adaptive')
             self.assertEqual(values['timeout_sec'], 17)
-            self.assertEqual(values['process_invocations'], 1)
+            self.assertEqual(values['process_invocations'], 2)
+            self.assertEqual(values['execution_details']['environment']['check_command'], ['python', 'check.py'])
+            self.assertEqual(values['process_wall_seconds'], 34)
             self.assertTrue((config.parent / 'preparation.md').is_file())
             self.assertFalse((config.parent / 'code_task.toml').exists())
             self.assertTrue(any(row['role'] == 'entry_source' for row in client.requests[0]['assets']['project_preparation']['excerpts']))
@@ -516,6 +551,20 @@ class IntakeDialogueTests(unittest.TestCase):
                 'argv': ['python', 'run.py'], 'basis': [{'path': 'README.md', 'quote': 'python run.py'}]}
             facts = {'project_preparation': {'excerpts': [{'path': 'README.md', 'text': 'python run.py'}]}}
             validate_proposal(proposal('reproduction', execution_proposal=execution), args, set(), facts=facts)
+            for check in ([], 'python check.py', [42]):
+                with self.subTest(check=check), self.assertRaisesRegex(ValueError, 'check_argv'):
+                    validate_proposal(proposal('reproduction', execution_proposal={**execution,
+                        'check_argv': check}), args, set(), facts=facts)
+            args.check_argv = ['python', 'my_check.py']
+            self.assertEqual(validate_proposal(proposal('reproduction', execution_proposal=execution),
+                args, {'check_argv'}, facts=facts)['execution_proposal']['check_argv'], args.check_argv)
+            with self.assertRaisesRegex(ValueError, 'explicit check_argv'):
+                validate_proposal(proposal('reproduction', execution_proposal={**execution,
+                    'check_argv': ['python', 'other.py']}), args, {'check_argv'}, facts=facts)
+            args.run_argv = execution['argv']
+            with self.assertRaisesRegex(ValueError, 'inspected source basis'):
+                validate_proposal(proposal('reproduction', execution_proposal={**execution,
+                    'check_argv': ['python', 'new.py'], 'basis': []}), args, set(), facts=facts)
             for attachments in ({'raw': '../outside.json'}, {'raw': '/outside.json'}, []):
                 with self.subTest(attachments=attachments), self.assertRaises(ValueError):
                     validate_proposal(proposal('reproduction', execution_proposal={**execution,

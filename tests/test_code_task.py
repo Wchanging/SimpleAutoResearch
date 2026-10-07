@@ -3450,6 +3450,8 @@ protected_patterns = ["pyproject.toml"]
             code_root = root / "toy_project"
             task_file = root / "task.md"
             _write_toy_project(code_root)
+            source = read_text(code_root / "spam_model.py")
+            write_text(code_root / "spam_model.py", "# unrelated module documentation\n" * 80 + source)
             write_text(code_root / "extra.py", "VALUE = 1\n")
             write_text(task_file, "# Task\n\nImprove spam prediction only.\n")
             run_dir = root / "runs" / "code-task-run"
@@ -3463,10 +3465,16 @@ protected_patterns = ["pyproject.toml"]
             work_plan_path = run_dir / "code_task" / "work_plan.json"
             work_plan = read_json(work_plan_path)
             work_plan["items"][0]["target_files"] = ["spam_model.py"]
+            work_plan["items"][0]["budget_profile"] = "normal"
             write_json(work_plan_path, work_plan)
             create_code_task_batch(run_dir, work_item_id="W1")
             generate_patch_plan(run_dir, use_llm=False)
             record_plan_decision(run_dir, decision="approve")
+            located = build_code_task_context_pack(
+                run_dir, query="predict", max_files=3,
+                max_source_chars_per_file=500,
+            )
+            self.assertIn("spam_model.py", located.selected_files)
             fake_client = _FakeRepairClient(
                 {
                     "summary": "Try one valid batch edit and one unrelated edit.",
@@ -3496,8 +3504,12 @@ protected_patterns = ["pyproject.toml"]
                 }
             )
 
-            with patch("simple_ar.code_task.editing.patching.LLMClient.from_env", return_value=fake_client):
-                proposal = propose_patch_edits(run_dir, use_llm=True)
+            with patch.object(fake_client, "ask_json", wraps=fake_client.ask_json) as call, \
+                 patch("simple_ar.code_task.editing.patching.LLMClient.from_env", return_value=fake_client):
+                proposal = propose_patch_edits(run_dir, use_llm=True, max_source_chars_per_file=500)
+            call.assert_called_once()
+            self.assertIn("def predict(text):", call.call_args.args[1])
+            self.assertFalse((run_dir / "code_task/meta/edit_context_followup.json").exists())
 
             self.assertEqual(proposal.edit_count, 1)
             data = read_json(proposal.proposal_path)
@@ -3535,6 +3547,13 @@ protected_patterns = ["pyproject.toml"]
                 / "proposed_edits.json"
             )
             self.assertEqual(batch_proposal["editor"]["backend"], "controlled_patch")
+            protected_test = run_dir / "code_task/workspace/tests/test_spam_model.py"
+            before = protected_test.read_bytes()
+            applied = apply_patch_edits(run_dir)
+            self.assertEqual(list(applied.changed_files), ["spam_model.py"])
+            checked = run_code_task_benchmark(run_dir, timeout_sec=10)
+            self.assertEqual(checked.status, "passed")
+            self.assertEqual(protected_test.read_bytes(), before)
 
     def test_propose_edits_budget_requires_large_approval(self) -> None:
         with _temporary_root() as root:

@@ -9,6 +9,36 @@ from simple_ar.research.evidence.reader import select_reading_chunks
 
 
 class DocumentAppendixTests(unittest.TestCase):
+    def test_unsectioned_material_preserves_title_and_literal_source_span(self):
+        text = '# Calibration note\n\nAda Example, 2025\nOnly device A accepts this input.\n'
+        rows = self.sections(text)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].section, 'body')
+        self.assertEqual(rows[0].text, text.strip())
+        self.assertEqual(rows[0].text,
+                         '\n'.join(text.splitlines()[rows[0].line_start - 1:rows[0].line_end]).strip())
+
+    def test_bibliography_titles_and_integer_table_rows_do_not_own_sections(self):
+        text = ('Methods\nCompared models.\n1 Model Alpha 32 64\nActual method details.\n'
+                'References\n1 Learning Methods Under Shift\nJournal entry details.\n'
+                '2 Evaluating Models\nAnother publication.\nAppendix A\nAdditional observations.\n')
+        rows = self.sections(text)
+        self.assertEqual([row.heading for row in rows], ['Methods', 'References', 'Appendix A'])
+        self.assertIn('1 Model Alpha 32 64', rows[0].text)
+        self.assertIn('2 Evaluating Models', rows[1].text)
+        self.assertIn('Additional observations.', rows[2].text)
+        for row in rows:
+            self.assertEqual(row.text, '\n'.join(text.splitlines()[row.line_start - 1:row.line_end]).strip())
+        rows = self.sections('## Evaluation with Bibliography References\nMeasured comparison.\n'
+                             '## References\nA publication.\n## Further observations\nRetained body.\n')
+        self.assertNotEqual(rows[0].section, 'references')
+        self.assertEqual(rows[-1].text, 'Retained body.')
+        rows = self.sections('1 Comparing Model 2 and Model 3\nMatched comparisons.\n')
+        self.assertEqual(rows[0].heading, 'Comparing Model 2 and Model 3')
+        rows = self.sections('8 R EFERENCES\n1 Learning Methods\nPublication details.\n')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].section, 'references')
+
     def test_html_blocks_not_inline_nodes_own_sections_and_front_matter(self):
         from simple_ar.research.documents.extractors import LocalDocumentParser
         with tempfile.TemporaryDirectory() as directory:

@@ -90,6 +90,15 @@ class StartTests(unittest.TestCase):
                                   "--output-root", str(root / "runs"), "--prepare-only")
             defaults = research_defaults(["research-session", "--config", str(config)])
             self.assertEqual(defaults["report_template"], "material_report")
+            self.assertEqual(defaults["report_draft_scope"], "document")
+            self.assertEqual(defaults["report_review_scope"], "document")
+            for genre in ("analysis_report", "source_review"):
+                generated = self.prepare("--kind", "writing", "--goal", "Explain notes",
+                    "--material", str(material), "--template", genre,
+                    "--output-root", str(root / genre), "--prepare-only")
+                settings = tomllib.loads(generated.read_text())["report"]
+                self.assertEqual(settings["draft_scope"], "document")
+                self.assertEqual(settings["review_scope"], "document")
             self.assertEqual(defaults["report_outline_strategy"], "adaptive")
             for name in ("", "auto", "material_report"):
                 bundle = load_report_template_bundle(report_mode="supplied_materials", config=ReportRuntimeConfig(template=name))
@@ -129,6 +138,8 @@ class StartTests(unittest.TestCase):
             settings = tomllib.loads(config.read_text(encoding="utf-8"))["report"]
             self.assertEqual(settings["template"], str(custom.resolve()))
             self.assertNotIn("outline_strategy", settings)
+            self.assertNotIn("draft_scope", settings)
+            self.assertNotIn("review_scope", settings)
 
     def test_resume_hint_preserves_the_selected_model(self):
         with tempfile.TemporaryDirectory() as directory:

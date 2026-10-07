@@ -816,6 +816,21 @@ class ReportCheckpointTests(unittest.TestCase):
                     lineage = output.read_json("sections.json")["resume_ref"]
                     self.assertEqual(lineage, None if changed else checkpoint.to_dict())
 
+            from simple_ar.report.schema import AgentReportResult, ReviewerFinding
+            history = ReviewerFinding(finding_id="old", type="unsupported_claim", severity="major", message="Old draft issue.")
+            pending = ReviewerFinding(finding_id="current", type="style", severity="minor", required_action="revise", message="Current draft needs shortening.")
+            for findings in ([], [pending]):
+                delivered = AgentReportResult(report_body="Saved method.", sections=[ReportSectionDraft(
+                    section_id="method", heading="Method", draft_markdown="Saved method.")],
+                    memory=ReportMemory(reviewer_findings=findings), reviewer_findings=[history, *findings])
+                with patch("simple_ar.report.writing.run_report_agent", return_value=delivered):
+                    result = run_report_writing_capability(context=first, request=request)
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(bool(result.diagnostics), bool(findings))
+                if findings:
+                    self.assertIn("1 unresolved", result.diagnostics[0])
+                    self.assertEqual(events[-1], result.diagnostics[0])
+
 
 class CurrentReportNotesTests(unittest.TestCase):
     def inputs(self, *, document_review=False, reviewer="llm", count=2):

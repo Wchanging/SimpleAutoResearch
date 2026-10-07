@@ -44,6 +44,9 @@ class DataDeliveryTests(unittest.TestCase):
         draft = ReportSectionDraft(section_id=section.section_id, heading=section.heading, draft_markdown="Observed values only.")
         common = dict(context=context, memory=memory, section=section, template=template, config=config)
         outline = evidence_outline_context(context, memory, config)
+        scope = outline["results"]["supplied_analyses"][0]["records_scope"]
+        self.assertIn("different nonmissing rows", scope)
+        self.assertIn("not the difference of marginal column means", scope)
         expected = outline["assembly_owned_content"]
         views = [outline,
             prompt_view(_writer_prompt(**common, previous_draft=None, review=None, extra_context=[],
@@ -54,9 +57,42 @@ class DataDeliveryTests(unittest.TestCase):
         self.assertEqual(expected[0]["section_id"], "observations")
         self.assertIn("| A | score | 2 | 0 | 4 |", expected[0]["markdown"])
         self.assertIn("not a new experiment", expected[0]["markdown"])
-        for view in views[1:]:
-            self.assertEqual(view["narrative_context"]["assembly_owned_content"], expected)
+        for view in views[1:3]:
+            self.assertEqual(view["assembly_owned_content"], expected)
+            self.assertNotIn("assembly_owned_content", view["narrative_context"])
+        self.assertEqual(views[-1]["narrative_context"]["assembly_owned_content"], expected)
         self.assertEqual((context.model_dump(), memory.model_dump()), original)
+
+    def test_explicit_inline_selection_preserves_linked_package_and_legacy_behavior(self):
+        from simple_ar.report.data_delivery import supplied_data_delivery
+        from simple_ar.report.schema import ReportVisualIntent
+        context, memory, section, config = self.objects()
+        result = context.results["supplied_analyses"][0]
+        result["figures"].append({"path": "figures/paired.svg", "caption": "Matched differences, not marginal means."})
+        original = copy.deepcopy(result)
+        intent = ReportVisualIntent(visual_id="main", kind="figure", title="Comparison", purpose="Interpret pairs",
+            section_id=section.section_id, evidence_handles=["material:data"], view="supplied-data",
+            figure_paths=["figures/paired.svg"])
+        memory.document_plan.visual_intents = [intent]
+        for selected, expected in ((["figures/paired.svg"], 1), ([], 0), (None, 2)):
+            with self.subTest(selected=selected):
+                intent.figure_paths = selected
+                restored = ReportDocumentPlan.model_validate_json(memory.document_plan.model_dump_json())
+                self.assertEqual(restored.visual_intents[0].figure_paths, selected)
+                block = supplied_data_delivery(context, config=config, plan=memory.document_plan,
+                    section_ids=[section.section_id])[0]
+                self.assertEqual(block["markdown"].count("!["), expected)
+                self.assertIn("analysis.md", block["markdown"])
+                self.assertIn("analysis.json", block["markdown"])
+                self.assertEqual(supplied_data_delivery(context, config=config, plan=restored,
+                    section_ids=[section.section_id]), [block])
+                if selected:
+                    self.assertNotIn("figures/bar.svg", block["markdown"])
+                    self.assertIn("figures/paired.svg", block["markdown"])
+        intent.figure_paths = ["../unregistered.svg"]
+        with self.assertRaisesRegex(ValueError, "registered analysis package"):
+            supplied_data_delivery(context, config=config, plan=memory.document_plan, section_ids=[section.section_id])
+        self.assertEqual(result, original)
 
     def test_document_review_counts_additions_separately_and_preserves_draft(self):
         context, memory, section, config = self.objects()

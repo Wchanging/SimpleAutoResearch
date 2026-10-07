@@ -27,10 +27,16 @@ uv run simple-ar start --kind writing --material notes.md --model env
 | `--hypothesis`, `--dataset`, `--expected-outcome`, `--metric` | Reproduction | Accepted conclusion, conditions and emitted metrics |
 | `--cwd`, `--timeout-sec`, `--output-files JSON` | Reproduction | Execution location, timeout and registered producer files |
 | `--environment current\|venv`, `--requirements PATH`, `--install-project` | Reproduction | Explicit dependency preparation |
+| `--check-argv JSON` | Reproduction | Explicit short check before measurement; no inferred command, and no check metrics in measured results |
 | `--command ARGV...` | Reproduction | Actual command; place it last |
 | `--with-report` | Data analysis | Also write from the analysis; requires a model |
 
 Supported kinds: `survey`, `bug_fix`, `reproduction`, `writing`, `data_analysis`. Structured setup is model-free until execution; chat setup itself uses the model and needs a terminal. Do not combine `--chat` with `--prepare-only`.
+
+Code-repair chat can inspect project text and propose a validation argv with quoted
+source basis. Confirmation serializes it into the existing CodeTask benchmark
+command; explicit `--validate` is retained. Setup does not run commands or install
+dependencies, and ordinary start still confirms edit scope and execution.
 
 Code repair's interpreter defaults to current. `--project-python` preserves an existing virtualenv entry path; it does not create or install an environment. Reproduction dependency preparation is a separate explicit option.
 

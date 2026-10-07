@@ -21,8 +21,11 @@ def is_builtin_template(template: ReportTemplateBundle, config: ReportRuntimeCon
 
 
 def _intended_use(template: ReportTemplateBundle) -> str:
-    purpose = re.search(r"(?ims)^##\s+Intended Use\s*$\n(.*?)(?=^##\s|\Z)", template.template_markdown)
-    return "## Intended Use\n\n" + purpose.group(1).strip() if purpose else ""
+    # Remove fallback chapter assignments, not genre-specific composition.
+    # These blocks guide argument and prose without competing with the plan.
+    return "\n\n".join(f"## {heading}\n\n{body.strip()}" for heading, body in
+        re.findall(r"(?ims)^##\s+(Intended Use|Writing Principles)\s*$\n(.*?)(?=^##\s|\Z)",
+                   template.template_markdown))
 
 
 def planning_template_guidance(template: ReportTemplateBundle, config: ReportRuntimeConfig) -> str:

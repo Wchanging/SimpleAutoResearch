@@ -8,6 +8,20 @@ paper. Follow the user's question and distinguish source assertions, computed
 values and unconfirmed interpretations. Do not invent a baseline, hypothesis,
 experiment, stop decision or novelty to fill the structure.
 
+## Writing Principles
+
+Lead with the answer to the reader's question, then explain the evidence and
+reasoning needed to understand it. Organize findings by meaningful relationships
+or contrasts, not by the order in which files were supplied. Explain what a
+table or figure reveals rather than repeating its values in the surrounding prose.
+For quantitative material, identify each statistic's units and sample basis.
+Different column counts or missing rows can make marginal means and matched
+differences refer to different observations; name that distinction in the table,
+or separate the comparisons, rather than relying on a distant disclaimer.
+Assign shared limitations one primary home and keep qualifications local only
+when needed for a specific assertion. End with a useful conclusion or concrete
+next choice, not an inventory of research stages that were never requested.
+
 ## Writing Workflow
 
 Draft order: Purpose And Inputs -> Findings -> Interpretation And Limits -> Conclusion And Options

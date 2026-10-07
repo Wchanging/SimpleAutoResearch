@@ -1,11 +1,29 @@
-# Experiment Analysis Report
+# Analysis Report
 
 ## Intended Use
 
-A concise record of an unmet or uncertain research goal, not a successful
-research paper. Explain the original goal without moving its success criteria.
-Use the delivery decision in the evidence, including the stop reason and
-continuation options. Do not invent novelty, missing experiments or significance.
+A reader-facing analysis of supplied data or recorded experiment results.
+Answer the original question without moving its success criteria. Explain
+positive, negative and inconclusive results as supported; use a recorded stop
+decision when one exists, rather than assuming every analysis is a failed
+experiment. Do not invent novelty, experiments or significance.
+
+## Writing Principles
+
+Answer the user's question with the main observed pattern first. Explain the
+meaning of the measurements, their comparison conditions and plausible
+interpretations; separate these interpretations from recorded facts. Use tables
+or figures to expose relationships and discuss their implications in prose
+instead of duplicating their values. Preserve informative negative results.
+Every quantitative comparison must identify the quantity, units and sample
+basis. Distinguish column-wise summaries, complete pairs and pooled groups;
+use separate tables or explicit basis/count labels when these sets differ.
+Missingness changes which observations support a statistic, not just its precision.
+
+Keep shared caveats together and local qualifications beside the affected
+claim. End with a specific evidence-driven next step, not a generic call for
+more research. A concise analysis can be useful without pretending to be an
+original scientific contribution or narrating the execution workflow.
 
 ## Writing Workflow
 

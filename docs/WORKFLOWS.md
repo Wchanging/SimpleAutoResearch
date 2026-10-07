@@ -29,7 +29,9 @@ For material writing, outline lookups and the Writer's optional gap lookup are
 separate bounded batches under the same tool allowance. An outline read does not
 disable the author's later request for a missing passage. Checkpoints retain
 both results; historical tasks keep their already-consumed batch rather than
-replaying it. Review evidence references use actual JSON Pointers to supplied
+replaying it. Writing, format recovery and section review preserve all supplied
+read results; cost is controlled by tool allowances and the session token budget,
+not a second last-six-results filter. Review evidence references use actual JSON Pointers to supplied
 fields. Resolving a field establishes its location and ownership, not scientific
 support; quotations and old saved references retain their validation rules.
 Bounded source overviews keep the highest-ranked matching passage from each
@@ -37,6 +39,13 @@ selected section; a section opening is additional context when capacity permits,
 not a replacement for a retrieved result. The views still represent partial reading.
 
 ### Changed-source review coverage
+
+For Python-only local patches, supplementary context follows indexed imports
+and direct callers, including conditional, function-local and relative imports,
+rather than unrelated role-ranked data or documents. This is static association,
+not dynamic loading or a complete transitive call graph. Whole-project reviews,
+non-Python changes and historical indexes without import observations keep their
+broader selection. Deterministic checks retain their original project scope.
 
 Existing-project review allocates its existing cluster/file allowance to changed
 files first, then selects background role clusters. The review metadata lists
@@ -50,7 +59,10 @@ runtime validation. This changes input selection, not the number of model rounds
 
 Model concerns are advisory, including matching concerns from several groups.
 Repeated wording is not independent failure evidence. Scope violations, definite
-missing interfaces and recorded validation failures remain blocking. Only an
+missing interfaces and recorded validation failures remain blocking and are
+recorded without model calls. Batch edit limits filter editable paths while
+preserving their located source windows; only missing windows use prefix reads.
+Only an
 already-authorized command may run; neither a warning nor a passing static check
 certifies behavior. Existing failed review records are not rewritten on recovery.
 
@@ -94,7 +106,7 @@ patches; external inputs remain in place and completed workspaces are unchanged.
 
 ### Explicit task dependency preparation
 
-A confirmed `[execution.environment]` venv profile adds `prepare_execution` before
+A confirmed `[execution.environment]` venv or explicit current-environment check adds `prepare_execution` before
 the declared measurement. The existing preparation attempt owns the environment,
 `environment_setup.json`, process records and logs; the original process backend
 and session ledger account for creation, selected requirements/explicit project package installation and
@@ -105,6 +117,11 @@ continuing a failed session creates a fresh attempt without clearing previous us
 Completed recovery reuses the prepared command/results. A venv is not an OS sandbox
 or a portable environment image; installation does not certify scientific conditions.
 This single-command path does not change CodeTask's current/external environment modes.
+An optional `check_command` runs after venv setup, or alone in current mode with
+no installs. It uses the same backend, budget and logs; failure or timeout stops
+measurement. The formal command is not shortened, and check output stays in
+preparation records rather than entering measured results. The user supplies the
+check; the framework does not infer a safe smoke command from a filename.
 
 ### Describe and plot existing data (no model required)
 
@@ -228,6 +245,9 @@ Repeat `--material` for drafts, notes or result descriptions; `--document` ident
 a separate bibliographic paper. Writing extracts and persists the supplied text, then
 uses the shared Writer, Reviewer, assembly and audit capabilities. It does not search,
 create innovation candidates, execute experiments or manufacture an empty synthesis.
+Supplied-source survey/research tasks requesting only a report likewise use the
+existing document-to-report dispatch without a model routing call. This does not
+skip article planning or review, and accepted historical routes are not rewritten.
 Inputs are Markdown, text, HTML, PDF, ordinary JSON or a completed `table_analysis.v1` analysis package.
 Material writing reserves bounded views for explicit abstract sections and selects
 other retained passages against the task with the existing lexical retrieval.
@@ -242,8 +262,14 @@ their topology, and existing TOML tasks/checkpoints are unchanged. Complete sect
 lengths and recorded assembly-owned data captions, tables and provenance additions
 reach writing and review. They share assembly's text builder, without changing saved
 drafts; incomplete old package previews remain explicitly unknown. These are planning
-aids, not final export word-count certificates or paper-quality guarantees. Canonical
-pre-render text counts also include the title, normalized headings, cited references
+aids, not final export word-count certificates or paper-quality guarantees.
+For observation analyses, column summaries may use different nonmissing rows,
+while paired differences use complete pairs. Writing receives these definitions
+alongside the saved counts; combined tables should label each sample basis or
+separate the summaries. Arithmetic checks do not certify the interpretation.
+Writer task input places these additions in one shared field for joint, section
+and format-recovery calls; neighboring prose does not duplicate the attachment preview.
+Canonical pre-render text counts also include the title, normalized headings, cited references
 and experiment appendix, without duplicating the whole report in every prompt.
 Section measurement detail follows the argument plan's metric references, not
 the heading's wording or language. Review also receives metrics named by the
@@ -273,8 +299,10 @@ from `status: passed`; inspect `semantic_review_status`, unresolved findings and
 the delivered prose separately. An exhausted editing allowance does not silently
 increase on recovery.
 Fixed and custom templates supply section requirements, not just headings.
-Adaptive built-in planning receives only the template's intended use; fallback
-chapter assignments are not another proposed outline. The accepted plan supplies
+Adaptive built-in planning receives the template's intended use and explicitly
+separated writing principles: argument, method explanation, result interpretation
+and figure/prose organization. These guide composition, not mandatory sections;
+fallback chapter assignments are not another proposed outline. The accepted plan supplies
 the writing responsibilities. Material-based writing keeps supplied material visible alongside
 papers within the source budget; more references do not replace the task's own results.
 For data-backed writing, pass the analysis task's printed `analysis.json` path
@@ -298,6 +326,12 @@ The default is a supplied-material report (`material_report`). Add `--template e
 paper-style draft with explicit evidence gaps. It does not authorize experiments or
 guarantee scientific quality. Local source metadata can be incomplete; do not rely on
 generated bibliographies without checking them. Template/review files are checked at setup.
+Guided material reports, analysis reports and source reviews default to joint drafting
+and whole-document review. Long paper and custom templates retain section-based defaults;
+explicit TOML settings and saved sessions keep their selected scopes.
+The article plan can select registered analysis figures for the main text;
+unselected charts, editable exports and numerical records remain in the linked
+analysis package. Older plans without figure selections retain whole-package placement.
 Expert custom templates must include the corresponding review criteria; use the
 research TOML report settings for explicit criteria paths.
 
@@ -631,6 +665,11 @@ Front matter is a parser label, not a guarantee that the text contains only a
 byline. When no explicit abstract was identified, that opening text remains a
 candidate for task-related passage selection. It is not relabelled as an abstract
 or treated as exhaustive reading.
+Sectioning keeps numbered publication titles inside bibliography rather than
+opening new body sections. Explicit Markdown headings and appendices can reopen
+the body; trailing numeric table cells are not implicit headings. A descriptive
+body heading mentioning references is not itself a bibliography. These are
+text-structure heuristics, not PDF layout or table reconstruction.
 Reading notes receive the user task focus separately from source evidence. Default excerpts
 retain an ingest-sized chunk; smaller windows mark further clipping. Note identities and
 declared references are checked against their owning document. This prevents misattribution,
@@ -645,8 +684,12 @@ certificate of semantic support.
 
 Report diagrams require labels actually present in the section: no generic
 filler or inferred arrows. Paired figures keep input metric order (at most four
-by default), without favoring continual-learning metrics. Rendering is not
-scientific validation.
+by default), without favoring continual-learning metrics. They share the headless
+Matplotlib renderer and deliver SVG, PDF and PNG. When the accepted argument plan
+assigns a recorded metric to exactly one drafted section, its plot appears there,
+independent of the heading's language. Otherwise it remains in the comparison
+appendix. Lines connect recorded pairs, not confidence intervals; rendering is
+not scientific validation.
 
 The formal research entrypoint is `research-session`. It owns attempts, artifacts,
 reports and audits in one session, while `ResearchApplication` selects only the

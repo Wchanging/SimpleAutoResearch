@@ -149,6 +149,14 @@ def _split_sections(text: str) -> list[dict[str, object]]:
         heading = _heading_for_line(line)
         if heading is None:
             continue
+        # Bibliography entries are not main-text sections just because their
+        # publication titles begin with a number. Explicit structure or an
+        # appendix may reopen the body; all source text stays in its span.
+        if heading_rows and heading_rows[-1][1] == "references" and not (
+            re.match(r"^\s*#{2,6}\s", line) or APPENDIX_HEADING.fullmatch(line.strip())
+            or LETTER_HEADING.fullmatch(line.strip())
+        ):
+            continue
         section = _normalize_section(heading)
         heading_rows.append((index, section, heading))
 
@@ -186,26 +194,14 @@ def _split_sections(text: str) -> list[dict[str, object]]:
 
 
 def _fallback_section(text: str, lines: list[str]) -> dict[str, object]:
-    compact = _strip_leading_title(text).strip()
     section = "body"
     return {
         "section": section,
         "heading": section.title(),
-        "text": compact,
+        "text": text,
         "line_start": 1,
         "line_end": len(lines) or 1,
     }
-
-
-def _strip_leading_title(text: str) -> str:
-    lines = text.splitlines()
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    if lines and lines[0].lstrip().startswith("#"):
-        lines = lines[1:]
-        while lines and not lines[0].strip():
-            lines.pop(0)
-    return "\n".join(lines) or text
 
 
 def _heading_for_line(line: str) -> str | None:
@@ -244,6 +240,8 @@ def _heading_for_line(line: str) -> str | None:
     title = numbered.group(1).strip()
     if explicit:
         return title
+    if re.search(r"(?<!\w)\d+(?:\.\d+)?\s+\d+(?:\.\d+)?\s*$", title):
+        return None  # Numeric table cells do not establish a heading.
     letters = [char for char in title if char.isalpha()]
     if len(letters) < 4 or len(title.split()) > 15:
         return None
@@ -262,8 +260,9 @@ def _normalize_section(heading: str) -> str:
     if direct:
         return direct
     compact = re.sub(r"[^a-z]", "", heading.lower())
+    if compact in {"references", "bibliography"}:
+        return "references"  # Retain PDF drop-cap spacing, not substring matches.
     for term, section in (
-        ("references", "references"), ("bibliography", "references"),
         ("appendix", "body"), ("appendices", "body"), ("supplementary", "body"),
         ("abstract", "abstract"), ("relatedwork", "related_work"),
         ("background", "related_work"), ("introduction", "introduction"),

@@ -1375,6 +1375,15 @@ def _validated_outline_delivery(
     preview_plan = resolve_document_plan(sections=sections, contract=memory.survey_contract, config=config,
         title=title.strip(), visual_candidates=bound_visuals,
         supplied_figure_handles=[row["handle"] for row in supplied_figure_sources(context)], argument_plan=argument)
+    # Reject invented selections in the existing outline correction allowance,
+    # rather than accepting a plan that can only fail later during assembly.
+    documents = {row.handle: row.metadata.get("document_id") for row in context.source_handles}
+    inventory = {row.get("document_id"): {figure["path"] for figure in row.get("figures", [])}
+                 for row in context.results.get("supplied_analyses", [])}
+    for intent in preview_plan.visual_intents:
+        if intent.view == "supplied-data" and intent.figure_paths is not None:
+            if set(intent.figure_paths) - inventory.get(documents.get(intent.evidence_handles[0]), set()):
+                raise _RejectedOutline(ValueError("figure_paths must come from the registered analysis inventory"), response)
     budgeted = budget_document_plan(context, memory, config, preview_plan, response.get("length_request"))
     request = {key: budgeted.length_budget[key] for key in
         ("unit", "scope", "request_quote", "constraint", "min_words", "max_words", "target_words")
@@ -1801,8 +1810,8 @@ def _draft_document_with_recovery(
         payload["response_rules"].append("Choose either complete sections or a nonempty context_requests batch, never both.")
     if saved_reads:
         combined = [*(extra_context or []), *saved_reads]
-        payload["extra_tool_context"] = [report_tool_context(row) for row in combined[-6:]]
-        payload["extra_tool_context_omitted"] = max(0, len(combined) - 6)
+        payload["extra_tool_context"] = [report_tool_context(row) for row in combined]
+        payload["extra_tool_context_omitted"] = 0
     wanted = {row.section_id: row for row in sections}
     for attempt in range(2):
         response = None
@@ -1819,12 +1828,12 @@ def _draft_document_with_recovery(
                 saved_reads = read_context(calls)
                 can_read = False
                 combined = [*(extra_context or []), *saved_reads]
-                payload["extra_tool_context"] = [report_tool_context(row) for row in combined[-6:]]
-                payload["extra_tool_context_omitted"] = max(0, len(combined) - 6)
+                payload["extra_tool_context"] = [report_tool_context(row) for row in combined]
+                payload["extra_tool_context_omitted"] = 0
                 payload["source_reading"].update(available=False, max_requests=0, tools=[])
                 payload["output_schema"].pop("context_requests", None)
                 payload["response_rules"].append("The read batch is consumed. Return complete sections using confirmed passages and clearly retain unsupported or unavailable details as limitations.")
-                _emit(emit, f"Writer supplementing evidence with {len(calls)} registered read(s).")
+                _emit(emit, f"Writer read batch returned {len(saved_reads)} result(s); requesting complete sections in a new model call.")
                 response = None  # A transport failure must not replay this post-read call.
                 response = client.ask_json(WRITER_SYSTEM, _json_prompt(payload),
                     label="report-document-joint-reviser-evidence" if reviews is not None else "report-writer-document-evidence",
@@ -2061,24 +2070,37 @@ def _writer_task_context(
     selected = document_sections if section is None else [section]
     if not selected:
         raise ValueError("Writer needs at least one planned section.")
+    neighbors = narrative_context(memory, section, adopted_sections or [], context=context, config=config) if section else None
+    additions = (neighbors.pop("assembly_owned_content", []) if neighbors is not None else
+        supplied_data_delivery(context, config=config, plan=memory.document_plan,
+            section_ids=[row.section_id for row in memory.section_plan]) + _experiment_delivery_view(context, config))
     view = {
         "objective": report_objective(context, memory),
         "document_plan": document_plan_context(memory),
+        "source_comparisons": context.source_comparisons,
+        "comparison_status": dict(DERIVED_CONTEXT_STATUS),
+        "assembly_owned_content": additions,
         "source_handles": list({row["handle"]: row for target in selected
             for row in _handles_for_section(memory, target)}.values()),
         "metric_sources": _prompt_metrics(memory, section_id=section.section_id if section else None),
-        "extra_tool_context": [report_tool_context(row) for row in tools[-6:]],
-        "extra_tool_context_omitted": max(0, len(tools) - 6),
+        # Reads are already bounded by the gateway and session token budget.
+        # A second last-N filter can discard the conditions of an earlier claim.
+        "extra_tool_context": [report_tool_context(row) for row in tools],
+        "extra_tool_context_omitted": 0,
         "review_findings": [finding.model_dump(mode="json") for finding in (review.findings if review else [])],
         "review_findings_status": dict(REVIEW_OPINIONS_STATUS),
         "review_instructions": effective_revision_instructions(review),
     }
     if section is not None:
-        view.update(narrative_context=narrative_context(memory, section, adopted_sections or [], context=context, config=config),
+        view.update(narrative_context=neighbors,
             section_constraints=_section_constraints(section), length_requirement=_section_length_requirement(section),
             visual_requirements=visual_requirements(memory.document_plan, section),
             revision_preservation_requirement=_revision_preservation_requirement(
                 section=section, previous_draft=previous_draft, review=review))
+        # One shared writing input, including joint drafting and recovery;
+        # neighboring-prose context must not duplicate the same comparisons.
+        for key in ("source_comparisons", "comparison_status", "assembly_owned_content"):
+            view["narrative_context"].pop(key, None)
     return view
 
 
@@ -2170,8 +2192,6 @@ def _writer_payload(
             adopted_sections=[row.model_dump(mode="json") for row in (adopted_sections or [])],
             edit_scope={"eligible_section_ids": [row.section_id for row in selected],
                 "read_only": "Adopted section bodies, frozen document plan/title, sources, measurements and assembly-owned attachments."},
-            assembly_owned_content=supplied_data_delivery(context, config=config, plan=memory.document_plan,
-                section_ids=[row.section_id for row in memory.section_plan]) + _experiment_delivery_view(context, config),
             output_schema={"sections": [_writer_response_contract(row) for row in selected]},
             response_rules=["Return one object with sections: a list of complete existing section draft objects, exactly one per eligible section_id.",
                 "draft_markdown contains that section's body, not the title, a References block or another section's body.",
@@ -2318,11 +2338,7 @@ def _reviewer_context(
     genre = template.name if is_builtin_template(template, config) else ""
     read_tools = [spec for spec in report_tool_specs() if set(spec.permissions) == {"read"}]
     source_evidence = review_source_evidence(_handles_for_section(memory, section))
-    review_context = [row for row in (extra_context or []) if row.tool_name != "get_synthesis_brief"][-6:]
-    if len(review_context) < 6:
-        # Explicitly requested/saved summaries remain derived context on
-        # recheck and recovery, but cannot crowd original source results out.
-        review_context += [row for row in (extra_context or []) if row.tool_name == "get_synthesis_brief"][-(6 - len(review_context)):]
+    review_context = list(extra_context or [])
     payload = {
         "task": "review_one_report_section",
         "report_mode": context.report_mode,

@@ -209,15 +209,15 @@ class SourceBacktrackingTests(unittest.TestCase):
             self.assertEqual(self.search(gateway, "original passage").status, "ok")
         self.assertEqual(self.search(gateway, "original passage").status, "blocked")
 
-    def test_newly_fetched_evidence_survives_bounded_prompt_selection(self):
+    def test_all_authorized_reads_survive_writing_review_and_recovery(self):
         extra = [ReportToolResult(tool_name="search_source_chunks", status="ok",
             summary=f"evidence-{i}", content={"text": f"evidence-{i}"}) for i in range(8)]
         class Client:
             def ask_json(inner, system, prompt, **kwargs):
                 self.assertIn("evidence-7", prompt)
-                self.assertNotIn("evidence-0", prompt)
+                self.assertIn("evidence-0", prompt)
                 payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
-                self.assertEqual(payload["extra_tool_context_omitted"], 2)
+                self.assertEqual(payload["extra_tool_context_omitted"], 0)
                 return {"verdict": "pass"}
         kwargs = self.report_kwargs(Client())
         section = kwargs["memory"].section_plan[0]
@@ -230,9 +230,9 @@ class SourceBacktrackingTests(unittest.TestCase):
             previous_draft=None, review=None, source_batch_index=0, source_batch_count=1,
             include_previous_draft=False, draft_mode="initial")
         prompt = json.loads(prompt[prompt.index("{"):])
-        self.assertEqual(prompt["extra_tool_context_omitted"], 2)
+        self.assertEqual(prompt["extra_tool_context_omitted"], 0)
         self.assertEqual([row["summary"] for row in prompt["extra_tool_context"]],
-            [f"evidence-{i}" for i in range(2, 8)])
+            [f"evidence-{i}" for i in range(8)])
         recovery = _writer_recovery_prompt(context=self.context, memory=kwargs["memory"],
             section=section, config=kwargs["config"], previous_draft=None, review=None,
             draft_mode="initial", extra_context=extra)

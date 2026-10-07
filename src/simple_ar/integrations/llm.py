@@ -1027,9 +1027,7 @@ def _collect_chat_stream(stream_response: object) -> dict[str, Any]:
             if chunk_usage is not None:
                 usage = chunk_usage
             choices = _get_value(chunk, "choices")
-            if not isinstance(choices, list) or not choices:
-                continue
-            choice = choices[0]
+            choice = choices[0] if isinstance(choices, list) and choices else {}
             delta = _get_value(choice, "delta")
             content = _get_value(delta, "content") if delta is not None else None
             if content is None:
@@ -1041,11 +1039,19 @@ def _collect_chat_stream(stream_response: object) -> dict[str, Any]:
             value = _get_value(choice, "finish_reason")
             if value is not None:
                 finish_reason = str(value)
+            # A completed choice plus final accounting is the whole result.
+            # Some compatible gateways keep the SSE connection open afterwards;
+            # waiting for transport EOF can turn a completed response into a timeout.
+            if finish_reason is not None and chunk_usage is not None:
+                break
     except Exception as exc:
         # The response has already opened: a failure here may be billable even
         # when a gateway uses a generic exception with unfamiliar wording.
         # Never adopt the partial draft as a successfully completed response.
-        raise LLMStreamError(f"Response stream interrupted: {exc}") from exc
+        raise LLMStreamError(
+            f"Response stream interrupted: content_chars={sum(len(part) for part in parts)}, "
+            f"finish_reason={finish_reason!r}, usage_received={usage is not None}; {exc}"
+        ) from exc
     finally:
         close = getattr(stream_response, "close", None)
         if callable(close):

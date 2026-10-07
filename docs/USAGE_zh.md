@@ -110,7 +110,8 @@ SIMPLE_AR_LLM_STREAM=true
 - `SIMPLE_AR_LLM_API` 控制请求形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`，临时错误只在同一接口内有限重试；`chat` 会直接发送 Chat Completions 风格的 `messages`。已有的 `auto` 模式才会在 Responses 重试后再尝试 Chat，用于兼容只暴露其中一种接口的网关。
 - `SIMPLE_AR_LLM_STREAM=true` 在 `SIMPLE_AR_LLM_API=chat` 时启用 Chat Completions
   流式传输；客户端会在解析前拼接 chunks，服务商提供最终 usage 时仍会记录它。Responses
-  调用保持非流式。流式可以减少兼容网关的长时间非流式连接卡顿，但不会取消服务商或客户端超时。
+  调用保持非流式。完成标记和最终用量齐全后不再等待连接关闭；中断错误显示已收字符数及
+  完成/用量状态，不记录响应文本。流式可以减少兼容网关的长时间非流式连接卡顿，但不会取消服务商或客户端超时。
 - `SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM` 可选地指定 Chat Completions 的输出参数名：`max_tokens` 或 `max_completion_tokens`；`auto` 会在可能时根据模型名选择。
 - `SIMPLE_AR_LLM_REASONING_EFFORT` 是可选的、由模型文档定义的推理强度，例如 `low` 或 `high`，只会通过 Chat Completions 的 provider 扩展字段转发。`SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` 仅在调用方和客户端均未设置输出上限时作为兜底上限，不会覆盖显式的单次调用上限。
 - `SIMPLE_AR_LLM_THINKING` 可选，通过 Chat Completions 的 `extra_body` 传入 `thinking.type=enabled` 或 `disabled`，默认不传。仅对明确支持该参数的模型启用；强制思考模型不能关闭，`disabled` 也不能同时设置 `SIMPLE_AR_LLM_REASONING_EFFORT`。
@@ -133,6 +134,13 @@ SIMPLE_AR_LLM_STREAM=true
   也不要同时提交输入修订。
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制结构化 JSON 调用是否使用 provider 原生格式。默认 `auto` 尝试发送 `response_format={"type":"json_object"}`，仅在接口明确不支持时退回普通提示；普通文本调用不变。`off` 保留仅靠 prompt 和本地解析的模式，`json_object` 表示强制发送。已有 `.env` 明确写了 `off` 时继续尊重该选择，不静默覆盖。
 - 价格字段只影响 usage summary 中的费用估算；不填也会记录 token。
+
+服务商显示生成成功，不等于客户端已收到完整响应。遇到流式中断时，先核对错误中的
+`content_chars`、`finish_reason`、`usage_received`，再检查运行机器的网络出口；不要只靠
+增加重试或关闭超时处理持续断流。需要代理时，在实际运行进程中配置可达的 `HTTPS_PROXY`
+（以及需要的 `HTTP_PROXY` / `NO_PROXY`），不要把个人电脑的 `127.0.0.1` 地址直接复制到服务器。
+依赖临时 SSH 转发的运行会随转发关闭而失去通路，不能视为服务器独立部署完成。
+保留原会话和用量记录，确认旧进程结束后再恢复，避免重复执行或重复计费。
 
 ## 选择任务与最小输入
 

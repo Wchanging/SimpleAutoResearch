@@ -119,8 +119,10 @@ uv run simple-ar start --chat
 
 Describe your goal and answer the material questions. The model proposes a function
 and semantic settings; you confirm them before the same ordinary task configuration
-is saved. Execution choices remain explicit. Replies and named asset previews go to
-your configured model, so setup itself incurs API usage. `--resume-setup PATH` resumes
+is saved. Execution choices remain explicit. For code repair, chat can propose a test command using
+inspected project instructions; you confirm it and the editable scope before
+ordinary execution. An explicit `--validate` command is not replaced. Replies and
+named asset previews go to your configured model, so setup itself incurs API usage. `--resume-setup PATH` resumes
 the saved conversation and its accounting; it is not execution recovery or a general
 coding chat. Use structured setup with `--prepare-only` when you want no API calls.
 
