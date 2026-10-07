@@ -9,6 +9,8 @@ This file records implemented, user-visible changes in reverse chronological ord
 - Named TOML model profiles keep URL, model and credential reference together, with separate
   text/code routes and local inspection through `simple-ar models`. Existing `.env` setup remains
   supported; research-session recovery detects connection changes without storing secret keys.
+  Profiles can opt into SDK HTTP/2 with the `http2` extra; local inspection shows streaming,
+  protocol preference and timeout. HTTP/1.1 remains the default.
 - New report plans inline only selected analysis figures; other charts remain in the linked analysis package.
   Package links are consolidated, while recorded legacy visual intents retain their meaning. Findings from
   rejected joint revisions stay in editing history rather than becoming defects of the delivered original.

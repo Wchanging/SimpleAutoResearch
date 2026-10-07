@@ -94,6 +94,8 @@ class ModelProfileTests(unittest.TestCase):
     def test_binding_excludes_secrets_allows_key_rotation_and_detects_changes(self):
         client = LLMClient.from_env()
         binding = client.connection_binding()
+        self.assertNotIn("http2", binding["settings"])
+        self.assertNotIn("http2", binding["code_route"]["connection"])
         self.assertNotIn("writer-secret", json.dumps(binding))
         self.assertNotIn("writer-secret", repr(client._settings))
         os.environ["WRITER_KEY"] = "rotated"
@@ -155,3 +157,21 @@ class ModelProfileTests(unittest.TestCase):
         self.path.write_text(CATALOG.replace('code = "coder"', 'code = "writer"'), encoding="utf-8")
         chosen = LLMClient.from_env(model="profile:coder", purpose="code")
         self.assertEqual(LLMClient.for_task(client=chosen, model=chosen.model).model, "coder-model")
+
+    def test_http2_is_opt_in_transport_not_provider_payload(self):
+        original_binding = LLMClient.from_env().connection_binding()
+        self.path.write_text(CATALOG.replace('stream = true', 'stream = true\nhttp2 = true'), encoding="utf-8")
+        client = LLMClient.from_env()
+        self.assertNotEqual(client.connection_binding(), original_binding)
+        with patch("openai.DefaultHttpxClient") as transport, patch("openai.OpenAI") as factory:
+            factory.return_value.chat.completions.create.return_value = {
+                "choices": [{"message": {"content": "ok"}}]}
+            self.assertEqual(client.ask("system", "user"), "ok")
+            transport.assert_called_once_with(http2=True)
+            self.assertIs(factory.call_args.kwargs["http_client"], transport.return_value)
+            self.assertNotIn("http2", factory.return_value.chat.completions.create.call_args.kwargs)
+            factory.return_value.close.assert_called_once()
+        with patch("openai.DefaultHttpxClient", side_effect=ImportError), patch("openai.OpenAI") as factory:
+            with self.assertRaisesRegex(LLMError, "optional dependency"):
+                client.ask("system", "user")
+            factory.assert_not_called()

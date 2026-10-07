@@ -218,6 +218,18 @@ in the running process. A personal computer's `127.0.0.1` address is not that pr
 Temporary SSH forwarding stops working when the tunnel closes; it is not an independent server deployment.
 Preserve the session and usage records, and confirm the old process has stopped before resuming.
 
+Named connections use the profile's `stream`, `request_timeout_sec`, and `retry_attempts`, not
+legacy `SIMPLE_AR_LLM_*` connection settings. Inspect selection with `simple-ar models` first.
+Streaming can still wait a long time for the first response headers. Small prompts do not guarantee
+low latency: use the real profile timeout (180 seconds by default) for connectivity checks rather
+than silently shortening it. This is a transport timeout, not an overall wall-clock deadline;
+unlimited waiting or retries are not a remedy.
+
+Diagnose host/connection selection, authentication/model listing, request/response headers, first
+SSE event, completion/usage, parsing, and saved artifacts/accounting separately. A successful model
+list does not validate generation. Finish with uninstrumented native calls, longer input/output and
+resume checks; distinguish diagnostic-wrapper failures from product failures.
+
 ## Choose a task and its smallest input
 
 `research-session` accepts a goal, available materials, and explicit execution

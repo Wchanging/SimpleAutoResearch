@@ -107,7 +107,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                     except ModelConfigError:
                         credential = "missing"
                     print_line(f"{name}: {profile.api} / {profile.model} / {profile.base_url}; "
-                               f"capabilities={','.join(profile.capabilities)}; credential={credential}")
+                               f"capabilities={','.join(profile.capabilities)}; credential={credential}; "
+                               f"stream={profile.stream}; http2={profile.http2}; timeout={profile.request_timeout_sec}s")
                 print_line(f"Routes: {dict(catalog.routes)}")
                 print_line("Local configuration only; provider capabilities have not been probed.")
         except ModelConfigError as exc:

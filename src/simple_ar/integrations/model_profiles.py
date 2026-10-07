@@ -24,6 +24,7 @@ class ModelProfile(BaseModel):
     api_key_env: str
     capabilities: list[Literal["text", "code", "vision", "image_generate", "image_edit"]]
     stream: bool = False
+    http2: bool = False
     request_timeout_sec: float = Field(default=180.0, gt=0)
     max_output_tokens: int | None = Field(default=None, gt=0)
     retry_attempts: int = Field(default=3, ge=1)

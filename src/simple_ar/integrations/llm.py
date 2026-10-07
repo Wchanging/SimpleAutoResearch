@@ -89,6 +89,8 @@ class LLMSettings:
         stream: Use streamed Chat Completions responses and assemble their
             content before returning. Responses API calls remain non-streamed
             because this client only normalizes Chat Completions chunks.
+        http2: Opt in to the SDK's HTTP/2 transport; requires the optional
+            HTTP/2 dependency and does not change the provider request body.
     """
 
     model: str = "gpt-4o-mini"
@@ -109,6 +111,7 @@ class LLMSettings:
     thinking_mode: str = ""
     reasoning_output_tokens: int | None = None
     stream: bool = False
+    http2: bool = False
 
 
 @dataclass(frozen=True)
@@ -203,6 +206,8 @@ class LLMClient:
         """
         if not settings.api_key:
             raise LLMError("OPENAI_API_KEY is not configured")
+        if settings.http2 and settings.transport_backend != "openai":
+            raise LLMError("http2 is supported by the OpenAI SDK transport only")
         self.model = settings.model
         self._openai_model = settings.model.strip()
         self._provider_model = _litellm_model(settings)
@@ -416,8 +421,10 @@ class LLMClient:
         return {
             "profile": self._profile_name,
             "api_key_env": catalog.profiles[self._profile_name].api_key_env,
-            "settings": {key: value for key, value in vars(self._settings).items() if key != "api_key"},
-            "code_route": {"profile": code_name, "connection": code.model_dump(mode="json")} if code else None,
+            "settings": {key: value for key, value in vars(self._settings).items()
+                         if key != "api_key" and not (key == "http2" and value is False)},
+            "code_route": {"profile": code_name, "connection": code.model_dump(
+                mode="json", exclude={"http2"} if not code.http2 else set())} if code else None,
         }
 
     @classmethod
@@ -534,6 +541,7 @@ class LLMClient:
                         self._settings.transport_backend,
                         api_mode,
                         mode_request,
+                        http2=self._settings.http2,
                     )
                     if mode_request.get("stream") is True:
                         response = _collect_chat_stream(response)
@@ -1469,10 +1477,12 @@ def _api_attempt_order(api_mode: str) -> list[str]:
     return ["responses"]
 
 
-def _call_provider(backend: str, api_mode: str, request: dict[str, Any]) -> object:
+def _call_provider(backend: str, api_mode: str, request: dict[str, Any], *, http2: bool = False) -> object:
     if backend == "litellm":
         return _call_litellm(api_mode, request)
     if backend == "openai":
+        if http2:
+            return _call_openai_sdk(api_mode, request, http2=True)
         return _call_openai_sdk(api_mode, request)
     raise ValueError(f"Unsupported LLM transport backend: {backend}")
 
@@ -1485,8 +1495,8 @@ def _call_litellm(api_mode: str, request: dict[str, Any]) -> object:
     raise ValueError(f"Unsupported LLM API mode: {api_mode}")
 
 
-def _call_openai_sdk(api_mode: str, request: dict[str, Any]) -> object:
-    from openai import OpenAI
+def _call_openai_sdk(api_mode: str, request: dict[str, Any], *, http2: bool = False) -> object:
+    from openai import OpenAI, DefaultHttpxClient
 
     payload = dict(request)
     api_key = str(payload.pop("api_key", "") or "")
@@ -1505,7 +1515,19 @@ def _call_openai_sdk(api_mode: str, request: dict[str, Any]) -> object:
         client_kwargs["timeout"] = timeout
     if base_url:
         client_kwargs["base_url"] = str(base_url)
-    client = OpenAI(**client_kwargs)
+    http_client = None
+    if http2:
+        try:
+            http_client = DefaultHttpxClient(http2=True)
+        except ImportError:
+            raise LLMError("HTTP/2 requires the optional dependency: install simple-autoresearch[http2]") from None
+        client_kwargs["http_client"] = http_client
+    try:
+        client = OpenAI(**client_kwargs)
+    except BaseException:
+        if http_client is not None:
+            http_client.close()
+        raise
     payload = _drop_none_values(payload)
     try:
         if api_mode == "responses":

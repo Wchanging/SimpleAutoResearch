@@ -38,6 +38,11 @@ unless their own model selector is explicit. A selected code connection survives
 
 Each profile requires `api`, `base_url`, `model`, `api_key_env` and `capabilities`.
 Text adapters are `openai_chat` and `openai_responses`; Chat supports `stream=true`.
+Optional `http2=true` uses the SDK's HTTP/2 negotiation; install with
+`pip install 'simple-autoresearch[http2]'` (source checkout: `uv sync --extra http2`).
+It is disabled by default, never changes providers, and is not a guarantee against gateway stalls.
+Test longer input/output on the execution host before selecting it. Changing it on a saved named
+session is a connection change; old HTTP/1.1 bindings remain compatible when it is omitted/false.
 Supported optional fields: `request_timeout_sec`, `max_output_tokens`, `retry_attempts`,
 `retry_base_delay_sec`, `retry_max_delay_sec`, `reasoning_effort`, `thinking_mode`,
 `reasoning_output_tokens`, `json_response_format`, `chat_token_limit_param`,

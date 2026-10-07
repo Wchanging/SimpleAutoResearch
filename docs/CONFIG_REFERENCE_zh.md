@@ -37,6 +37,10 @@ simple-ar start --chat --model profile:daily
 
 每个 profile 必填 `api`、`base_url`、`model`、`api_key_env`、`capabilities`。
 文本接口支持 `openai_chat`、`openai_responses`，目前仅 Chat 支持 `stream=true`。
+可选 `http2=true` 使用 SDK 的 HTTP/2 协商；先安装 `pip install 'simple-autoresearch[http2]'`
+（源码使用 `uv sync --extra http2`）。默认关闭，不切换服务商，也不能保证消除网关卡顿；
+选择前在运行机器验证长输入和长输出。修改已保存任务的此选项属于连接变化；省略或false
+仍兼容此前HTTP/1.1绑定。
 可选字段：`request_timeout_sec`、`max_output_tokens`、`retry_attempts`、
 `retry_base_delay_sec`、`retry_max_delay_sec`、`reasoning_effort`、`thinking_mode`、
 `reasoning_output_tokens`、`json_response_format`、`chat_token_limit_param`、
