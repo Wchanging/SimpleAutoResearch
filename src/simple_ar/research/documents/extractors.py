@@ -68,6 +68,9 @@ def document_extraction_limitations(records: list[DocumentRecord]) -> tuple[str,
     notes = []
     for record in records:
         coverage = record.metadata.get("fulltext_extraction", {}).get("coverage", {})
+        if coverage.get("unpaired_unicode_replacements"):
+            notes.append(f"Source {record.document_id} contains {coverage['unpaired_unicode_replacements']} "
+                         "unpaired Unicode characters replaced during extraction; affected text needs source inspection.")
         if coverage.get("truncated") is True:
             notes.append(f"Source {record.document_id} extracted {coverage.get('extracted_pages')}/"
                          f"{coverage.get('total_pages')} PDF pages; unextracted pages are unavailable. "
@@ -189,7 +192,10 @@ def _parse_hint(
             hint=hint,
         )
 
+    original_replacements = text.count("\ufffd")
     text = _normalize_text(text)
+    if text.count("\ufffd") > original_replacements:
+        coverage["unpaired_unicode_replacements"] = text.count("\ufffd") - original_replacements
     if not text.strip():
         return record, _row(
             record,
@@ -288,12 +294,15 @@ class _HTMLTextParser(HTMLParser):
         super().__init__()
         self.parts: list[str] = []
         self.skip_depth = 0
+        self.anchor: tuple[str, int] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
         if tag in self.SKIP_TAGS:
             self.skip_depth += 1
         elif not self.skip_depth:
+            if tag == "a":
+                self.anchor = (dict(attrs).get("href") or "", len(self.parts))
             if tag in self.BLOCK_TAGS or tag in {"br", "hr"}:
                 self.parts.append("\n")
                 if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
@@ -305,6 +314,12 @@ class _HTMLTextParser(HTMLParser):
         tag = tag.lower()
         if tag in self.SKIP_TAGS and self.skip_depth:
             self.skip_depth -= 1
+        elif not self.skip_depth and tag == "a" and self.anchor is not None:
+            target, start = self.anchor
+            label = "".join(self.parts[start:]).strip()
+            if target and target != label:
+                self.parts.append(f" ({target})")
+            self.anchor = None
         elif not self.skip_depth and tag in self.BLOCK_TAGS:
             self.parts.append("\n")
 
@@ -400,6 +415,11 @@ def _read_text(path: Path) -> str:
 
 
 def _normalize_text(text: str) -> str:
+    # Some PDF backends return UTF-16 surrogate code units instead of Unicode
+    # scalars. Preserve valid pairs (including mathematical symbols); malformed
+    # units become visible replacement characters, never silently dropped.
+    if re.search(r"[\ud800-\udfff]", text):
+        text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
     repaired = _repair_common_mojibake(text)
     return re.sub(r"\n{3,}", "\n\n", repaired.replace("\r\n", "\n").replace("\r", "\n")).strip() + "\n"
 

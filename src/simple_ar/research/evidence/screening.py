@@ -37,6 +37,7 @@ def screen_papers_with_llm(
     papers: Sequence[Mapping[str, Any]],
     config: Mapping[str, object] | None = None,
     emit: EmitMessage | None = None,
+    question_assessments: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Coarse-screen and rerank papers using bounded structured LLM calls.
 
@@ -45,6 +46,8 @@ def screen_papers_with_llm(
     Invalid or unknown paper identifiers are ignored.  If reranking returns no
     usable rows, the coarse decisions are deterministically prioritized instead
     of widening the shortlist or silently selecting every paper.
+    Optional question_assessments collects metadata-only task gaps from these
+    same calls, including an all-drop result; the return type stays unchanged.
     """
 
     settings = dict(config or {})
@@ -59,6 +62,12 @@ def screen_papers_with_llm(
         max_shortlist,
     )
     required_facets = _required_facets(settings)
+    assessment_rows: list[dict[str, Any]] = []
+    def finish(decisions):
+        if question_assessments is not None:
+            question_assessments.extend(_question_assessments(
+                assessment_rows, research_plan_json, decisions))
+        return decisions
     coarse_decisions = _coarse_screen(
         client,
         topic=topic,
@@ -68,9 +77,10 @@ def screen_papers_with_llm(
         min_shortlist=min_shortlist,
         config=settings,
         emit=emit,
+        question_assessments=assessment_rows,
     )
     if not coarse_decisions:
-        return []
+        return finish([])
 
     known_ids = {_paper_id(paper, index) for index, paper in enumerate(paper_rows, start=1)}
     valid_coarse = [
@@ -82,7 +92,7 @@ def screen_papers_with_llm(
         if _decision_value(row.get("decision")) == "keep"
     }
     if not kept_ids:
-        return valid_coarse
+        return finish(valid_coarse)
 
     paper_by_id = {
         _paper_id(paper, index): paper
@@ -108,13 +118,14 @@ def screen_papers_with_llm(
         max_shortlist=max_shortlist,
         min_shortlist=min_shortlist,
         emit=emit,
+        question_assessments=assessment_rows,
     )
     if not reranked:
-        return _coarse_decisions_with_priorities(
+        return finish(_coarse_decisions_with_priorities(
             valid_coarse,
             max_shortlist=max_shortlist,
-        )
-    return _merge_decisions(
+        ))
+    return finish(_merge_decisions(
         coarse_decisions=valid_coarse,
         rerank_decisions=reranked,
         reranked_ids={_paper_id(paper, index) for index, paper in enumerate(rerank_input, start=1)},
@@ -122,7 +133,47 @@ def screen_papers_with_llm(
         min_shortlist=min_shortlist,
         required_facets=required_facets,
         papers_by_id=paper_by_id,
-    )
+    ))
+
+
+def _question_assessments(rows, research_plan_json, decisions):
+    """Consolidate batch observations by actual question, never generic facet coverage."""
+    if not rows:
+        return []
+    plan = json.loads(research_plan_json)
+    questions = plan.get("research_questions", {}) if isinstance(plan, Mapping) else {}
+    questions = questions.get("questions", []) if isinstance(questions, Mapping) else questions
+    if not isinstance(questions, list):
+        return []
+    kept = {row["paper_id"] for row in decisions if row.get("decision") == "keep"}
+    output = []
+    for question in questions:
+        if not isinstance(question, Mapping) or question.get("required") is False:
+            continue
+        qid = question.get("question_id")
+        matched = [row for row in rows if row.get("question_id") == qid and qid and
+                   row.get("status") in {"direct_candidate", "context_only", "missing"}]
+        observations = []
+        for row in matched:
+            ids = row.get("paper_ids", [])
+            if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids):
+                raise ValueError("Question assessment paper_ids must be a list of known identifiers.")
+            ids = [i for i in dict.fromkeys(ids) if i in kept]
+            status = row["status"] if ids else "missing"
+            observations.append({"question_id": qid, "question": str(question.get("question") or ""),
+                "status": status, "paper_ids": ids, "reason": str(row.get("reason") or "")[:500],
+                "new_source_queries": _new_source_queries(row.get("new_source_queries", [])),
+                "scope": "candidate_metadata_not_read_evidence"})
+        if not observations:
+            continue  # Old model responses do not acquire invented question conclusions.
+        priority = {"direct_candidate": 2, "context_only": 1, "missing": 0}
+        best = max(priority[row["status"]] for row in observations)
+        chosen = [row for row in observations if priority[row["status"]] == best]
+        output.append({**chosen[0],
+            "paper_ids": list(dict.fromkeys(i for row in chosen for i in row["paper_ids"])),
+            "reason": " ".join(dict.fromkeys(row["reason"] for row in chosen))[:500],
+            "new_source_queries": list(dict.fromkeys(q for row in chosen for q in row["new_source_queries"]))[:2]})
+    return output
 
 
 def read_paper_notes_with_llm(
@@ -161,7 +212,11 @@ def read_paper_notes_with_llm(
                     if front_matter_by_document is not None else "",
                 revision_context_json=json.dumps(revision_context_by_document.get(_paper_id(paper, index), {}), ensure_ascii=False)
                     if revision_context_by_document is not None else "",
-            ),
+            ) + "\nOptional new_source_queries: at most two nonempty strings, each <=500 characters. "
+            "Request other sources only for a user subquestion whose needed evidence is missing "
+            "from this source's available original text; otherwise []. This is a request, not "
+            "permission to search or proof of absence. followup_queries still locates passages "
+            "in saved local text only; never repurpose it as external search.",
             label=_paper_id(paper, index),
         )
         for index, paper in enumerate(paper_rows, start=1)
@@ -224,6 +279,7 @@ def _coarse_screen(
     min_shortlist: int,
     config: Mapping[str, object],
     emit: EmitMessage | None,
+    question_assessments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     batches = _batched(papers, _screening_batch_size(config))
     if not batches:
@@ -260,6 +316,9 @@ def _coarse_screen(
     for response in responses:
         if not isinstance(response, Mapping):
             continue
+        assessments = response.get("question_assessments", [])
+        if isinstance(assessments, list):
+            question_assessments.extend(row for row in assessments if isinstance(row, Mapping))
         raw = response.get("decisions")
         if not isinstance(raw, list):
             continue
@@ -280,6 +339,7 @@ def _rerank(
     max_shortlist: int,
     min_shortlist: int,
     emit: EmitMessage | None,
+    question_assessments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     if not papers:
         return []
@@ -308,11 +368,19 @@ def _rerank(
             ),
             max_shortlist=max_shortlist,
             min_shortlist=min_shortlist,
+            question_assessments_json=json.dumps(question_assessments, ensure_ascii=False),
         ),
         label="read-rerank",
     )
     if not isinstance(response, Mapping):
         return []
+    assessments = response.get("question_assessments", [])
+    if isinstance(assessments, list) and assessments:
+        # This existing call sees all coarse decisions and batch observations.
+        # Replace only questions it actually reassesses; preserve omitted gaps.
+        qids = {row.get("question_id") for row in assessments if isinstance(row, Mapping)}
+        question_assessments[:] = [row for row in question_assessments if row.get("question_id") not in qids]
+        question_assessments.extend(row for row in assessments if isinstance(row, Mapping))
     raw = response.get("ranked_papers")
     if not isinstance(raw, list):
         raw = response.get("decisions")
@@ -577,6 +645,8 @@ def _merge_decisions(
         max_shortlist=max_shortlist,
         required_facets=required_facets,
         papers_by_id=papers_by_id,
+        excluded_ids={paper_id for paper_id, row in rerank_by_id.items()
+                      if _decision_value(row.get("decision")) == "drop"},
     )
     return output
 
@@ -589,6 +659,7 @@ def _backfill_shortlist(
     max_shortlist: int,
     required_facets: list[str],
     papers_by_id: Mapping[str, Mapping[str, Any]],
+    excluded_ids: set[str],
 ) -> None:
     """Backfill plausible candidates when model reranking is over-conservative."""
 
@@ -615,6 +686,8 @@ def _backfill_shortlist(
         if _decision_value(row.get("decision")) == "keep":
             continue
         paper_id = str(row.get("paper_id") or "")
+        if paper_id in excluded_ids:
+            continue  # Explicit semantic rejection cannot be undone to meet a quota.
         coarse = coarse_by_id.get(paper_id, {})
         coarse_decision = _decision_value(coarse.get("decision"))
         relevance = _score_value(
@@ -622,7 +695,7 @@ def _backfill_shortlist(
             row.get("coarse_relevance_score"),
             coarse.get("coarse_relevance_score"),
         )
-        if coarse_decision != "keep" and relevance < 3:
+        if coarse_decision != "keep":
             continue
         candidate = dict(row)
         candidate["_backfill_score"] = relevance + _score_value(
@@ -829,8 +902,16 @@ def _normalize_paper_note(
         "limitation": limitation_text or (limitations[0] if limitations else "Not specified."),
         "relevance": _text_field(row, "relevance") or relation or "Not specified.",
         "followup_queries": [query[:500] for query in _string_items(row.get("followup_queries"), limit=2)],
+        "new_source_queries": _new_source_queries(row.get("new_source_queries", [])),
         "bibliographic_fields": row.get("bibliographic_fields", []) if isinstance(row.get("bibliographic_fields", []), list) else [],
     }
+
+
+def _new_source_queries(value: object) -> list[str]:
+    if (not isinstance(value, list) or len(value) > 2 or any(
+            not isinstance(q, str) or not q.strip() or len(q.strip()) > 500 for q in value)):
+        raise ValueError("new_source_queries requires at most two nonempty strings of <=500 characters")
+    return list(dict.fromkeys(q.strip() for q in value))
 
 
 def _normalize_claim_scopes(value: object, paper_id: str) -> list[dict[str, Any]]:

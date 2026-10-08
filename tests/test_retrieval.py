@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from simple_ar.code_task.analysis.index import build_codebase_index
-from simple_ar.core.artifacts import read_json, read_jsonl, write_json, write_jsonl, write_text
+from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
 from simple_ar.retrieval.chunking import build_artifact_chunks
 from simple_ar.retrieval.index import build_artifact_index
 from simple_ar.retrieval.search import search_artifacts
@@ -104,6 +104,14 @@ class RetrievalTests(unittest.TestCase):
             code_results = next(row for row in code_index["files"] if row["path"] == results["path"])
             self.assertEqual(results["summary"], "json object keys: accuracy")
             self.assertEqual(code_results["summary"], results["summary"])
+            # JSONL framing must preserve Unicode separators within strings,
+            # including text retained from sources and generated reports.
+            rows = [{"text": "next\u0085line\u2028paragraph\u2029end"}, {"text": "second record"}]
+            jsonl = run_dir / "unicode.jsonl"
+            write_jsonl(jsonl, rows)
+            self.assertEqual(read_jsonl(jsonl), rows)
+            write_text(jsonl, read_text(jsonl).replace("\n", "\r\n"))
+            self.assertEqual(read_jsonl(jsonl), rows)
 
     def test_chunking_writes_line_addressable_chunks(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

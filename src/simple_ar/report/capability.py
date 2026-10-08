@@ -409,14 +409,20 @@ def _attach_table_analyses(
     plan = request.document_plan
     for index, ref in enumerate(request.table_analyses, start=1):
         prefix = f"analyses/analysis-{index:03d}"
-        result = copy_analysis_package(context.require_input(ref), context.store.root / prefix)
+        source = context.require_input(ref)
+        if ref.schema == "code_analysis.v1":
+            from simple_ar.result_analysis.script_project import copy_code_analysis_package
+            result = copy_code_analysis_package(source, context.store.root / prefix)
+        else:
+            result = copy_analysis_package(source, context.store.root / prefix)
         block = analysis_delivery_block(result, index=index,
             handle=request.analysis_handles.get(ref.path, ""), config=config, plan=plan,
             section_ids=[row.section_id for row in sections])
         for figure in block["figures"]:
             figures.append(ReportFigureRecord(figure_id=f"supplied-analysis-{index}-{len(figures)+1}",
                 title="Supplied descriptive data", path=figure["path"],
-                caption=figure["caption"], source_artifacts=[ref.path], anchor=block["section_id"]))
+                caption=figure["caption"], source_artifacts=[ref.path], anchor=block["section_id"],
+                exports=figure.get("exports", {})))
         sections = list(attach_delivery_block(sections, block))
         attachments.extend(context.store.ref(item.relative_to(context.store.root), kind="analysis_attachment")
                            for item in (context.store.root / prefix).rglob("*") if item.is_file())

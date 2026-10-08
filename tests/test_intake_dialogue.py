@@ -1,7 +1,9 @@
 import json
+from io import BytesIO
 from pathlib import Path
 import tempfile
 import tomllib
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -55,24 +57,406 @@ class AnalysisReportProposalTests(unittest.TestCase):
 
 
 class IntakeDialogueTests(unittest.TestCase):
-    def test_invalid_proposals_can_be_clarified_without_automatic_extra_calls(self):
+    def test_supplied_paper_url_becomes_attributed_excerpt_and_prepared_material_with_restore(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            url, repository = 'https://example.test/paper', 'https://github.com/example/research'
+            args = self.args(root, '--kind', 'reproduction', '--document', url, '--fulltext',
+                '--hypothesis', 'Supplied claim', '--dataset', 'User data', '--expected-outcome', 'Compare score',
+                '--metric', 'score', '--command', 'python', 'run.py')
+            args.goal = 'Inspect the paper at ' + url
+            response = BytesIO(('<html><p>Implementation: ' + repository + '</p><p>' + 'x' * 9000 + '</p></html>').encode())
+            response.headers = {'Content-Type': 'text/html'}
+            self.assertEqual(args.document, [url])
+            client = Client(proposal('reproduction'))
+            with patch('simple_ar.research.documents.fulltext.urllib.request.urlopen', return_value=response) as fetch:
+                resolved = self.converse(args, client, ['y', 'y'])
+            fetch.assert_called_once()
+            facts = client.requests[0]['assets']  # Source acquired before the first proposal.
+            preview = facts['paper_previews'][0]
+            self.assertEqual(preview['source_url'], url)
+            self.assertEqual(len(preview['text']), 8000)
+            self.assertTrue(preview['text_truncated'])
+            self.assertIn('not a full-paper', preview['limitations'])
+            manifest = read_json(resolved._start_root / 'paper_acquisitions' / '1' / 'fulltext_manifest.json')
+            self.assertEqual(manifest['budget']['max_fulltext_documents'], 1)
+            self.assertEqual(manifest['budget']['max_fulltext_fetch_attempts'], 1)
+            self.assertEqual(manifest['budget']['max_pdf_mb'], 20)
+            self.assertTrue(manifest['allow_pdf_download'])
+            self.assertTrue(manifest['budget']['keep_raw_pdf'])
+            request = {'role': 'project', 'url': repository,
+                       'basis': [{'path': preview['source_path'], 'quote': repository}]}
+            self.assertIsNone(resolved.project)
+            self.assertIsNone(resolved.cwd)
+            validate_proposal(proposal('reproduction', acquisition_proposal=request), resolved, set(), facts=facts)
+            with patch.object(resolved, 'cwd', root), self.assertRaisesRegex(ValueError, 'cannot be replaced'):
+                validate_proposal(proposal('reproduction', acquisition_proposal=request), resolved, set(), facts=facts)
+            with self.assertRaisesRegex(ValueError, 'does not match'):
+                validate_proposal(proposal('reproduction', acquisition_proposal=request), resolved, set(), facts={})
+            resumed = self.args(root, '--resume-setup', str(resolved._start_root))
+            with patch('simple_ar.research.documents.fulltext.urllib.request.urlopen') as fetch:
+                restored = self.converse(resumed, Client(), [])
+            fetch.assert_not_called()
+            self.assertEqual(restored.document, resolved.document)
+            self.assertEqual(restored.paper_sources, resolved.paper_sources)
+            # Follow an inspected official page through the same document owner,
+            # without adopting it as executable project/data or refetching on restore.
+            from simple_ar.cli.intake_dialogue import _adopt_acquisition
+            from simple_ar.core.budget import BudgetLedger
+            instructions = 'https://example.test/instructions'
+            supporting = {'role': 'material', 'url': instructions,
+                          'basis': [{'path': preview['source_path'], 'quote': instructions}]}
+            extended_facts = {**facts, 'material_excerpts': [
+                {'path': preview['source_path'], 'text': 'Official instructions: ' + instructions}]}
+            validated = validate_proposal(proposal('reproduction', acquisition_proposal=supporting),
+                                          resolved, set(), facts=extended_facts)
+            acquired = {'request': validated['acquisition_proposal'], 'approved': True,
+                        'reply': 'y', 'allow_pdf_download': False}
+            support_root = root / 'support-setup'
+            support_root.mkdir()
+            state = {'acquisitions': [acquired], 'paper_acquisitions': []}
+            ledger = BudgetLedger(storage_path=support_root / 'setup_budget.json')
+            response = BytesIO(b'<html><p>Official entry: python example.py</p></html>')
+            response.headers = {'Content-Type': 'text/html'}
+            with patch('simple_ar.research.preparation_assets.public_document_response', return_value=response) as fetch:
+                self.assertTrue(_adopt_acquisition(resolved, state, acquired, root=support_root, ledger=ledger))
+                self.assertTrue(_adopt_acquisition(resolved, state, acquired, root=support_root, ledger=ledger))
+            fetch.assert_called_once_with(instructions, max_bytes=20 * 1024 * 1024)
+            self.assertEqual(len(ledger.entries), 1)
+            self.assertEqual(ledger.entries[0].status, 'settled')
+            self.assertEqual(ledger.entries[0].actual['download_requests'], 1)
+            self.assertIsNone(resolved.project)
+            self.assertIn(instructions, resolved.paper_sources.values())
+            resolved.cwd = root  # Separate prepared-command configuration, after acquisition proposal checks.
+            resolved.prepare_only = True
+            with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'):
+                config = prepare_start(resolved)
+            values = research_defaults(['research-session', '--config', str(config)])
+            self.assertEqual(values['task_kind'], 'reproduction')
+            self.assertEqual(values['command_argv'], ['python', 'run.py'])
+            self.assertFalse((root / 'run.py').exists())  # Neither install nor execution.
+
+    def test_paper_url_requires_read_consent_and_redirected_pdf_requires_separate_permission(self):
+        url = 'https://example.test/paper'
+        for approved in (False, True):
+            with self.subTest(approved=approved), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                args = self.args(root, '--kind', 'reproduction')
+                args.goal = 'Inspect ' + url
+                client = Client(proposal('reproduction', assets=[{'role': 'paper', 'path_quote': url}]),
+                                proposal('reproduction', questions=['Please supply local paper material']))
+                response = BytesIO(b'%PDF-1.7\nnot a complete PDF')
+                response.headers = {'Content-Type': 'application/pdf'}
+                response.geturl = lambda: 'https://example.test/paper.pdf'
+                with patch('simple_ar.research.documents.fulltext.urllib.request.urlopen', return_value=response) as fetch:
+                    self.assertIsNone(self.converse(args, client, ['y', 'n'] if approved else ['n', 'stop']))
+                self.assertEqual(fetch.call_count, int(approved))
+                state = read_json(self.draft(root))
+                self.assertEqual(state['arguments']['document'], [])
+                if approved:
+                    entry = state['paper_acquisitions'][0]
+                    self.assertFalse(entry['allow_pdf_download'])
+                    manifest = read_json(self.draft(root).parent / 'paper_acquisitions' / '1' / 'fulltext_manifest.json')
+                    self.assertEqual(manifest['documents'][0]['hints'][0]['reason'], 'pdf_download_disabled')
+                    resumed = self.args(root, '--resume-setup', str(self.draft(root).parent))
+                    with patch('simple_ar.research.documents.fulltext.urllib.request.urlopen') as retry:
+                        self.assertIsNone(self.converse(resumed, Client(), []))
+                    retry.assert_not_called()
+
+    def test_paper_url_interruption_is_retained_without_refetch(self):
+        from simple_ar.cli.intake_dialogue import _adopt_paper_url
+        from simple_ar.core.artifacts import write_json
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            args = self.args(root, '--kind', 'reproduction')
+            entry = {'url': 'https://example.test/paper', 'allow_pdf_download': False}
+            state = {'paper_acquisitions': [entry]}
+            write_json(root / 'paper_acquisitions' / '1' / 'receipt.json', {**entry, 'status': 'started'})
+            with patch('simple_ar.research.documents.fulltext.urllib.request.urlopen') as fetch, \
+                 patch('simple_ar.cli.intake_dialogue.print_line'):
+                self.assertFalse(_adopt_paper_url(args, state, entry, root=root))
+            fetch.assert_not_called()
+            self.assertEqual(entry['receipt']['status'], 'started')
+            self.assertEqual(args.document, [])
+
+    def test_method_figure_dialogue_requires_no_fabricated_dataset(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            args = self.args(root, '--kind', 'figure')
+            args.goal = 'Draw observations → comparison → evidence, as an editable method diagram, not measured results.'
+            resolved = self.converse(args, Client(proposal('figure')), ['y'])
+            self.assertEqual(resolved.kind, 'figure')
+            self.assertIsNone(resolved.data_file)
+            self.assertEqual(resolved.goal, args.goal)
+            with self.assertRaisesRegex(ValueError, 'Data semantics'):
+                validate_proposal(proposal('figure', options={'value_column': ['invented']}), args, set())
+
+    def test_custom_analysis_dialogue_uses_code_path_without_requiring_preset_columns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data = root / 'measurements.csv'
+            data.write_text('method,cost,accuracy\nA,1,70\nB,3,78\n')
+            args = self.args(root, '--kind', 'data_analysis', '--data-file', str(data), locked={'kind'})
+            args.goal = 'Draw cost/accuracy and a custom method diagram in one figure. Rows are method summaries, not repeated trials.'
+            client = Client(proposal('data_analysis', options={'scripted': True,
+                'observation_unit': 'method summary', 'value_unit': 'accuracy percent; cost seconds'}))
+            resolved = self.converse(args, client, ['y'])
+            self.assertTrue(resolved.scripted)
+            contract = client.requests[0]['response_contract']
+            self.assertIn('scripted', contract['options'])
+            self.assertIn('with_report', contract['options'])
+            self.assertIn('scripted=true', contract['native_paired_analysis'])
+            self.assertNotIn('execution_proposal', contract)
+            self.assertEqual(resolved.goal, args.goal)
+            self.assertEqual(resolved.value_column, [])
+            resolved.prepare_only = True
+            with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'):
+                config = prepare_start(resolved)
+            settings = research_defaults(['research-session', '--config', str(config)])
+            self.assertEqual(settings['task_kind'], 'bug_fix')
+            contract = (resolved._start_root / 'source' / 'README.md').read_text()
+            self.assertIn(args.goal, contract)
+            self.assertIn('method summary', (resolved._start_root / 'task.md').read_text())
+            generated_config = (resolved._start_root / 'code_task.toml').read_text()
+            self.assertIn('budget_profile = "large"', generated_config)
+            self.assertIn('allow_large_edits = true', generated_config)
+            with self.assertRaisesRegex(ValueError, 'cannot combine'):
+                validate_proposal(proposal('data_analysis', options={'scripted': True, 'with_report': True}), args, set())
+            with self.assertRaisesRegex(ValueError, 'explicit scripted'):
+                validate_proposal(proposal('data_analysis', options={'scripted': True}), args, {'scripted'})
+
+    def test_public_acquisition_requires_source_basis_and_separate_permission(self):
+        args = build_parser().parse_args(['start', '--kind', 'reproduction'])
+        url = 'https://github.com/example/research'
+        request = {'role': 'project', 'url': url, 'basis': [{'path': 'paper.md', 'quote': url}]}
+        facts = {'paper_previews': [{'source_path': 'paper.md', 'text': 'Implementation: ' + url}]}
+        validated = validate_proposal(proposal('reproduction', acquisition_proposal=request), args, set(), facts=facts)
+        self.assertEqual(validated['acquisition_proposal'], request)
+        with self.assertRaises(ValueError):
+            validate_proposal(proposal('reproduction', acquisition_proposal={**request,
+                'basis': [{'path': 'paper.md'}]}), args, set(), facts=facts)
+        for changes in ({'url': 'http://example.org/archive.zip'}, {'url': 'https://user:secret@example.org/archive.zip'},
+                        {'destination': '/outside'}, {'role': 'script'}, {'basis': [{'path': 'unread.md', 'quote': url}]}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                validate_proposal(proposal('reproduction', acquisition_proposal={**request, **changes}), args, set(), facts=facts)
+        with self.assertRaisesRegex(ValueError, 'before proposing'):
+            validate_proposal(proposal('reproduction', acquisition_proposal=request,
+                execution_proposal={}), args, set(), facts=facts)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paper = root / 'paper.md'
+            paper.write_text('Implementation: ' + url)
+            args = self.args(root, '--kind', 'reproduction', '--document', str(paper))
+            acquisition = {**request, 'basis': [{'path': str(paper.resolve()), 'quote': url}]}
+            with patch('simple_ar.research.preparation_assets.acquire_asset') as acquire:
+                self.assertIsNone(self.converse(args, Client(proposal('reproduction', acquisition_proposal=acquisition)), ['stop']))
+            acquire.assert_not_called()
+
+    def test_acquired_project_is_inspected_then_proposes_command_in_the_same_entry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paper = root / 'paper.md'
+            url = 'https://github.com/example/research'
+            paper.write_text('Constructed fixture conclusion: score=3. Implementation: ' + url)
+            args = self.args(root, '--kind', 'reproduction', '--document', str(paper))
+            acquisition = {'role': 'project', 'url': url, 'basis': [{'path': str(paper.resolve()), 'quote': url}]}
+            execution = {'hypothesis': 'Check the supplied fixture conclusion', 'dataset': 'Generated fixture only',
+                'expected_outcome': 'score=3', 'metrics': ['score'], 'argv': ['python', 'run.py'],
+                'basis': [{'path': 'README.md', 'quote': 'python run.py'}]}
+            args.asset_max_mb = 32
+            def acquire(*, root, role, url, ledger, max_download_mb):
+                self.assertEqual(max_download_mb, 32)
+                project = root / 'project'
+                project.mkdir(parents=True)
+                (project / 'README.md').write_text('Run the fixture: python run.py\n')
+                (project / 'run.py').write_text('raise AssertionError("Setup must not execute this file")\n')
+                return {'status': 'completed', 'path': str(project), 'url': url, 'role': role}
+            client = Client(proposal('reproduction', acquisition_proposal=acquisition),
+                            proposal('reproduction', execution_proposal=execution))
+            with patch('simple_ar.research.preparation_assets.acquire_asset', side_effect=acquire) as download:
+                resolved = self.converse(args, client, ['y', 'y'])
+            self.assertEqual(download.call_count, 1)
+            self.assertIn('project_preparation', client.requests[1]['assets'])
+            self.assertEqual(resolved.run_argv, ['python', 'run.py'])
+            self.assertTrue((resolved.project / 'README.md').is_file())
+            saved = read_json(resolved._start_root / 'setup.json')
+            self.assertTrue(saved['acquisitions'][0]['adopted'])
+            self.assertEqual(saved['acquisitions'][0]['max_download_mb'], 32)
+            # Accepted setup restoration does not fetch or ask the model again.
+            resumed = self.args(root, '--resume-setup', str(resolved._start_root))
+            with patch('simple_ar.research.preparation_assets.acquire_asset') as download:
+                restored = self.converse(resumed, Client(), [])
+            download.assert_not_called()
+            self.assertEqual(restored.project, resolved.project)
+            self.assertEqual(restored.asset_max_mb, 32)
+            resolved.prepare_only = True
+            with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'):
+                config = prepare_start(resolved)
+            settings = research_defaults(['research-session', '--config', str(config)])
+            self.assertEqual(settings['cwd'], str(resolved.project))
+            self.assertEqual(settings['command_argv'], ['python', 'run.py'])
+            # A configured setup points to the saved config instead of preparing it again.
+            with patch('simple_ar.research.preparation_assets.acquire_asset') as download:
+                self.assertIsNone(self.converse(resumed, Client(), []))
+            download.assert_not_called()
+
+    def test_paper_content_is_previewed_only_after_existing_asset_confirmation(self):
+        for kind in ('reproduction', 'writing'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                paper = root / 'paper.md'
+                paper.write_text('# Conclusion\nThe measured mean is three under the fixed split.\n')
+                args = self.args(root, '--kind', kind)
+                args.goal = f'Use the conclusion in {paper}'
+                client = Client(proposal(kind, assets=[{'role': 'paper', 'path_quote': str(paper)}]), proposal(kind))
+                resolved = self.converse(args, client, ['y', 'y'])
+                self.assertNotIn('paper_previews', client.requests[0]['assets'])
+                preview = client.requests[1]['assets']['paper_previews'][0]
+                self.assertIn('mean is three', preview['text'])
+                self.assertEqual(preview['source_path'], str(paper.resolve()))
+                self.assertEqual(preview['parser'], 'plain_text')
+                self.assertEqual(preview['status'], 'bounded_preview')
+                self.assertEqual(resolved.document, [paper.resolve()])
+                self.assertEqual(len(client.requests), 2)
+
+    def test_paper_previews_bound_text_and_document_count_without_following_links(self):
+        from simple_ar.cli.intake_dialogue import _asset_preview
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            other = root / 'unconfirmed.txt'
+            other.write_text('Unconfirmed content must not be disclosed.')
+            papers = [root / f'paper-{index}.md' for index in range(5)]
+            for paper in papers:
+                paper.write_text(f'# Claim\n[Other material]({other})\n' + 'x' * 8000 + 'UNSHOWN TAIL')
+            args = self.args(root, '--kind', 'reproduction')
+            args.document = papers
+            with patch('urllib.request.urlopen', side_effect=AssertionError('no network')):
+                facts = _asset_preview(args)
+            self.assertEqual(len(facts['paper_previews']), 4)
+            self.assertEqual(facts['paper_preview_limits']['omitted_documents'], 1)
+            for row, paper in zip(facts['paper_previews'], papers):
+                self.assertEqual(row['source_path'], str(paper.resolve()))
+                self.assertEqual(row['extracted_text_character_range'], [0, 8000])
+                self.assertTrue(row['text_truncated'])
+                self.assertNotIn('UNSHOWN TAIL', row['text'])
+                self.assertNotIn('must not be disclosed', row['text'])
+
+    def test_pdf_preview_uses_document_parser_and_preserves_page_coverage_and_failure(self):
+        from simple_ar.cli.intake_dialogue import _asset_preview
+        from simple_ar.research.documents.ports import ParsedDocument
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paper = root / 'paper.pdf'
+            paper.write_bytes(b'%PDF-1.7\nfixture')
+            args = self.args(root, '--document', str(paper))
+            coverage = {'total_pages': 9, 'extracted_pages': 3, 'page_limit': 3,
+                        'truncated': True, 'empty_text_pages': [2]}
+            with patch('simple_ar.research.documents.extractors.LocalDocumentParser') as parser:
+                parser.return_value.parse.return_value = ParsedDocument('Observed conclusion', 'pypdf_optional', coverage)
+                preview = _asset_preview(args)['paper_previews'][0]
+                parser.assert_called_once_with(max_pdf_pages=3)
+                parser.return_value.parse.assert_called_once_with(paper.resolve())
+                self.assertEqual(preview['coverage'], coverage)
+                self.assertFalse(preview['text_truncated'])  # Text fits; later PDF pages remain unread.
+                self.assertEqual(preview['extracted_text_character_range'], [0, 19])
+                parser.return_value.parse.side_effect = RuntimeError('PDF parser unavailable')
+                failed = _asset_preview(args)['paper_previews'][0]
+                self.assertEqual(failed['status'], 'unavailable')
+                self.assertEqual(failed['reason'], 'preview_parse_failed:RuntimeError')
+                self.assertNotIn('text', failed)
+
+            # Question-directed reading keeps the initial preview unchanged,
+            # then parses only confirmed local inputs into recoverable bundles.
+            from simple_ar.research.documents.extractors import LocalDocumentParser
+            from simple_ar.research.documents.ingest import DocumentBundle
+            late = root / 'notes.txt'
+            repository = 'https://github.com/example/late-method'
+            late.write_text('Early introduction.\n' * 900 + '\n# Data availability\n' + repository + '\n')
+            queries = [{'path': str(paper.resolve()), 'query': 'Methods sample size'},
+                       {'path': str(late.resolve()), 'query': 'Data availability ' + repository}]
+            original_parser = LocalDocumentParser
+            limits = []
+            def parser_factory(*, max_pdf_pages):
+                limits.append(max_pdf_pages)
+                parser = original_parser(max_pdf_pages=max_pdf_pages)
+                original_parse = parser.parse
+                def parse(path):
+                    if path.suffix == '.pdf':
+                        if max_pdf_pages == 3:
+                            return ParsedDocument('Observed conclusion', 'pypdf_optional', coverage)
+                        return ParsedDocument('Introduction.\n' * 900 + '\n# Methods\nSample size is 17.\n',
+                            'pypdf_optional', {'total_pages': 61, 'extracted_pages': 40,
+                                'page_limit': 40, 'truncated': True, 'empty_text_pages': []})
+                    return original_parse(path)
+                parser.parse = parse
+                return parser
+            args = self.args(root, '--kind', 'writing', '--document', str(paper), '--material', str(late))
+            client = Client(proposal('writing', material_read_requests=queries), RuntimeError('Stop before next proposal'))
+            with patch('simple_ar.research.documents.extractors.LocalDocumentParser', side_effect=parser_factory), \
+                 self.assertRaisesRegex(RuntimeError, 'Stop before next proposal'):
+                self.converse(args, client, ['y'])  # One grouped expansion consent.
+            setup = self.draft(root)
+            state = read_json(setup)
+            self.assertEqual(limits, [3, 40, 40])
+            self.assertEqual(state['paper_previews'][0]['coverage'], coverage)
+            self.assertNotIn(repository, state['paper_previews'][1]['text'])
+            facts = client.requests[1]['assets']
+            excerpts = facts['material_excerpts']
+            self.assertIn('Sample size is 17', '\n'.join(row['text'] for row in excerpts))
+            self.assertIn(repository, '\n'.join(row['text'] for row in excerpts))
+            self.assertLessEqual(sum(len(row['text']) for row in excerpts), 8000)
+            self.assertTrue(facts['material_read_results'][0]['coverage'][0]['coverage']['truncated'])
+            self.assertNotIn('chunks', facts)
+            for entry in state['material_reads']:
+                bundle = DocumentBundle.from_handoff_dict(read_json(setup.parent / entry['bundle']))
+                self.assertTrue(bundle.chunks)
+            reproduction = self.args(root, '--kind', 'reproduction')
+            validate_proposal(proposal('reproduction', acquisition_proposal={'role': 'project', 'url': repository,
+                'basis': [{'path': str(late.resolve()), 'quote': repository}]}), reproduction, set(), facts=facts)
+            reproduction.project = root
+            with self.assertRaisesRegex(ValueError, 'does not match'):
+                validate_proposal(proposal('reproduction', execution_proposal={
+                    'argv': ['python', 'run.py'], 'metrics': ['score'], 'hypothesis': 'Fixed claim',
+                    'dataset': 'Fixed data', 'expected_outcome': 'Check score',
+                    'basis': [{'path': str(late.resolve()), 'quote': repository}]}), reproduction, set(), facts=facts)
+            for requests in ([{'path': str(root / 'outside.txt'), 'query': 'Methods'}],
+                             [{'path': str(paper), 'query': ''}], queries * 2):
+                with self.subTest(requests=requests), self.assertRaises(ValueError):
+                    validate_proposal(proposal('writing', material_read_requests=requests), args, set(), facts=facts)
+            with self.assertRaisesRegex(ValueError, 'cannot combine'):
+                validate_proposal(proposal('writing', material_read_requests=queries, assets=[
+                    {'role': 'material', 'path_quote': 'another.txt'}]), args, set(), facts=facts)
+            resumed = Client(proposal('writing', material_read_requests=queries),
+                proposal('writing', material_read_requests=queries))
+            with patch('simple_ar.research.documents.extractors.LocalDocumentParser', side_effect=AssertionError('no reparse')):
+                self.assertIsNone(self.converse(self.args(root, '--resume-setup', str(setup.parent)), resumed, []))
+                self.assertEqual(read_json(setup)['last_read_result']['status'], 'no_progress')
+                restored = self.converse(self.args(root, '--resume-setup', str(setup.parent), '--goal', 'Clarify without rereading', locked=('goal',)),
+                    Client(proposal('writing')), ['y'])
+            self.assertEqual(restored.material, [late.resolve()])
+
+    def test_invalid_proposals_resume_without_requiring_user_configuration_repair(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             bad = proposal('survey', options={'data_mode': 'observations'})
             good = proposal('survey', options={'sources': 'search'})
-            client = Client(bad, bad, good)
-            result = self.converse(self.args(root), client, ['Only survey existing sources.', 'y'])
+            client = Client(bad, bad)
+            self.assertIsNone(self.converse(self.args(root), client, []))
+            setup = self.draft(root)
+            self.assertEqual(len(client.requests), 2)
+            resumed = Client(good)
+            result = self.converse(self.args(root, '--resume-setup', str(setup.parent)), resumed, ['y'])
             self.assertEqual(result.kind, 'survey')
             state = read_json(self.draft(root))
             self.assertEqual(len(state['rejected_proposals']), 2)
-            self.assertIn('Only survey existing sources.', state['user_messages'])
-            self.assertEqual(len(client.requests), 3)
+            self.assertEqual(len(resumed.requests), 1)
 
     def test_empty_requirements_retain_current_environment_without_installation(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'paper.md').write_text('Reference')
             args = self.args(root, '--kind', 'reproduction', '--project', str(root), '--document', str(root / 'paper.md'),
+                '--project-python', sys.executable,
                 '--hypothesis', 'Claim', '--dataset', 'Fixed data', '--expected-outcome', 'Compare score',
                 '--metric', 'score', '--command', 'python', 'run.py')
             settings = {'environment': 'current', 'requirements': [], 'install_project': False}
@@ -133,6 +517,7 @@ class IntakeDialogueTests(unittest.TestCase):
                 config = prepare_start(resolved)
             defaults = research_defaults(['research-session', '--config', str(config)])
             self.assertEqual(defaults['execution_details']['environment']['requirements'], ['requirements.txt'])
+            self.assertEqual(defaults['execution_details']['environment']['python_executable'], str(Path(sys.executable).absolute()))
             self.assertEqual(defaults['process_invocations'], 4)
             with self.assertRaisesRegex(ValueError, 'override explicit'):
                 validate_proposal(proposal('reproduction', options=settings), args, {'environment'})
@@ -401,11 +786,13 @@ class IntakeDialogueTests(unittest.TestCase):
             root = Path(folder)
             client = Client(proposal(options={"command": "delete everything"}),
                             proposal(options={"timeout_sec": 10000}))
-            self.assertIsNone(self.converse(self.args(root), client, ['stop']))
+            # A technical proposal error must not demand another human reply.
+            self.assertIsNone(self.converse(self.args(root), client, []))
             state = read_json(self.draft(root))
             self.assertEqual(len(state['rejected_proposals']), 2)
             self.assertIn("timeout_sec", state["rejected_proposals"][-1]["response"]["options"])
             self.assertEqual(state["user_messages"], ["Describe my measurements"])
+            self.assertEqual(state["status"], "discussing")
             self.assertIn("validation_error", client.requests[1])
             self.assertIn("command", client.requests[1]['validation_error'])
             self.assertIn("Allowed option keys", client.requests[1]['validation_error'])
@@ -428,6 +815,17 @@ class IntakeDialogueTests(unittest.TestCase):
             self.assertEqual(read_json(self.draft(root))["arguments"]["data_file"], None)
 
     def test_locked_defaults_and_function_specific_options_cannot_be_overridden(self):
+        from simple_ar.cli.research_config import normalize_setup_options, setup_option_contract
+        baseline = build_parser().parse_args(['start'])
+        for kind in ('survey', 'writing', 'reproduction', 'bug_fix', 'figure', 'data_analysis'):
+            for key, spec in setup_option_contract(kind).items():
+                value = (spec['allowed_values'][0] if 'allowed_values' in spec else
+                         {'string': 'meaning', 'boolean': False, 'list of names': ['value']}[spec['type']])
+                supplied = {key: value}
+                if kind == 'data_analysis' and key == 'sources':
+                    supplied['with_report'] = True
+                with self.subTest(kind=kind, key=key):
+                    self.assertEqual(normalize_setup_options(supplied, baseline, set(), kind), supplied)
         with tempfile.TemporaryDirectory() as folder:
             args = self.args(Path(folder), "--data-missing", "reject")
             unchanged = validate_proposal(proposal(options={'data_missing': None}), args, {'data_missing'})
@@ -444,6 +842,9 @@ class IntakeDialogueTests(unittest.TestCase):
                 validate_proposal(proposal('reproduction', options={'template': 'experiment'}), args, set())
 
     def test_prepare_only_cannot_make_a_model_call_and_configured_resume_does_not_replay(self):
+        from simple_ar.cli.main import main
+        with self.assertRaisesRegex(SystemExit, "--prepare-only promises no model calls"):
+            main(["start", "--chat", "--prepare-only", "--kind", "survey", "--goal", "Survey"])
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             with self.assertRaisesRegex(ValueError, "no model calls"):
@@ -497,16 +898,25 @@ class IntakeDialogueTests(unittest.TestCase):
             (root / 'README.md').write_text('Testing: ' + command + '\n')
             (root / 'model.py').write_text('def compute():\n    return 1\n')
             args = self.args(root, '--kind', 'bug_fix', '--project', str(root), '--allow', 'model.py')
+            args._reuse_protected = ['data/**']
+            args._reuse_edit_policy = {'budget_profile': 'large', 'allow_large_edits': True}
             execution = {'argv': shlex.split(command), 'basis': [{'path': 'README.md', 'quote': command}]}
             client = Client(proposal('bug_fix', execution_proposal=execution))
             with patch('subprocess.run', side_effect=AssertionError('setup must not execute')):
                 resolved = self.converse(args, client, ['y'])
+                # Saved feedback setup retains original project permissions and
+                # editing policy without another model call.
+                resumed = self.args(root, '--resume-setup', str(resolved._start_root))
+                resolved = self.converse(resumed, Client(), [])
                 resolved.prepare_only = True
                 with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'):
                     config = prepare_start(resolved)
             task_config = tomllib.loads((config.parent / 'code_task.toml').read_text())
             self.assertEqual(shlex.split(task_config['benchmark']['command']), execution['argv'])
             self.assertEqual(task_config['edit_scope']['allowed_patterns'], ['model.py'])
+            self.assertIn('data/**', task_config['edit_scope']['protected_patterns'])
+            self.assertEqual(task_config['execute']['budget_profile'], 'large')
+            self.assertTrue(task_config['execute']['allow_large_edits'])
             self.assertEqual(task_config['environment']['mode'], 'current')
             self.assertIsNone(resolved.run_argv)
             self.assertEqual(resolved.goal, args.goal)
@@ -535,25 +945,94 @@ class IntakeDialogueTests(unittest.TestCase):
                 'output_files': {'raw': 'rows.json'},
                 'basis': [{'path': 'README.md', 'quote': 'python run.py --data values.csv'},
                           {'path': 'README.md', 'quote': 'python check.py'}]}
-            client = Client(proposal('reproduction', execution_proposal=execution))
+            args.goal += f' Use existing Python {sys.executable}'
+            client = Client(proposal('reproduction', assets=[{'role': 'python', 'path_quote': sys.executable}]),
+                            proposal('reproduction', execution_proposal=execution))
             with patch('subprocess.run', side_effect=AssertionError('setup must not execute')):
-                resolved = self.converse(args, client, ['y'])
+                resolved = self.converse(args, client, ['y', 'y'])
                 resolved.prepare_only = True
                 with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'):
                     config = prepare_start(resolved)
             values = research_defaults(['research-session', '--config', str(config)])
-            self.assertEqual(values['command_argv'], execution['argv'])
+            self.assertEqual(values['command_argv'], [str(Path(sys.executable).absolute()), *execution['argv'][1:]])
+            self.assertEqual(client.requests[1]['assets']['project_python'], str(Path(sys.executable).absolute()))
+            contract = client.requests[1]['response_contract']
+            self.assertEqual(contract['kind'], ['reproduction'])
+            self.assertEqual(set(contract['options']), {'sources', 'environment', 'requirements', 'install_project'})
+            self.assertNotIn('native_paired_analysis', contract)
             self.assertEqual(values['cwd'], str(root.resolve()))
             self.assertEqual(values['metric'], ['mean'])
             self.assertEqual(values['execution_details']['output_files'], {'raw': 'rows.json'})
             self.assertEqual(values['report_outline_strategy'], 'adaptive')
             self.assertEqual(values['timeout_sec'], 17)
             self.assertEqual(values['process_invocations'], 2)
-            self.assertEqual(values['execution_details']['environment']['check_command'], ['python', 'check.py'])
+            self.assertEqual(values['execution_details']['environment']['check_command'], [str(Path(sys.executable).absolute()), 'check.py'])
             self.assertEqual(values['process_wall_seconds'], 34)
             self.assertTrue((config.parent / 'preparation.md').is_file())
             self.assertFalse((config.parent / 'code_task.toml').exists())
             self.assertTrue(any(row['role'] == 'entry_source' for row in client.requests[0]['assets']['project_preparation']['excerpts']))
+            preview = client.requests[0]['assets']['paper_previews'][0]
+            self.assertIn('constructed example, not a published paper', preview['text'])
+            self.assertEqual(preview['source_path'], str(paper.resolve()))
+            import shlex
+            (root / 'requirements.txt').write_text('# Fixture: no packages required\n')
+            for filename, explicit, venv in (('adapter.py', False, False), ('adapters/export.py', True, False),
+                                            ('venv_adapter.py', False, True)):
+                with self.subTest(adapter=filename):
+                    checker_text = 'python "check.py"'
+                    flags = ['--allow', filename, '--validate', checker_text] if explicit else []
+                    adapter_args = self.args(root, '--kind', 'reproduction', '--project', str(root),
+                        '--document', str(paper), '--timeout-sec', '17', *flags,
+                        locked={'kind', 'project', 'timeout_sec'} | ({'allow', 'validate'} if explicit else set()))
+                    if venv:
+                        adapter_args.project_python = Path(sys.executable)
+                    adapter_execution = {**execution, 'argv': ['python', filename, '--data', 'values.csv'],
+                        'code_preparation': {'allowed_paths': [filename], 'validation_argv': ['python', 'check.py']},
+                        'basis': [*execution['basis'], {'path': 'run.py',
+                            'quote': '# Writes rows.json under SIMPLE_AR_OUTPUT_DIR'}]}
+                    adapter_execution.pop('check_argv')
+                    adapter_client = Client(proposal('reproduction', execution_proposal=adapter_execution,
+                        options={'environment': 'venv', 'requirements': ['requirements.txt']} if venv else {}))
+                    with patch('subprocess.run', side_effect=AssertionError('setup must not execute')), \
+                         patch('sys.stdin.isatty', return_value=True), patch('builtins.input', return_value='y'), \
+                         patch('simple_ar.cli.intake_dialogue.print_line') as printed:
+                        adopted = discuss_start(adapter_args, client=adapter_client)
+                        display = '\n'.join(str(call.args[0]) for call in printed.call_args_list)
+                        self.assertIn('NOT implemented or verified', display)
+                        self.assertIn(filename, display)
+                        self.assertIn('independent checker argv', display)
+                        if venv:
+                            self.assertIn('Separate environment authorization', display)
+                        saved = read_json(adopted._start_root / 'setup.json')
+                        self.assertEqual(saved['proposals'][-1]['execution_proposal']['code_preparation'],
+                                         adapter_execution['code_preparation'])
+                        no_replay = Client()
+                        adopted = self.converse(self.args(root, '--resume-setup', str(adopted._start_root)), no_replay, [])
+                        self.assertEqual(no_replay.requests, [])
+                        adopted.prepare_only = True
+                        with patch('simple_ar.cli.start.print_line'):
+                            adapter_config = prepare_start(adopted)
+                    self.assertEqual(adopted.allow, [filename])
+                    self.assertEqual(shlex.split(adopted.validate), ['python', 'check.py'])
+                    if explicit:
+                        self.assertEqual(adopted.validate, checker_text)
+                    adapter_values = research_defaults(['research-session', '--config', str(adapter_config)])
+                    self.assertEqual(adapter_values['command_argv'], adapter_execution['argv'])
+                    if venv:
+                        self.assertEqual(adapter_values['execution_details']['environment']['requirements'], ['requirements.txt'])
+                        self.assertEqual(adapter_values['execution_details']['environment']['python_executable'], sys.executable)
+                        self.assertEqual(adapter_values['process_invocations'], 6)
+                    else:
+                        self.assertNotIn('environment', adapter_values['execution_details'])
+                    self.assertEqual(adapter_values['execution_details']['initial_files'], [filename])
+                    code = tomllib.loads(Path(adapter_values['code_task_config']).read_text())
+                    self.assertEqual(code['edit_scope']['allowed_patterns'], [filename])
+                    self.assertEqual(shlex.split(code['benchmark']['command']), ['python', 'check.py'])
+                    self.assertEqual(code['execute']['timeout_sec'], 17)
+                    self.assertEqual(code['environment']['mode'], 'current')
+                    self.assertFalse((root / filename).exists())  # Proposed, not generated by intake.
+                    self.assertEqual(code['execute']['budget_profile'], 'large')
+                    self.assertTrue(code['execute']['allow_large_edits'])
 
     def test_reproduction_proposal_requires_actual_source_not_unread_or_model_authority(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -563,6 +1042,17 @@ class IntakeDialogueTests(unittest.TestCase):
                 'argv': ['python', 'run.py'], 'basis': [{'path': 'README.md', 'quote': 'python run.py'}]}
             facts = {'project_preparation': {'excerpts': [{'path': 'README.md', 'text': 'python run.py'}]}}
             validate_proposal(proposal('reproduction', execution_proposal=execution), args, set(), facts=facts)
+            reference = {**execution, 'basis': [{'path': 'README.md'}]}
+            selected_source = validate_proposal(proposal('reproduction', execution_proposal=reference),
+                args, set(), facts=facts)['execution_proposal']
+            self.assertEqual(selected_source['basis'], reference['basis'])
+            for invalid in ([{'path': 'unread.py'}], [{'path': 42}], [{'path': 'README.md', 'quote': 'invented command'}]):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    validate_proposal(proposal('reproduction', execution_proposal={**execution, 'basis': invalid}),
+                        args, set(), facts=facts)
+            with self.assertRaises(ValueError):
+                validate_proposal(proposal('reproduction', execution_proposal=reference), args, set(),
+                    facts={'project_preparation': {'excerpts': [{'path': 'README.md', 'text': '  '}]}})
             for check in ([], 'python check.py', [42]):
                 with self.subTest(check=check), self.assertRaisesRegex(ValueError, 'check_argv'):
                     validate_proposal(proposal('reproduction', execution_proposal={**execution,
@@ -582,6 +1072,25 @@ class IntakeDialogueTests(unittest.TestCase):
                     validate_proposal(proposal('reproduction', execution_proposal={**execution,
                         'output_files': attachments}), args, set(), facts=facts)
             args.output_files = {'raw': 'rows.json'}
+            args.metric_sources = {'score': {'output': 'raw', 'path': ['score']}}
+            selected = validate_proposal(proposal('reproduction', execution_proposal=execution),
+                args, {'metric_sources'}, facts=facts)['execution_proposal']
+            self.assertEqual(selected['metric_sources'], args.metric_sources)
+            self.assertEqual(validate_proposal(proposal('reproduction', execution_proposal={
+                key: item for key, item in execution.items() if key != 'metrics'}), args, set(),
+                facts=facts)['execution_proposal']['metrics'], ['score'])
+            descriptions = {**execution, 'metrics': ['raw observations', 'per-method summary']}
+            self.assertEqual(validate_proposal(proposal('reproduction', execution_proposal=descriptions),
+                args, set(), facts=facts)['execution_proposal']['metrics'], ['score'])
+            args.metric = ['score']
+            with self.assertRaisesRegex(ValueError, 'explicit metric'):
+                validate_proposal(proposal('reproduction', execution_proposal=descriptions),
+                    args, {'metric'}, facts=facts)
+            args.metric = None
+            with self.assertRaisesRegex(ValueError, 'explicit metric_sources'):
+                validate_proposal(proposal('reproduction', execution_proposal={**execution,
+                    'metric_sources': {'score': {'output': 'raw', 'path': ['different']}}}),
+                    args, {'metric_sources'}, facts=facts)
             with self.assertRaisesRegex(ValueError, 'explicit output_files'):
                 validate_proposal(proposal('reproduction', execution_proposal={**execution,
                     'output_files': {'raw': 'other.json'}}), args, {'output_files'}, facts=facts)
@@ -602,6 +1111,48 @@ class IntakeDialogueTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'does not match inspected source'):
                 validate_proposal(proposal('reproduction', execution_proposal={**execution,
                     'basis': [{'path': 'README.md', 'quote': 'python not-run.py'}]}), args, set(), facts=wrapped)
+            args.check_argv = None
+            args.run_argv = None
+            (root / 'run.py').write_text('def run(): return {"score": 1}\n')
+            adapter_facts = {'project_preparation': {'excerpts': [
+                {'path': 'README.md', 'role': 'project_instructions', 'text': 'python run.py'},
+                {'path': 'run.py', 'role': 'entry_source', 'text': 'def run(): return {"score": 1}'}]}}
+            adapter = {**execution, 'argv': ['python', 'adapter.py'],
+                'basis': [*execution['basis'], {'path': 'run.py', 'quote': 'def run():'}],
+                'code_preparation': {'allowed_paths': ['adapter.py'], 'validation_argv': ['python', 'verify.py']}}
+            for path in ('../escape.py', '/absolute.py', 'C:/escape.py', '*.py', 'run.py',
+                         'tests/check.py', 'data/adapter.py'):
+                with self.subTest(scope=path), self.assertRaises(ValueError):
+                    validate_proposal(proposal('reproduction', execution_proposal={**adapter,
+                        'code_preparation': {**adapter['code_preparation'], 'allowed_paths': [path]}}),
+                        args, set(), facts=adapter_facts)
+            for changes in ({'validation_argv': ['python3', 'adapter.py']},
+                            {'validation_argv': ['python', './adapter.py']}, {'validation_argv': []},
+                            {'allowed_paths': []}, {'timeout_sec': 900}, {'python': '/other/python'}):
+                with self.subTest(preparation=changes), self.assertRaises(ValueError):
+                    validate_proposal(proposal('reproduction', execution_proposal={**adapter,
+                        'code_preparation': {**adapter['code_preparation'], **changes}}), args, set(), facts=adapter_facts)
+            with self.assertRaisesRegex(ValueError, 'check_argv'):
+                validate_proposal(proposal('reproduction', execution_proposal={**adapter,
+                    'check_argv': ['python', 'check.py']}), args, set(), facts=adapter_facts)
+            accepted = validate_proposal(proposal('reproduction', options={'environment': 'venv'},
+                execution_proposal=adapter), args, set(), facts=adapter_facts)
+            self.assertEqual(accepted['options']['environment'], 'venv')
+            with self.assertRaises(ValueError):
+                validate_proposal(proposal('reproduction', options={'environment': 'venv', 'install_project': True},
+                    execution_proposal=adapter), args, set(), facts=adapter_facts)
+            with self.assertRaisesRegex(ValueError, 'inspected source'):
+                validate_proposal(proposal('reproduction', execution_proposal=adapter), args, set(), facts=facts)
+            args.allow = ['another.py']
+            with self.assertRaisesRegex(ValueError, 'explicit allow'):
+                validate_proposal(proposal('reproduction', execution_proposal=adapter), args, {'allow'}, facts=adapter_facts)
+            args.validate = 'python another_check.py'
+            with self.assertRaisesRegex(ValueError, 'explicit validate'):
+                validate_proposal(proposal('reproduction', execution_proposal=adapter), args, {'validate'}, facts=adapter_facts)
+            args.project = None
+            args.cwd = root
+            with self.assertRaisesRegex(ValueError, 'existing --project'):
+                validate_proposal(proposal('reproduction', execution_proposal=adapter), args, set(), facts=adapter_facts)
 
     def test_reproduction_reads_indexed_configuration_before_asking_human_and_retains_reads_on_resume(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -626,6 +1177,20 @@ class IntakeDialogueTests(unittest.TestCase):
                 validate_proposal(proposal('reproduction', read_requests=['../outside.py']), args, set(), facts={})
 
     def test_complete_file_lookup_is_idempotent_not_a_billable_json_correction_or_unbounded_loop(self):
+        # Permissioned tool observations are not human clarification rounds.
+        # A repository needing six source windows must still reach its proposal.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'README.md').write_text('Documented instruction\n')
+            names = [f'config_{i}.toml' for i in range(6)]
+            for name in names:
+                (root / name).write_text('value = 1\n')
+            args = self.args(root, '--kind', 'reproduction', '--project', str(root))
+            client = Client(*(proposal('reproduction', read_requests=[name]) for name in names),
+                            proposal('reproduction', questions=['Which conclusion should be checked?']))
+            self.assertIsNone(self.converse(args, client, ['stop']))
+            self.assertEqual(len(client.requests), 7)
+            self.assertEqual(read_json(self.draft(root))['project_read_paths'], names)
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'README.md').write_text('Documented instruction\n')

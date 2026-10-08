@@ -16,7 +16,7 @@ from simple_ar.code_task.editing.scope import (
 from simple_ar.code_task.analysis.interfaces import render_source_snippets
 from simple_ar.code_task.analysis.source_context import diff_source_anchors, source_context_for_files
 from simple_ar.code_task.execution.failure import FILE_LINE_RE, analyze_code_task_failure
-from simple_ar.code_task.editing.planning import select_relevant_files
+from simple_ar.code_task.editing.planning import select_relevant_files, patch_plan_context
 from simple_ar.code_task.editing.actions import looks_like_diff_fragment as _looks_like_diff_fragment
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
@@ -276,7 +276,7 @@ def _repair_prompt(
         "- Partial source is not a full implementation; do not invent unseen code.\n"
         "- Do not return markdown or a unified diff.\n\n"
         f"Task:\n{task_text or 'No task text found.'}\n\n"
-        f"Patch plan:\n{patch_plan or 'No patch plan found.'}\n\n"
+        f"Patch plan:\n{patch_plan_context(patch_plan, task_text) or 'No patch plan found.'}\n\n"
         f"Current patch diff:\n```diff\n{patch_diff or 'No patch diff found.'}\n```\n\n"
         f"Task memory:\n{memory_context}\n\n"
         f"Execution report JSON:\n{json.dumps(execution_report or {'status': 'not_available'}, indent=2, ensure_ascii=False)}\n\n"

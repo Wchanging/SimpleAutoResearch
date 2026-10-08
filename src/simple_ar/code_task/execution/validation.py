@@ -248,6 +248,9 @@ def _validate_python_file(
         # Parse source bytes like Python: honor UTF-8 BOM/PEP 263 cookies and
         # reject invalid encodings rather than replacing characters silently.
         tree = ast.parse(path.read_bytes(), filename=rel_path)
+        # AST construction omits compiler checks (future-import placement,
+        # break/return/nonlocal scope). Compile without executing or writing pyc.
+        compile(tree, rel_path, "exec", dont_inherit=True)
     except SyntaxError as exc:
         issues.append(
             _issue(

@@ -241,6 +241,7 @@ def evidence_pack_from_read(
         "method_cards": [card.to_row() for card in result.method_cards],
         "dataset_cards": [card.to_row() for card in result.dataset_cards],
         "screening_decisions": [dict(row) for row in result.screening_decisions],
+        "question_assessments": [dict(row) for row in result.question_assessments],
         "paper_notes": [_current_paper_note(note) for note in result.paper_notes],
         "notes_markdown": result.notes_markdown,
         "evidence_refs": [chunk.chunk_id for chunk in result.bundle.chunks],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Protocol
 
 from simple_ar.literature.models import Paper
@@ -35,6 +36,29 @@ class LiteratureConnector(Protocol):
     def search(self, request: SearchQuery) -> SearchResponse:
         """Search a literature source and return normalized papers."""
         ...
+
+
+def temporal_scope(filters: Mapping, *, topic: str | None = None) -> dict | None:
+    """Validate optional inclusive publication years; never infer scope from text.
+
+    The planner supplies endpoints and a verbatim user-topic quote. Missing
+    scope preserves historical unrestricted selection; unknown paper dates do
+    not qualify when a scope is present. This is core eligibility, not a ban on
+    citing older foundational context separately.
+    """
+    value = filters.get("temporal_scope")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"start_year", "end_year", "basis_quote"}:
+        raise ValueError("temporal_scope requires start_year, end_year and basis_quote.")
+    start, end, quote = value["start_year"], value["end_year"], value["basis_quote"]
+    if type(start) is not int or type(end) is not int or not 1 <= start <= end <= 9999:
+        raise ValueError("Temporal years must be ordered inclusive integer endpoints.")
+    if (not isinstance(quote, str) or not quote.strip() or
+            str(start) not in quote or str(end) not in quote or
+            (topic is not None and quote not in topic)):
+        raise ValueError("Temporal scope needs a verbatim user-topic quote containing both endpoints.")
+    return dict(value)
 
 
 def build_source_plan(

@@ -16,12 +16,51 @@ from simple_ar.research.sources import SearchProviderRegistry
 from simple_ar.research.sources.base import SearchQuery, SearchResponse
 from simple_ar.research.planning.capability import (
     build_research_plan,
+    build_requested_research_plan,
     run_research_plan_capability,
 )
 from simple_ar.research.task_plan import TaskPlanRequest
 
 
 class PlanningCapabilityTests(unittest.TestCase):
+    def test_quote_backed_temporal_scope_survives_plan_and_search_recovery(self) -> None:
+        topic = "Survey interval methods published from 2010 through 2014."
+        scope = {"start_year": 2010, "end_year": 2014,
+                 "basis_quote": "published from 2010 through 2014"}
+        class Client:
+            def ask_json(self, system, user, **kwargs):
+                self.prompt = user
+                return {"queries": ["interval methods"],
+                        "questions": [{"question": "Which interval methods?", "facet": "method"}],
+                        "temporal_scope": self.scope}
+        client = Client()
+        client.scope = scope
+        request = ResearchPlanRequest(topic=topic, use_llm=True, llm_client=client,
+                                      config={"research_sources": ["fixture"]})
+        result = build_requested_research_plan(request)
+        self.assertIn("basis_quote", client.prompt)
+        self.assertEqual(result.source_plan.filters["temporal_scope"], scope)
+        restored = ResearchPlanResult.from_handoff_dict(result.to_handoff_dict())
+        self.assertEqual(search_request_from_plan(restored).filters["temporal_scope"], scope)
+        for value in ({**scope, "basis_quote": "from 2010 to 2014"},
+                      {**scope, "end_year": 2015}, {**scope, "start_year": True},
+                      {**scope, "start_year": 2015}, {**scope, "extra": True}):
+            client.scope = value
+            with self.subTest(scope=value), self.assertRaises(ValueError):
+                build_requested_research_plan(request)
+        client.scope = None
+        self.assertNotIn("temporal_scope", build_requested_research_plan(request).source_plan.filters)
+        # Old/offline plans do not guess a range from topic or generated prose.
+        legacy = build_research_plan(ResearchPlanRequest(topic=topic,
+            problem_markdown="Generated problem: 2000 through 2005"))
+        restored = ResearchPlanResult.from_handoff_dict(legacy.to_handoff_dict())
+        self.assertNotIn("temporal_scope", search_request_from_plan(restored).filters)
+        client.scope = scope
+        generated_only = ResearchPlanRequest(topic="Survey interval methods", problem_markdown=topic,
+                                             use_llm=True, llm_client=client)
+        with self.assertRaises(ValueError):
+            build_requested_research_plan(generated_only)
+
     def test_direct_material_report_retains_handoff_without_query_model(self) -> None:
         from dataclasses import replace
         from simple_ar.research.task_plan import default_task_steps
@@ -121,6 +160,9 @@ class PlanningCapabilityTests(unittest.TestCase):
                         "reliable coding agents benchmark",
                         "LLM code agent validation",
                     ],
+                    "query_specs": [{"facet": "method", "title_keywords": ["coding", "agents"],
+                                     "abstract_keywords": ["validation", "bounded", "memory"],
+                                     "rationale": "Retrieve the topic before checking supporting conditions."}],
                     "required_facets": ["method", "benchmark"],
                     "negative_terms": [],
                     "rationale": "Use focused method and benchmark searches.",
@@ -149,6 +191,7 @@ class PlanningCapabilityTests(unittest.TestCase):
         self.assertEqual(client.label, "research-planner")
         self.assertIsNone(client.max_output_tokens)
         self.assertEqual(payload["planner"], "llm")
+        self.assertEqual(payload["query_plan"]["queries"], ["coding agents"])
         with tempfile.TemporaryDirectory() as tmp:
             run_research_plan_capability(
                 context=CapabilityContext(

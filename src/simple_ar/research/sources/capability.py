@@ -17,7 +17,7 @@ from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.literature.cache import get_cached, put_cache
 from simple_ar.literature.models import Paper
 from simple_ar.research.contracts import DocumentRecord, QueryPlan, ResearchQuestion
-from simple_ar.research.sources.base import SearchQuery, SearchResponse
+from simple_ar.research.sources.base import SearchQuery, SearchResponse, temporal_scope
 from simple_ar.research.sources.registry import SearchProviderRegistry
 
 
@@ -47,8 +47,9 @@ class SearchRequest:
     )
 
     def __post_init__(self) -> None:
-        queries = tuple(query.strip() for query in self.queries if query.strip())
-        providers = tuple(provider.strip() for provider in self.providers if provider.strip())
+        temporal_scope(self.filters, topic=self.filters.get("topic") if isinstance(self.filters.get("topic"), str) else None)
+        queries = tuple(_new_queries(self.queries, set()))
+        providers = tuple(dict.fromkeys(provider.strip() for provider in self.providers if provider.strip()))
         if not queries:
             raise ValueError("SearchRequest requires at least one query.")
         if not providers:
@@ -78,15 +79,15 @@ class SearchSelectionPolicy:
     questions: tuple[ResearchQuestion, ...]
     query_plan: QueryPlan
     max_documents: int
-    next_query_limit: int = 0
+    next_query_limit: int = 0  # Total additional queries in this search attempt.
 
     def __post_init__(self) -> None:
         if not self.topic.strip():
             raise ValueError("SearchSelectionPolicy.topic cannot be empty.")
         if self.max_documents < 1:
             raise ValueError("SearchSelectionPolicy.max_documents must be positive.")
-        if self.next_query_limit < 0:
-            raise ValueError("SearchSelectionPolicy.next_query_limit cannot be negative.")
+        if type(self.next_query_limit) is not int or self.next_query_limit < 0:
+            raise ValueError("SearchSelectionPolicy.next_query_limit must be a nonnegative integer.")
         object.__setattr__(self, "questions", tuple(self.questions))
 
 
@@ -107,6 +108,14 @@ class SearchResult:
     selected_papers: tuple[Paper, ...] = ()
     selection_rows: tuple[dict[str, Any], ...] = ()
     coverage_report: dict[str, Any] = field(default_factory=dict)
+    response_rounds: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.response_rounds and (
+            len(self.response_rounds) != len(self.responses)
+            or any(type(value) is not int or value < 1 for value in self.response_rounds)
+        ):
+            raise ValueError("response_rounds must assign a positive round to each response.")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a compact, JSON-serializable result summary."""
@@ -143,7 +152,7 @@ class SearchResult:
         return {
             "schema_version": "search_handoff.v1",
             "status": self.status,
-            "papers": [paper.to_row() for paper in self.papers],
+            "papers": [paper.to_row() for paper in {paper.id: paper for paper in self.papers}.values()],
             "selected_paper_ids": [paper.id for paper in self.selected_papers],
             "responses": [
                 {
@@ -152,8 +161,9 @@ class SearchResult:
                     "status": response.status,
                     "paper_ids": [paper.id for paper in response.papers],
                     "message": response.message,
+                    "round": self.response_rounds[index] if self.response_rounds else 1,
                 }
-                for response in self.responses
+                for index, response in enumerate(self.responses)
             ],
             "selection": [dict(row) for row in self.selection_rows],
             "coverage": dict(self.coverage_report),
@@ -181,6 +191,7 @@ class SearchResult:
             if str(item).strip()
         ]
         responses: list[SearchResponse] = []
+        response_rounds: list[int] = []
         diagnostics = [str(item) for item in data.get("diagnostics", [])]
         missing_selected = [paper_id for paper_id in selected_ids if paper_id not in paper_by_id]
         if missing_selected:
@@ -207,9 +218,11 @@ class SearchResult:
                     message=str(row.get("message") or ""),
                 )
             )
+            response_rounds.append(row.get("round", 1))
         return cls(
             status=status,  # type: ignore[arg-type]
             responses=tuple(responses),
+            response_rounds=tuple(response_rounds),
             papers=papers,
             diagnostics=tuple(diagnostics),
             selected_papers=tuple(
@@ -324,6 +337,11 @@ def _apply_optional_cache(
 
     if not request.cache_enabled or request.cache_dir is None:
         return response
+    scope = temporal_scope(request.filters)
+    if scope is not None:
+        # Cache APIs already key by query; scoped entries must not replace or
+        # recover unrestricted metadata (or another window).
+        query = f"{query} [publication_year:{scope['start_year']}-{scope['end_year']}]"
     if _response_succeeded(response) and response.papers:
         try:
             (request.cache_put or put_cache)(
@@ -382,14 +400,97 @@ def run_search_capability(
 ) -> CapabilityResult:
     """Persist one explicit search handoff for a controller-managed attempt.
 
-    Provider failures remain visible in the handoff and partial results remain
-    usable.  The adapter does not deduplicate, download, retry, or silently
-    turn an empty/failed search into a successful result.
+    With a selection policy, execute bounded new metadata queries from the
+    existing coverage report. This is search-stage expansion, not reading or
+    semantic evidence verification. Failures and every provider response stay
+    visible; repeated queries and rounds without new paper identities stop.
     """
 
     result = search_sources(request, registry=registry, emit=emit)
     if selection_policy is not None:
-        result = select_search_result(result, policy=selection_policy)
+        from simple_ar.research.evidence.retrieval import paper_identity_key
+
+        policy = selection_policy
+        result = replace(result, response_rounds=(1,) * len(result.responses))
+        remaining_queries = policy.next_query_limit
+        executed = {_query_key(response.query) for response in result.responses}
+        identities: set[str] = set()
+        round_index = 1
+        last_round_status = result.status
+        while True:
+            current_identities = {paper_identity_key(paper) for paper in result.papers}
+            new_candidates = len(current_identities - identities)
+            result = select_search_result(result, policy=policy, filters=request.filters)
+            if last_round_status == "failed":
+                stop_reason = "providers_failed"
+            elif not new_candidates:
+                stop_reason = "no_new_candidates"
+            elif request.stop_after_papers is not None and len({paper.id for paper in result.papers}) >= request.stop_after_papers:
+                stop_reason = "paper_limit_reached"
+            elif not policy.query_plan.auto_expansion:
+                stop_reason = "query_expansion_disabled"
+            elif round_index >= policy.query_plan.max_rounds:
+                stop_reason = "round_limit_reached"
+            elif remaining_queries <= 0:
+                stop_reason = "follow_up_query_limit_reached"
+            else:
+                stop_reason = "no_new_queries"
+                proposals = result.coverage_report.get("follow_up_queries", [])
+                next_queries = _new_queries((row["query"] for row in proposals), executed)[:remaining_queries]
+                if next_queries:
+                    identities = current_identities
+                    remaining_queries -= len(next_queries)
+                    round_index += 1
+                    if emit:
+                        emit(f"Search round {round_index}: {len(next_queries)} new metadata queries (not source understanding).")
+                    paper_limit = request.stop_after_papers
+                    if paper_limit is not None:
+                        paper_limit -= len({paper.id for paper in result.papers})
+                    followup = search_sources(
+                        replace(request, queries=tuple(next_queries), stop_after_papers=paper_limit),
+                        registry=registry, emit=emit,
+                    )
+                    last_round_status = followup.status
+                    executed.update(_query_key(response.query) for response in followup.responses)
+                    responses = (*result.responses, *followup.responses)
+                    papers = (*result.papers, *followup.papers)
+                    result = replace(result,
+                        responses=responses,
+                        response_rounds=result.response_rounds + (round_index,) * len(followup.responses),
+                        papers=papers,
+                        diagnostics=(*result.diagnostics, *followup.diagnostics),
+                        status=_result_status(list(responses), list(papers)),
+                    )
+                    # Generated facet queries need their actual facet in the
+                    # same selection policy; do not create a second plan artifact.
+                    specs = {_query_key(row["query"]): row for row in proposals}
+                    additional = _new_queries(next_queries, {_query_key(query) for query in policy.query_plan.queries})
+                    policy = replace(policy, query_plan=replace(policy.query_plan,
+                        queries=[*policy.query_plan.queries, *additional],
+                        query_specs=[*policy.query_plan.query_specs, *[specs[_query_key(query)] for query in next_queries]],
+                    ))
+                    continue
+            result = replace(result, coverage_report={**result.coverage_report,
+                "scope": "search_metadata_only",
+                "semantic_verification": "not_performed",
+                "stop_reason": stop_reason,
+            })
+            if emit:
+                emit(f"Search stopped: {stop_reason}; {round_index} round(s). Metadata coverage is not source understanding.")
+            break
+    elif (scope := temporal_scope(request.filters)) is not None:
+        # Reading-driven followups do not rank metadata or expand again. They
+        # still obey the original eligibility constraint before document ingest.
+        from simple_ar.research.evidence.retrieval import publication_scope_exclusion
+        rows, eligible = [], []
+        for paper in result.papers:
+            reason = publication_scope_exclusion(paper, scope)
+            if reason is None:
+                eligible.append(paper)
+            rows.append({"paper_id": paper.id, "published": paper.published,
+                         "decision": "discard" if reason else "keep",
+                         "reason": reason or "within_temporal_scope"})
+        result = replace(result, selected_papers=tuple(eligible), selection_rows=tuple(rows))
     diagnostics = list(result.diagnostics)
     if emit:
         emit(f"Search selection: {len(result.selected_papers)} papers retained.")
@@ -413,7 +514,8 @@ def run_search_capability(
         artifacts=(output,),
         diagnostics=tuple(diagnostics),
         usage={
-            "query_count": len(request.queries),
+            "query_count": len({_query_key(response.query) for response in result.responses}),
+            "round_count": max(result.response_rounds or ((1,) if result.responses else (0,))),
             "provider_count": len(request.providers),
             "response_count": len(result.responses),
             "paper_count": len(result.papers),
@@ -431,6 +533,7 @@ def select_search_result(
     result: SearchResult,
     *,
     policy: SearchSelectionPolicy,
+    filters: Mapping[str, object] | None = None,
 ) -> SearchResult:
     """Apply the canonical retrieval policy while retaining raw responses.
 
@@ -446,13 +549,14 @@ def select_search_result(
         select_retrieval_candidates,
     )
 
+    scope = temporal_scope(filters or {}, topic=policy.topic)
     query_numbers = {
-        query: index
+        _query_key(query): index
         for index, query in enumerate(policy.query_plan.queries, start=1)
         if query.strip()
     }
     specs = {
-        str(row.get("query") or "").strip(): row
+        _query_key(str(row.get("query") or "")): row
         for row in policy.query_plan.query_specs
         if isinstance(row, Mapping) and str(row.get("query") or "").strip()
     }
@@ -460,12 +564,13 @@ def select_search_result(
     retrieval_rows: list[dict[str, Any]] = []
     for response_index, response in enumerate(result.responses, start=1):
         query = response.query.strip()
-        query_spec = specs.get(query, {})
-        query_index = query_numbers.get(query, response_index)
+        query_spec = specs.get(_query_key(query), {})
+        query_index = query_numbers.get(_query_key(query), response_index)
+        round_index = result.response_rounds[response_index - 1] if result.response_rounds else 1
         retrieval_rows.append(
             {
                 "schema_version": "retrieval_round.v1",
-                "round": 1,
+                "round": round_index,
                 "query_index": query_index,
                 "query": query,
                 "source": response.source,
@@ -484,7 +589,7 @@ def select_search_result(
                     source=response.source,
                     query=query,
                     query_index=query_index,
-                    round_index=1,
+                    round_index=round_index,
                     facet=facet,
                     returned_source=response.source,
                 )
@@ -494,6 +599,7 @@ def select_search_result(
         max_documents=policy.max_documents,
         negative_terms=list(policy.query_plan.negative_terms),
         priority_facets=list(policy.query_plan.required_facets),
+        temporal_scope=scope,
     )
     coverage = build_coverage_report(
         topic=policy.topic,
@@ -504,12 +610,30 @@ def select_search_result(
         max_documents=policy.max_documents,
         next_query_limit=policy.next_query_limit,
     )
+    coverage.update(scope="search_metadata_only", semantic_verification="not_performed")
+    coverage["retrieval"]["attempts"] = retrieval_rows
     return replace(
         result,
         selected_papers=tuple(selected),
         selection_rows=tuple(selection_rows),
         coverage_report=coverage,
     )
+
+
+def _query_key(query: str) -> str:
+    return " ".join(query.split()).casefold()
+
+
+def _new_queries(queries: Iterable[str], executed: set[str]) -> list[str]:
+    seen = set(executed)
+    result = []
+    for query in queries:
+        normalized = " ".join(query.split())
+        key = _query_key(normalized)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(normalized)
+    return result
 
 
 def _run_provider(

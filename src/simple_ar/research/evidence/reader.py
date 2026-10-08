@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
 import math
+from threading import Lock
+from copy import deepcopy
 from typing import Any, Callable, Literal, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
+from simple_ar.integrations.llm import LLMError, LLMClient
+from simple_ar.integrations.model_profiles import model_connections_compatible
 from simple_ar.research.contracts import (
     ClaimCard,
     CodeLink,
@@ -153,6 +157,7 @@ class ReadRequest:
     use_llm: bool = False
     llm_client: Any | None = field(default=None, repr=False, compare=False)
     emit: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
+    previous: ReadResult | None = None
 
     def __post_init__(self) -> None:
         if self.use_llm and self.llm_client is None:
@@ -162,7 +167,11 @@ class ReadRequest:
 
 @dataclass(frozen=True, slots=True)
 class ReadResult:
-    """Typed evidence output produced from one selected document bundle."""
+    """Evidence from selected documents, plus optional metadata-only task gaps.
+
+    question_assessments are search proposals, not paper claims or proof that
+    a question was answered. Old read_result.v1 handoffs default to no rows.
+    """
 
     status: ReadStatus
     bundle: DocumentBundle
@@ -175,6 +184,7 @@ class ReadResult:
     paper_notes: tuple[dict[str, Any], ...] = ()
     notes_markdown: str = ""
     diagnostics: tuple[str, ...] = ()
+    question_assessments: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Return a compact summary without copying document text."""
@@ -190,6 +200,7 @@ class ReadResult:
             "code_link_count": len(self.code_links),
             "screening_decision_count": len(self.screening_decisions),
             "paper_note_count": len(self.paper_notes),
+            "question_assessment_count": len(self.question_assessments),
             "diagnostics": list(self.diagnostics),
         }
 
@@ -216,6 +227,7 @@ class ReadResult:
             "code_links": [link.to_row() for link in self.code_links],
             "screening_decisions": [dict(row) for row in self.screening_decisions],
             "paper_notes": [dict(row) for row in self.paper_notes],
+            "question_assessments": [dict(row) for row in self.question_assessments],
             "notes_markdown": self.notes_markdown,
             "diagnostics": list(self.diagnostics),
         }
@@ -258,11 +270,144 @@ class ReadResult:
                 if isinstance(row, Mapping)
             ),
             notes_markdown=str(data.get("notes_markdown") or ""),
+            question_assessments=tuple(dict(row) for row in data.get("question_assessments", [])
+                                       if isinstance(row, Mapping)),
             diagnostics=tuple(
                 str(item) for item in data.get("diagnostics", [])
             ),
         )
         return _with_evidence_validation(result)
+
+
+def new_source_queries(result: ReadResult) -> tuple[str, ...]:
+    """At most two external requests; whole-question gaps precede paper-local requests."""
+    from simple_ar.research.evidence.screening import _new_source_queries
+    return tuple(dict.fromkeys(q for note in (*result.question_assessments, *result.paper_notes)
+                              for q in _new_source_queries(note.get("new_source_queries", []))))[:2]
+
+
+def linked_material_records(
+    result: ReadResult, *, bundle: DocumentBundle, limit: int = 2,
+) -> tuple[DocumentRecord, ...]:
+    """Select explicit parent-cited links; syntax checks only, no DNS or fetching."""
+    from simple_ar.research.preparation_assets import validate_public_url
+    if limit <= 0:
+        return ()
+    seen = {r.url for r in bundle.records}
+    parents = {r.document_id: r for r in bundle.records if r.metadata.get("kind") != "supporting_material"}
+    chunks = {c.chunk_id: c for c in bundle.chunks}
+    records = []
+    # An explicit author repository beats framework links in the reference
+    # list. This is acquisition priority, not a judgment of scientific merit.
+    for link in sorted(result.code_links, key=lambda link: not bool(link.repository)):
+        parent = next((r for r in parents.values() if link.paper_id in
+            (r.document_id, r.metadata.get("paper_id"), r.source_id)), None)
+        chunk = next((chunks[c] for c in link.evidence_refs if c in chunks and parent is not None
+            and chunks[c].document_id == parent.document_id and link.url in chunks[c].text), None)
+        if chunk is None or link.url in seen:
+            continue
+        try:
+            validate_public_url(link.url)
+        except ValueError:
+            continue
+        records.append(DocumentRecord(document_id=f"{parent.document_id}#linked-{len(records) + 1}",
+            title=f"Linked material for {parent.title}", source="supporting_material", url=link.url,
+            metadata={"kind": "supporting_material", "parent_document_id": parent.document_id,
+                      "parent_chunk_id": chunk.chunk_id, "parent_quote": chunk.text,
+                      "content_scope": "linked_material_not_paper_or_measured_result"}))
+        seen.add(link.url)
+        if len(records) >= min(2, limit):
+            break
+    return tuple(records)
+
+
+def _append_unique(previous, fresh, key):
+    rows = {}
+    for row in (*previous, *fresh):
+        identifier = row[key] if isinstance(row, Mapping) else getattr(row, key)
+        if identifier in rows and rows[identifier] != row:
+            raise ValueError(f"Conflicting read evidence identity: {key}={identifier!r}")
+        rows.setdefault(identifier, row)
+    return list(rows.values())
+
+
+def _merge_fulltext(previous: dict, fresh: dict) -> dict:
+    """Merge the existing fulltext manifest/extraction formats, not arbitrary keys."""
+    if not previous or not fresh or previous == fresh:
+        return dict(previous or fresh)
+    rows = _append_unique(previous.get("documents", []), fresh.get("documents", []), "document_id")
+    counts = {"document_count", "hint_count", "selected_count", "fetch_attempt_count",
+              "cached_count", "parsed_count", "status_counts"}
+    metadata = (previous.keys() | fresh.keys()) - counts - {"documents", "notes"}
+    merged = {}
+    for key in metadata:
+        if key == "budget":
+            left, right = previous.get(key, {}), fresh.get(key, {})
+            for policy in ("max_pdf_mb", "keep_raw_pdf", "parser_backend"):
+                if policy in left and policy in right and left[policy] != right[policy]:
+                    raise ValueError(f"Conflicting fulltext policy: {policy}")
+            merged[key] = dict(left if key in previous else right)
+            continue
+        if key == "enabled":
+            merged[key] = bool(previous.get(key) or fresh.get(key))
+            continue
+        if key in previous and key in fresh and previous[key] != fresh[key]:
+            raise ValueError(f"Conflicting fulltext metadata: {key}")
+        merged[key] = previous[key] if key in previous else fresh[key]
+    merged.update(documents=rows, notes=list(dict.fromkeys(
+        previous.get("notes", []) + fresh.get("notes", []))))
+    if "budget" in merged:
+        note = ("Cumulative manifest budget retains the original total limits, not the fresh batch's "
+                "remaining allowance; each ingest attempt retains its own effective budget.")
+        if note not in merged["notes"]:
+            merged["notes"].append(note)
+    old_ids = {r["document_id"] for r in previous.get("documents", [])}
+    new_ids = {r["document_id"] for r in fresh.get("documents", [])}
+    summary = fresh if old_ids <= new_ids else previous if new_ids <= old_ids else None
+    for key in counts & (previous.keys() | fresh.keys()):
+        if key == "document_count":
+            merged[key] = len(rows)
+        elif summary is not None:
+            if old_ids == new_ids and key in previous and key in fresh and previous[key] != fresh[key]:
+                raise ValueError(f"Conflicting fulltext summary: {key}")
+            merged[key] = summary.get(key, {} if key == "status_counts" else 0)
+        else:
+            if old_ids & new_ids:
+                raise ValueError("Partially overlapping fulltext counters require reconciliation")
+            default = {} if key == "status_counts" else 0
+            left, right = previous.get(key, default), fresh.get(key, default)
+            merged[key] = ({s: left.get(s, 0) + right.get(s, 0) for s in left.keys() | right.keys()}
+                           if key == "status_counts" else left + right)
+    return merged
+
+
+def merge_read_results(previous: ReadResult, fresh: ReadResult) -> ReadResult:
+    """Append evidence without mutating inputs, replacing notes or clearing old questions."""
+    assessments = (*previous.question_assessments, *fresh.question_assessments)
+    if not fresh.bundle.records:
+        if not fresh.question_assessments:
+            return previous
+        return replace(previous, status="partial", question_assessments=assessments,
+            diagnostics=tuple(dict.fromkeys((*previous.diagnostics, *fresh.diagnostics))))
+    bundle = DocumentBundle(
+        records=_append_unique(previous.bundle.records, fresh.bundle.records, "document_id"),
+        chunks=_append_unique(previous.bundle.chunks, fresh.bundle.chunks, "chunk_id"),
+        sections=_append_unique(previous.bundle.sections, fresh.bundle.sections, "section_id"),
+        fulltext_manifest=_merge_fulltext(previous.bundle.fulltext_manifest, fresh.bundle.fulltext_manifest),
+        fulltext_extraction=_merge_fulltext(previous.bundle.fulltext_extraction, fresh.bundle.fulltext_extraction),
+    )
+    values = {name: tuple(_append_unique(getattr(previous, name), getattr(fresh, name), key))
+              for name, key in (("paper_cards", "paper_id"), ("claim_cards", "claim_id"),
+                  ("method_cards", "method_id"), ("dataset_cards", "dataset_id"),
+                  ("code_links", "link_id"), ("screening_decisions", "paper_id"), ("paper_notes", "paper_id"))}
+    status: ReadStatus = "empty" if not bundle.records else (
+        "partial" if "partial" in (previous.status, fresh.status) else "completed")
+    notes = previous.notes_markdown
+    if fresh.notes_markdown and fresh.notes_markdown not in notes:
+        notes = "\n\n".join(text for text in (notes, fresh.notes_markdown) if text)
+    return _with_evidence_validation(ReadResult(status=status, bundle=bundle, **values,
+        question_assessments=assessments,
+        notes_markdown=notes, diagnostics=tuple(dict.fromkeys((*previous.diagnostics, *fresh.diagnostics)))))
 
 
 def read_documents(request: ReadRequest) -> ReadResult:
@@ -274,9 +419,12 @@ def read_documents(request: ReadRequest) -> ReadResult:
     deriving cards from the selected records.
     """
     bundle = _select_bundle(request)
+    materials = [r for r in bundle.records if r.metadata.get("kind") == "supporting_material"]
+    material_ids = {r.document_id for r in materials}
     screening_decisions: tuple[dict[str, Any], ...] = ()
     paper_notes: tuple[dict[str, Any], ...] = ()
     notes_markdown = ""
+    question_assessments: list[dict[str, Any]] = []
     if request.use_llm and bundle.records:
         client = request.llm_client
         if client is None:
@@ -285,21 +433,28 @@ def read_documents(request: ReadRequest) -> ReadResult:
         fixed_sources = screening_mode == "auto" and {
             record.document_id for record in bundle.records
         } <= set(request.required_document_ids)
-        if screening_mode != "deterministic":
+        if screening_mode != "deterministic" and any(r.document_id not in material_ids for r in bundle.records):
             decisions = [] if fixed_sources else screen_papers_with_llm(
                 client,
                 topic=request.topic or "research topic",
                 problem_markdown=request.problem_markdown,
                 research_plan_json=request.research_plan_json or "{}",
                 emit=request.emit,
-                papers=[record.to_row() for record in bundle.records],
+                papers=[record.to_row() for record in bundle.records if record.document_id not in material_ids],
                 config=request.config,
+                question_assessments=question_assessments,
             )
             decisions = _preserve_required_screening(
                 bundle, decisions, request.required_document_ids, request.config,
             )
             screening_decisions = tuple(decisions)
-            bundle = _bundle_for_screening(bundle, decisions)
+            paper_bundle = replace(bundle, records=[r for r in bundle.records if r.document_id not in material_ids],
+                sections=[s for s in bundle.sections if s.document_id not in material_ids],
+                chunks=[c for c in bundle.chunks if c.document_id not in material_ids])
+            screened = _bundle_for_screening(paper_bundle, decisions)
+            bundle = replace(screened, records=[*screened.records, *materials],
+                sections=[*screened.sections, *(s for s in bundle.sections if s.document_id in material_ids)],
+                chunks=[*screened.chunks, *(c for c in bundle.chunks if c.document_id in material_ids)])
         if bundle.records:
             snippets = {record.document_id: format_bundle_evidence_snippets(
                 bundle, document_id=record.document_id,
@@ -312,7 +467,10 @@ def read_documents(request: ReadRequest) -> ReadResult:
                 front_matter_by_document={section.document_id: front_matter_view(section)
                     for section in bundle.sections if section.section == "front_matter"},
                 topic=request.topic,
-                problem_markdown=request.problem_markdown,
+                problem_markdown=request.problem_markdown + (
+                    "\nRecords with source=supporting_material are linked webpages, not papers or verified official sources. "
+                    "Read them only for the task questions; preserve their own passage citations and distinguish "
+                    "author statements from measured cost or verified runnable code." if materials else ""),
                 emit=request.emit,
                 config=request.config,
             )
@@ -337,28 +495,37 @@ def read_documents(request: ReadRequest) -> ReadResult:
             notes_markdown = render_paper_notes_markdown(paper_notes)
     if not bundle.records:
         return ReadResult(
-            status="empty",
+            status="partial" if question_assessments else "empty",
             bundle=bundle,
             screening_decisions=screening_decisions,
             paper_notes=paper_notes,
             notes_markdown=notes_markdown,
+            question_assessments=tuple(question_assessments),
             diagnostics=("No documents matched the requested read selection.",),
         )
 
+    papers = [r for r in bundle.records if r.document_id not in material_ids]
     paper_cards, claim_cards = build_evidence_cards(
-        documents=bundle.records,
+        documents=papers,
         chunks=bundle.chunks,
     )
-    method_cards = build_method_cards(documents=bundle.records, chunks=bundle.chunks)
-    dataset_cards = build_dataset_cards(documents=bundle.records, chunks=bundle.chunks)
-    code_links = build_code_links(documents=bundle.records, chunks=bundle.chunks)
+    method_cards = build_method_cards(documents=papers, chunks=bundle.chunks)
+    dataset_cards = build_dataset_cards(documents=papers, chunks=bundle.chunks)
+    code_links = build_code_links(documents=papers, chunks=bundle.chunks)
     diagnostics: list[str] = []
     status: ReadStatus = "completed"
+    if any(row["status"] != "direct_candidate" for row in question_assessments):
+        status = "partial"
+        diagnostics.append("Required question evidence remains missing or context-only in the candidate assessment.")
     pending = [note["paper_id"] for note in paper_notes
-               if note.get("reading_followup", {}).get("pending_queries")]
+               if note.get("reading_followup", {}).get("pending_queries", note.get("followup_queries"))]
     if pending:
         status = "partial"
         diagnostics.append(f"Source questions remain after one bounded reading followup: {', '.join(pending[:5])}.")
+    failed = [note["paper_id"] for note in paper_notes
+              if note.get("reading_followup", {}).get("revision_status") == "failed"]
+    if failed:
+        diagnostics.append(f"Optional source reread failed; prior notes retained without resolving gaps: {', '.join(failed)}.")
     if not bundle.chunks:
         status = "partial"
         diagnostics.append(
@@ -386,8 +553,68 @@ def read_documents(request: ReadRequest) -> ReadResult:
         screening_decisions=screening_decisions,
         paper_notes=paper_notes,
         notes_markdown=notes_markdown,
+        question_assessments=tuple(question_assessments),
         diagnostics=tuple(diagnostics),
     ))
+
+
+class _ReadProgressClient:
+    """Keep completed model reads in this attempt; failures still propagate.
+
+    This is a read-stage checkpoint, not a shared response cache. Exact prompts,
+    registered inputs, action and connection bind reuse to an explicit retry.
+    Each worker persists its result before the batch can fail.
+    """
+
+    def __init__(self, client: LLMClient, context: CapabilityContext):
+        self.client, self.context = client, context
+        self.lock = Lock()
+        self.binding = client.connection_binding()
+        self.rows: list[dict[str, Any]] = []
+        self.inputs = [ref.to_dict() for ref in context.inputs]
+        root = (context.input_store or context.store).root
+        # Inspect only read checkpoints in this session, never project files.
+        paths = sorted((root / "attempts").glob("*/read_progress.json"))
+        current = context.store.root / "read_progress.json"
+        if current.is_file() and current not in paths:
+            paths.append(current)
+        for path in paths:
+            saved = (context.input_store or context.store).read_json(path)
+            if (saved.get("schema_version") == "read_progress.v1"
+                    and saved.get("inputs") == self.inputs
+                    and saved.get("trigger") == context.attempt.trigger
+                    and saved.get("model") == client.model
+                    and model_connections_compatible(saved.get("connection", {}), self.binding)):
+                self.rows.extend(saved.get("completed", []))
+        # Later checkpoints already include earlier completions; do not grow
+        # the journal by copying those rows again on each recovery.
+        self.rows = list({tuple(row["prompt"][key] for key in ("system", "user", "label")): row
+                          for row in self.rows}.values())
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.client, name)
+
+    def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, Any]:
+        prompt = {"system": system, "user": user, "label": label}
+        with self.lock:
+            for row in reversed(self.rows):
+                if row["prompt"] == prompt:
+                    return deepcopy(row["response"])
+        response = self.client.ask_json(system, user, label=label)
+        with self.lock:
+            self.rows.append({"prompt": prompt, "response": deepcopy(response)})
+            self.context.store.write_json("read_progress.json", {
+                "schema_version": "read_progress.v1", "inputs": self.inputs,
+                "trigger": self.context.attempt.trigger, "model": self.client.model,
+                "connection": self.binding, "completed": self.rows,
+            }, kind="read_progress", schema="read_progress.v1", producer="research.read")
+        return response
+
+    def ask_json_many(self, requests, *, max_workers=4):
+        # Reuse the existing bounded scheduler, cancellation and ordering.
+        return LLMClient._run_many(self, requests,
+            lambda request: self.ask_json(request.system, request.user, label=request.label),
+            max_workers=max_workers)
 
 
 def run_read_capability(
@@ -402,7 +629,17 @@ def run_read_capability(
     not fetch documents or silently expand the selection.  Model assistance is
     still explicit on ``ReadRequest``.
     """
+    # Named connection snapshots contain no secret values. Legacy/duck-typed
+    # clients keep their existing behavior rather than an unbound checkpoint.
+    if (request.use_llm and isinstance(request.llm_client, LLMClient)
+            and request.llm_client.connection_binding()):
+        request = replace(request, llm_client=_ReadProgressClient(request.llm_client, context))
     result = read_documents(request)
+    bundle_output = ()
+    if request.previous is not None:
+        result = merge_read_results(request.previous, result)
+        bundle_output = (context.store.write_json("document_bundle.json", result.bundle.to_handoff_dict(),
+            kind="document_bundle", schema="document_bundle.v1", producer="research.read"),)
     output = context.store.write_json(
         "read_result.json",
         result.to_handoff_dict(),
@@ -417,7 +654,7 @@ def run_read_capability(
     }[result.status]
     return CapabilityResult(
         status=status,  # type: ignore[arg-type]
-        artifacts=(output,),
+        artifacts=(output, *bundle_output),
         diagnostics=result.diagnostics,
         usage={
             "documents": len(result.bundle.records),
@@ -601,11 +838,12 @@ def _refine_reading_gaps(
 
     The saved bundle remains the source owner. Query excerpts are bounded
     provenance for this correction, not another index or a support verdict.
-    Failures propagate through the existing Read attempt; no silent success.
+    Initial reading errors still fail the Read attempt. Optional model reread
+    errors retain prior notes as partial, with unresolved gaps and no retry.
     """
     records = {record.document_id: record for record in bundle.records}
     output = []
-    for note in notes:
+    for note_index, note in enumerate(notes):
         queries = list(dict.fromkeys(note.get("followup_queries", [])))[:2]
         if not queries:
             output.append(note)
@@ -656,13 +894,25 @@ def _refine_reading_gaps(
             _emit = request.emit
             if _emit is not None:
                 _emit(f"Rereading source gaps for {note['paper_id']} (one bounded round).")
-            revised = read_paper_notes_with_llm(request.llm_client,
-                papers=[records[note["paper_id"]].to_row()], evidence_snippets_by_document=snippets,
-                front_matter_by_document={section.document_id: front_matter_view(section)
-                    for section in bundle.sections if section.section == "front_matter"},
-                revision_context_by_document={note["paper_id"]: {"previous_note": note, "source_lookup": trace}},
-                topic=request.topic, problem_markdown=request.problem_markdown,
-                config=request.config, emit=request.emit)[0]
+            try:
+                revised = read_paper_notes_with_llm(request.llm_client,
+                    papers=[records[note["paper_id"]].to_row()], evidence_snippets_by_document=snippets,
+                    front_matter_by_document={section.document_id: front_matter_view(section)
+                        for section in bundle.sections if section.section == "front_matter"},
+                    revision_context_by_document={note["paper_id"]: {"previous_note": note, "source_lookup": trace}},
+                    topic=request.topic, problem_markdown=request.problem_markdown,
+                    config=request.config, emit=request.emit)[0]
+            except LLMError:
+                # Initial notes already succeeded. An optional reread must not
+                # discard them or trigger more calls after unknown usage/budget
+                # failure. Retain unresolved questions and the observed windows;
+                # the shared ledger still owns the failed request and its usage.
+                trace["revision_status"] = "failed"
+                note["reading_followup"] = trace
+                if _emit is not None:
+                    _emit(f"Source reread failed for {note['paper_id']}; keeping prior notes and stopping optional rereads.")
+                output.extend(notes[note_index:])
+                return output
             trace.update(revision_performed=True, pending_queries=revised.get("followup_queries", []),
                          prior_note=note)
             revised["reading_coverage"] = {**note["reading_coverage"],
@@ -682,7 +932,7 @@ def reading_followup_context(value: Any, *, include_passages: bool = False) -> d
     must consume the adopted note, not implicitly adopt its historical drafts.
     Preserve unresolved queries and, when requested, the original passages.
     """
-    keys = ("lookups", "pending_queries", "revision_performed", "scope")
+    keys = ("lookups", "pending_queries", "revision_performed", "revision_status", "scope")
     if include_passages:
         keys += ("passages",)
     return {key: value[key] for key in keys if key in value} if isinstance(value, Mapping) else {}
@@ -995,6 +1245,8 @@ __all__ = [
     "ReadRequest",
     "ReadResult",
     "ReadStatus",
+    "new_source_queries",
+    "merge_read_results",
     "format_bundle_evidence_snippets",
     "reading_followup_context",
     "select_representative_chunks",

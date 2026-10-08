@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlsplit
 
 from simple_ar.literature.models import Paper
 from simple_ar.research.sources import SearchProviderRegistry, default_search_provider_registry, SearchRequest, search_sources
@@ -13,6 +16,57 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class SearchProviderRegistryTests(unittest.TestCase):
+    def test_native_temporal_filters_use_existing_connectors_and_http_params(self) -> None:
+        from simple_ar.research.connectors.arxiv import ArxivConnector
+        from simple_ar.research.connectors.openalex import OpenAlexConnector
+        from simple_ar.research.connectors.semantic_scholar import SemanticScholarConnector
+        from simple_ar.literature.openalex_client import OpenAlexSearchClient, OpenAlexSearchError
+        from simple_ar.literature.semantic_scholar_client import SemanticScholarSearchClient, SemanticScholarSearchError
+        scope = {"start_year": 2010, "end_year": 2014, "basis_quote": "2010 through 2014"}
+        request = SearchQuery("interval method", max_results=8, filters={"temporal_scope": scope})
+        arxiv = Mock()
+        arxiv.search.return_value = []
+        response = ArxivConnector(arxiv).search(request)
+        arxiv.search.assert_called_once_with(
+            "(all:interval AND all:method) AND submittedDate:[201001010000 TO 201412312359]", max_results=8)
+        self.assertEqual(response.query, "interval method")  # Trace/round identity is unchanged.
+        with patch("simple_ar.literature.openalex_client._respect_rate_limit"), \
+             patch.dict(os.environ, {"OPENALEX_API_KEY": "fake-openalex-key"}), \
+             patch("simple_ar.literature.openalex_client.requests.get") as get:
+            get.return_value.json.return_value = {"results": []}
+            OpenAlexConnector(OpenAlexSearchClient()).search(request)
+            self.assertEqual(get.call_args.kwargs["params"]["filter"], "publication_year:2010-2014")
+            self.assertEqual(get.call_args.kwargs["params"]["per-page"], 8)
+            self.assertEqual(get.call_args.kwargs["headers"]["Authorization"], "Bearer fake-openalex-key")
+            self.assertNotIn("api_key", get.call_args.kwargs["params"])
+            self.assertEqual(OpenAlexSearchClient(api_key="").api_key, "")
+            with self.assertRaises(OpenAlexSearchError):
+                OpenAlexSearchClient().search("x", year_range=(True, 2014))
+            self.assertEqual(get.call_count, 1)
+        with patch.dict(os.environ, {"SEMANTIC_SCHOLAR_API_KEY": "fake-s2-key"}):
+            client = SemanticScholarSearchClient()
+            self.assertEqual(SemanticScholarSearchClient(api_key="").api_key, "")
+        with patch("simple_ar.literature.semantic_scholar_client._respect_rate_limit"), \
+             patch.object(client, "_request_json", return_value={"data": []}) as fetch:
+            SemanticScholarConnector(client).search(request)
+            params = parse_qs(urlsplit(fetch.call_args.args[0]).query)
+            self.assertEqual(params["year"], ["2010-2014"])
+            self.assertEqual(params["query"], ["interval method"])
+            self.assertEqual(params["limit"], ["8"])
+            self.assertEqual(fetch.call_args.args[1]["x-api-key"], "fake-s2-key")
+            self.assertNotIn("api_key", params)
+            with self.assertRaises(SemanticScholarSearchError):
+                client.search("x", year_range=(2014, 2010))
+            self.assertEqual(fetch.call_count, 1)
+        # Old plans preserve signatures and don't send an optional filter.
+        arxiv.reset_mock()
+        ArxivConnector(arxiv).search(SearchQuery("interval method", 8))
+        arxiv.search.assert_called_once_with("all:interval AND all:method", max_results=8)
+        for query in ('ti:"interval method"', '(all:interval OR all:coverage) AND cat:stat.ML'):
+            arxiv.reset_mock()
+            ArxivConnector(arxiv).search(SearchQuery(query, 8))
+            arxiv.search.assert_called_once_with(query, max_results=8)
+
     def test_registry_registers_and_resolves_lazy_connectors(self) -> None:
         calls: list[str] = []
 

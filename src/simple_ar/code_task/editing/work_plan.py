@@ -383,7 +383,7 @@ def _work_plan_user_prompt(
         "- Use only workspace-relative paths from the supplied index in `target_files` and "
         "`read_only_evidence`.\n"
         "- Inventory `read_only_files` are evidence only. Never put them in `target_files`.\n"
-        "- Prefer `budget_profile` = `normal`: roughly 1-2 files, compact old/new edits, and concise output.\n"
+        "- Prefer `budget_profile` = `normal`: a small cohesive change within the supplied file and character limits; use compact old/new edits.\n"
         "- Use `large` only when a single function or closely coupled change genuinely needs it.\n"
         "- Use `absolute` only for rare cases that should require explicit human approval.\n"
         "- If more context is needed, write a concrete `context_request` instead of guessing.\n"
@@ -596,7 +596,7 @@ def _normalize_work_items(
         budget = _string(raw.get("budget_profile")).lower() or "normal"
         if budget not in VALID_BUDGET_PROFILES:
             budget = "normal"
-        # A normal proposal can touch at most two files.  Keep the work plan
+        # Keep the work plan
         # and the proposal budget consistent when a single cohesive item
         # names more files; otherwise the model receives an impossible task
         # and can only return an empty proposal.  The large profile still
@@ -857,7 +857,7 @@ def _first_editable_files(
 
 def _budget_profiles() -> dict[str, dict[str, Any]]:
     profiles = budget_profiles_json()
-    profiles["normal"]["description"] = "Default small batch. Prefer 1-2 files and compact edit output."
+    profiles["normal"]["description"] = "Default compact cohesive batch within the supplied file and character limits."
     profiles["large"]["description"] = "For one cohesive function/module change that cannot be split cleanly."
     profiles["absolute"]["description"] = "Rare escape hatch for broad changes; should normally be rejected or split."
     return profiles

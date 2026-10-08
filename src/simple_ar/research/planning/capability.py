@@ -21,7 +21,7 @@ from simple_ar.research.prompts import (
     plan_user_prompt,
     research_planner_user_prompt,
 )
-from simple_ar.research.sources.base import build_source_plan, primary_query
+from simple_ar.research.sources.base import build_source_plan, primary_query, temporal_scope
 from simple_ar.research.task_plan import TaskPlanRequest, build_task_plan
 
 from .planner import (
@@ -333,6 +333,7 @@ def build_requested_research_plan(request: ResearchPlanRequest) -> ResearchPlanR
         default_query=request.default_query or request.topic,
         data=data,
     )
+    scope = temporal_scope({"temporal_scope": data.get("temporal_scope")}, topic=request.topic)
     source_config = dict(config)
     source_config["research_queries"] = list(query_plan.queries)
     source_plan = build_source_plan(
@@ -342,6 +343,8 @@ def build_requested_research_plan(request: ResearchPlanRequest) -> ResearchPlanR
         default_query=primary_query(query_plan) or request.topic,
         default_max_results=request.default_max_results,
     )
+    if scope is not None:
+        source_plan = replace(source_plan, filters={**source_plan.filters, "temporal_scope": scope})
     return ResearchPlanResult(
         questions=tuple(questions),
         query_plan=query_plan,
@@ -414,6 +417,8 @@ def _query_plan_from_row(row: Mapping[str, Any]) -> QueryPlan:
 
 def _source_plan_from_row(row: Mapping[str, Any]) -> SourcePlan:
     index_root = row.get("index_root")
+    filters = dict(row.get("filters")) if isinstance(row.get("filters"), Mapping) else {}
+    temporal_scope(filters, topic=filters.get("topic") if isinstance(filters.get("topic"), str) else None)
     return SourcePlan(
         queries=_string_list(row.get("queries")),
         sources=_string_list(row.get("sources")),
@@ -425,7 +430,7 @@ def _source_plan_from_row(row: Mapping[str, Any]) -> SourcePlan:
         cache_enabled=bool(row.get("cache_enabled", True)),
         index_backend=str(row.get("index_backend") or "keyword"),
         index_root=str(index_root) if index_root else None,
-        filters=dict(row.get("filters")) if isinstance(row.get("filters"), Mapping) else {},
+        filters=filters,
         budget=dict(row.get("budget")) if isinstance(row.get("budget"), Mapping) else {},
         rationale=str(row.get("rationale") or ""),
     )

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from contextlib import suppress
+import codecs
+from dataclasses import replace
+import hashlib
 import re
 from collections import Counter
 from pathlib import Path
@@ -67,9 +70,15 @@ def build_fulltext_manifest(
         A JSON-friendly manifest describing full-text hints, selected candidates,
         cached resources, and skipped/failed reasons. Remote downloads are only
         attempted when full-text intent and permissions allow them.
+        The legacy max_pdf_mb budget limits each remote PDF, HTML or text
+        resource, including cache reuse; zero/unset retains the unlimited default.
     """
     max_documents = _positive_int(source_plan.budget.get("max_fulltext_documents"), default=0)
     max_fetch_attempts = _fulltext_fetch_attempt_cap(source_plan.budget, target=max_documents)
+    reserve = min(_positive_int(source_plan.budget.get("reserved_fulltext_documents"), default=0),
+                  max(0, max_documents - 1))
+    document_limit = max_documents - reserve if max_documents else 0
+    attempt_limit = max(1, max_fetch_attempts - reserve) if reserve and max_fetch_attempts else max_fetch_attempts
     max_pdf_bytes = _positive_int(source_plan.budget.get("max_pdf_mb"), default=0) * 1024 * 1024
     keep_raw_pdf = bool(source_plan.budget.get("keep_raw_pdf")) if isinstance(source_plan.budget.get("keep_raw_pdf"), bool) else False
     parser_backend = str(source_plan.budget.get("parser_backend") or "basic")
@@ -92,8 +101,8 @@ def build_fulltext_manifest(
                 allow_pdf_download=source_plan.allow_pdf_download,
                 fetch_attempt_count=fetch_attempt_count,
                 cached_count=remote_cached_count,
-                max_documents=max_documents,
-                max_fetch_attempts=max_fetch_attempts,
+                max_documents=document_limit,
+                max_fetch_attempts=attempt_limit,
                 max_pdf_bytes=max_pdf_bytes,
             )
             if planned.status == "selected":
@@ -109,12 +118,17 @@ def build_fulltext_manifest(
                             cache_dir=cache_dir,
                             max_pdf_bytes=max_pdf_bytes,
                             keep_raw_pdf=keep_raw_pdf,
+                            allow_pdf_download=source_plan.allow_pdf_download,
                         )
             if planned.status == "cached":
                 cached_count += 1
-                if not planned.local_path:
+                if not hint.local_path:
                     remote_cached_count += 1
-            row_hints.append(planned.to_row())
+            hint_row = planned.to_row()
+            if hint.kind == "landing":
+                hint_row.update(original_hint=hint.to_row(),
+                                content_scope="source_webpage_not_verified_paper_fulltext")
+            row_hints.append(hint_row)
         rows.append(
             {
                 "document_id": record.document_id,
@@ -155,10 +169,13 @@ def build_fulltext_manifest(
         "status_counts": dict(sorted(status_counts.items())),
         "documents": rows,
         "notes": [
+            f"This acquisition leaves {reserve} document slots for later evidence; total limits remain unchanged.",
             "Full-text fetching is permissioned and failure-safe; failed fetches do not fail the search stage.",
             "Fetch failures are replenished from later candidates up to the bounded fetch-attempt cap.",
             "Remote PDFs are selected only when both use_fulltext and allow_pdf_download are enabled.",
+            "max_pdf_mb limits bytes per remote resource for PDF, HTML and text, including reused remote cache files; zero/unset means no byte limit.",
             "Local files can be used as full-text inputs without network access.",
+            "Landing URLs are detected by response type/content; webpage access does not establish paper methods or complete paper access. Original hints retain provenance.",
         ],
     }
 
@@ -206,7 +223,7 @@ def _plan_hint(
         return _replace_hint(hint, status="skipped", reason="max_fulltext_documents_reached")
     if max_fetch_attempts and fetch_attempt_count >= max_fetch_attempts:
         return _replace_hint(hint, status="skipped", reason="max_fulltext_fetch_attempts_reached")
-    if hint.kind in {"pdf", "html", "text"}:
+    if hint.kind in {"pdf", "html", "text", "landing"}:
         return _replace_hint(hint, status="selected", reason="within_fulltext_budget")
     return _replace_hint(hint, status="hint_only", reason="unsupported_remote_fulltext_kind")
 
@@ -226,6 +243,7 @@ def _cache_selected_hint(
     cache_dir: Path,
     max_pdf_bytes: int,
     keep_raw_pdf: bool,
+    allow_pdf_download: bool,
 ) -> FulltextHint:
     if hint.local_path:
         return _cache_local_hint(hint)
@@ -234,7 +252,8 @@ def _cache_selected_hint(
     if hint.kind == "pdf" and not keep_raw_pdf:
         return _replace_hint(hint, status="skipped", reason="raw_pdf_retention_disabled")
     try:
-        cached = _fetch_remote_hint(hint, cache_dir=cache_dir, max_bytes=max_pdf_bytes if hint.kind == "pdf" else 0)
+        cached = _fetch_remote_hint(hint, cache_dir=cache_dir, max_bytes=max_pdf_bytes,
+                                    allow_pdf_download=allow_pdf_download, keep_raw_pdf=keep_raw_pdf)
     except Exception as exc:
         return _replace_hint(hint, status="fetch_failed", reason=str(exc)[:300])
     return cached
@@ -257,66 +276,117 @@ def _cache_local_hint(hint: FulltextHint) -> FulltextHint:
     )
 
 
-def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int) -> FulltextHint:
+def _remote_content_kind(content_type: str, head: bytes, *, fallback: str) -> str:
+    """Detect supported bytes, never infer a PDF permission from its URL."""
+    mime = content_type.partition(";")[0].strip().lower()
+    if _bytes_look_like_pdf(head):
+        return "pdf"
+    if "pdf" in mime:
+        raise RuntimeError("remote_content_not_pdf")
+    if any(value < 32 and value not in (9, 10, 13) for value in head):
+        raise RuntimeError("unsupported_remote_content")
+    if mime in {"text/html", "application/xhtml+xml"}:
+        return "html"
+    if mime == "text/plain":
+        return "text"
+    if mime and mime not in {"application/octet-stream", "binary/octet-stream"}:
+        raise RuntimeError("unsupported_remote_content_type")
+    if re.search(br"<(?:!doctype\s+html|html|head|body|article|main|h[1-6]|p|div)(?:\s|>)", head.lower()):
+        return "html"
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(head, final=False)
+    except UnicodeDecodeError:
+        raise RuntimeError("unsupported_remote_content") from None
+    return fallback if fallback in {"html", "text"} else "text"
+
+
+def _check_remote_pdf_policy(kind: str, *, allow_pdf_download: bool, keep_raw_pdf: bool) -> None:
+    if kind == "pdf":
+        if not allow_pdf_download:
+            raise RuntimeError("pdf_download_disabled")
+        if not keep_raw_pdf:
+            raise RuntimeError("raw_pdf_retention_disabled")
+
+
+def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int,
+                       allow_pdf_download: bool, keep_raw_pdf: bool) -> FulltextHint:
+    """Enforce the shared max_pdf_mb byte budget for every remote content kind."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    suffix = _cache_suffix(hint)
-    cache_path = cache_dir / f"{_safe_name(hint.document_id)}-{_safe_name(hint.source)}{suffix}"
-    if _usable_cache_file(cache_path, kind=hint.kind):
-        return FulltextHint(
-            document_id=hint.document_id,
-            kind=hint.kind,
-            source=hint.source,
-            url=hint.url,
-            local_path=str(cache_path),
-            access=hint.access,
-            status="cached",
-            reason="cache_hit",
-            size_bytes=cache_path.stat().st_size,
-        )
+    stem = f"{_safe_name(hint.document_id)}-{_safe_name(hint.source)}"
+    def path_for_kind(kind: str) -> Path:
+        # Keep legacy explicit-kind caches; detected types belong to this URL.
+        name = stem if kind == hint.kind else stem + "-" + hashlib.sha256(str(hint.url).encode()).hexdigest()[:16]
+        return cache_dir / (name + _cache_suffix(replace(hint, kind=kind)))
+    kinds = ("pdf",) if hint.kind == "pdf" else tuple(dict.fromkeys((hint.kind, "html", "text", "pdf")))
+    kinds = tuple(kind for kind in kinds if kind != "landing")
+    for kind in kinds:
+        cache_path = path_for_kind(kind)
+        if not _usable_cache_file(cache_path, kind=kind):
+            continue
+        size = cache_path.stat().st_size
+        if max_bytes and size > max_bytes:
+            raise RuntimeError("remote_file_exceeds_max_pdf_mb")
+        with cache_path.open("rb") as handle:
+            detected = _remote_content_kind("", handle.read(1024), fallback=kind)
+        _check_remote_pdf_policy(detected, allow_pdf_download=allow_pdf_download, keep_raw_pdf=keep_raw_pdf)
+        if detected != kind:
+            raise RuntimeError("remote_cached_content_kind_mismatch")
+        return replace(hint, kind=detected, local_path=str(cache_path), status="cached",
+                       reason="cache_hit", size_bytes=size)
     request = urllib.request.Request(
         str(hint.url),
         headers={"User-Agent": "SimpleAutoResearch/0.1"},
     )
     bytes_written = 0
+    cache_path = None  # Only remove a file opened by this attempt, not prior cache.
     try:
-        with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SEC) as response, cache_path.open("wb") as handle:
+        if hint.source == "supporting_material":
+            from simple_ar.research.preparation_assets import public_document_response
+            response_context = public_document_response(str(hint.url), max_bytes=max_bytes)
+        else:
+            response_context = urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SEC)
+        with response_context as response:
             length = response.headers.get("Content-Length")
             content_type = str(response.headers.get("Content-Type") or "").lower()
             if hint.kind == "pdf" and content_type and not _content_type_may_be_pdf(content_type):
                 raise RuntimeError(f"remote_content_type_not_pdf:{content_type}")
+            if "pdf" in content_type:
+                _check_remote_pdf_policy("pdf", allow_pdf_download=allow_pdf_download, keep_raw_pdf=keep_raw_pdf)
             if max_bytes and length:
                 try:
                     if int(length) > max_bytes:
                         raise RuntimeError("remote_file_exceeds_max_pdf_mb")
                 except ValueError:
                     pass
-            first_chunk = response.read(1024 * 1024)
-            if hint.kind == "pdf" and first_chunk and not _bytes_look_like_pdf(first_chunk):
+            first_chunk = response.read(1024)
+            if not first_chunk:
+                raise RuntimeError("empty_fulltext_fetch")
+            kind = _remote_content_kind(content_type, first_chunk, fallback=hint.kind)
+            if hint.kind == "pdf" and kind != "pdf":
                 raise RuntimeError("remote_content_not_pdf")
-            if first_chunk:
-                bytes_written += len(first_chunk)
+            _check_remote_pdf_policy(kind, allow_pdf_download=allow_pdf_download, keep_raw_pdf=keep_raw_pdf)
+            cache_path = path_for_kind(kind)
+            with cache_path.open("wb") as handle:
+                bytes_written = len(first_chunk)
                 if max_bytes and bytes_written > max_bytes:
                     raise RuntimeError("remote_file_exceeds_max_pdf_mb")
                 handle.write(first_chunk)
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                bytes_written += len(chunk)
-                if max_bytes and bytes_written > max_bytes:
-                    raise RuntimeError("remote_file_exceeds_max_pdf_mb")
-                handle.write(chunk)
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    bytes_written += len(chunk)
+                    if max_bytes and bytes_written > max_bytes:
+                        raise RuntimeError("remote_file_exceeds_max_pdf_mb")
+                    handle.write(chunk)
     except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError):
-        with suppress(OSError):
-            cache_path.unlink()
+        if cache_path is not None:
+            with suppress(OSError):
+                cache_path.unlink()
         raise
-    if bytes_written == 0:
-        with suppress(OSError):
-            cache_path.unlink()
-        raise RuntimeError("empty_fulltext_fetch")
     return FulltextHint(
         document_id=hint.document_id,
-        kind=hint.kind,
+        kind=kind,
         source=hint.source,
         url=hint.url,
         local_path=str(cache_path),

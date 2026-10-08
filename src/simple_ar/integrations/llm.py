@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+import asyncio
+import base64
+from io import BytesIO
 import json
 import logging
+import math
 import os
+from pathlib import Path
+import queue
 import re
 import threading
 import time
@@ -11,16 +18,24 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Sequence, TypeVar
 from uuid import uuid4
 
+from PIL import Image
+
 os.environ.setdefault("LITELLM_LOG", "ERROR")
 import litellm
 from dotenv import load_dotenv
 
 from simple_ar.core.budget import BudgetError, BudgetLedger
-from simple_ar.integrations.model_profiles import ModelCatalog, ModelConfigError, load_model_catalog
+from simple_ar.integrations.model_profiles import ModelCatalog, ModelConfigError, load_model_catalog, resolve_proxy_env
 
 
 T = TypeVar("T")
 UsageCallback = Callable[["LLMUsage"], None]
+
+# Local admission limits, not provider-specific size/token rules. The token
+# allowance is a deliberately conservative estimate, never reported as usage.
+MAX_VISION_BYTES = 20 * 1024 * 1024
+MAX_VISION_PIXELS = 4_194_304
+ESTIMATED_IMAGE_INPUT_TOKENS = 8192
 
 
 class LLMError(RuntimeError):
@@ -33,6 +48,10 @@ class LLMResponseError(LLMError):
 
 class LLMStreamError(LLMError):
     """An opened response stream failed before a complete response was assembled."""
+
+
+class LLMDeadlineError(LLMError):
+    """Chat stream wall-clock deadline elapsed; final usage is unknown."""
 
 
 @dataclass(frozen=True)
@@ -48,7 +67,9 @@ class LLMSettings:
         output_price_per_million: Optional output-token price used for local
             cost estimates.
         request_timeout_sec: Optional per-request provider timeout in
-            seconds. Direct ``LLMSettings`` instances may use ``None`` to
+            seconds; finite SDK Chat streaming also has an elapsed-time
+            deadline and up to two seconds of cleanup. Other transports
+            retain their network timeout semantics. Direct instances may use ``None`` to
             disable it; ``from_env`` uses a documented finite default unless
             the environment explicitly disables the timeout.
         max_output_tokens: Optional client-wide default output-token budget per
@@ -91,6 +112,8 @@ class LLMSettings:
             because this client only normalizes Chat Completions chunks.
         http2: Opt in to the SDK's HTTP/2 transport; requires the optional
             HTTP/2 dependency and does not change the provider request body.
+        proxy_env: Optional environment reference for SDK-only HTTP(S) proxy
+            transport. The resolved URL is never part of settings or identity.
     """
 
     model: str = "gpt-4o-mini"
@@ -112,6 +135,7 @@ class LLMSettings:
     reasoning_output_tokens: int | None = None
     stream: bool = False
     http2: bool = False
+    proxy_env: str = ""  # Environment reference only; resolved URLs are call-local.
 
 
 @dataclass(frozen=True)
@@ -124,8 +148,8 @@ class LLMUsage:
         prompt_tokens: Input token count.
         completion_tokens: Output token count.
         total_tokens: Total token count.
-        source: ``provider`` when usage came from the API, otherwise
-            ``estimated``.
+        source: ``provider``, text-only ``estimated``, or visual ``unknown``.
+            Unknown visual token counts and cost are None, never zero usage.
         estimated_cost_usd: Estimated USD cost when pricing is configured.
         provider_attempts: Number of lower-level provider calls used for this
             successful ``ask()`` request, including transient retries and
@@ -134,12 +158,13 @@ class LLMUsage:
 
     model: str
     label: str
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
     source: str
     estimated_cost_usd: float | None = None
     provider_attempts: int = 1
+    estimated_image_input_tokens: int = 0
 
     def to_row(self) -> dict[str, Any]:
         """Convert usage into a JSON-serializable record."""
@@ -152,6 +177,8 @@ class LLMUsage:
             "source": self.source,
             "estimated_cost_usd": self.estimated_cost_usd,
             "provider_attempts": self.provider_attempts,
+            **({"estimated_image_input_tokens": self.estimated_image_input_tokens}
+               if self.estimated_image_input_tokens else {}),
         }
 
 
@@ -204,6 +231,8 @@ class LLMClient:
         Raises:
             LLMError: If the API key is missing.
         """
+        if settings.proxy_env and settings.transport_backend != "openai":
+            raise LLMError("proxy_env is supported by the OpenAI SDK transport only")
         if not settings.api_key:
             raise LLMError("OPENAI_API_KEY is not configured")
         if settings.http2 and settings.transport_backend != "openai":
@@ -268,6 +297,8 @@ class LLMClient:
                     budget_session_id=budget_session_id, budget_attempt_id=budget_attempt_id)
             if model and model.startswith(("profile:", "route:")):
                 raise ModelConfigError("Named models require a model catalog; set SIMPLE_AR_MODELS_CONFIG")
+            if purpose == "vision":
+                raise ModelConfigError("Vision requires a named profile declaring vision capability")
         except ModelConfigError as exc:
             raise LLMError(str(exc)) from None
         settings = LLMSettings(
@@ -307,8 +338,9 @@ class LLMClient:
         max_output_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
         budget_call_id: str | None = None,
+        image_paths: tuple[Path, ...] = (),
     ) -> str:
-        """Send one text request to the model.
+        """Send one text request with optional local visual evidence.
 
         Args:
             system: System instruction.
@@ -321,6 +353,9 @@ class LLMClient:
             budget_call_id: Optional stable logical-call identity used by the
                 shared budget ledger. A local identity is generated when it
                 is omitted.
+            image_paths: Up to four local static PNG/JPEG/WebP files (20 MiB
+                total, 4,194,304 pixels each). Requires an explicit named vision
+                client and chat/responses API. Images remain inline in memory.
 
         Returns:
             Model output with surrounding whitespace removed.
@@ -328,7 +363,15 @@ class LLMClient:
         Raises:
             LLMError: If LiteLLM cannot complete the request.
         """
+        image_urls = self._image_inputs(image_paths)
         request = self._build_request(system, user)
+        if image_urls:
+            if self._settings.api_mode == "chat":
+                request["messages"][-1]["content"] = [{"type": "text", "text": user},
+                    *({"type": "image_url", "image_url": {"url": url}} for url in image_urls)]
+            else:
+                request["input"][0]["content"] = [{"type": "input_text", "text": user},
+                    *({"type": "input_image", "image_url": url} for url in image_urls)]
         if self._settings.base_url:
             request["api_base"] = self._settings.base_url
             request["base_url"] = self._settings.base_url
@@ -357,7 +400,10 @@ class LLMClient:
                 request["text"] = {"format": response_format}
             else:
                 request["response_format"] = response_format
-        prompt_tokens = estimate_tokens(system) + estimate_tokens(user)
+        if image_urls and self._budget_ledger is not None and output_cap is None:
+            raise LLMError("Budgeted vision requests require an explicit max_output_tokens cap")
+        prompt_tokens = (estimate_tokens(system) + estimate_tokens(user)
+                         + len(image_urls) * ESTIMATED_IMAGE_INPUT_TOKENS)
         logical_call_id = budget_call_id or label or self._next_budget_call_id()
         response, provider_attempts, reservation_id = self._request_with_retry(
             request,
@@ -376,6 +422,8 @@ class LLMClient:
                 output,
                 label=label,
                 provider_attempts=provider_attempts,
+                visual=bool(image_urls),
+                estimated_image_input_tokens=len(image_urls) * ESTIMATED_IMAGE_INPUT_TOKENS,
             )
         except Exception as exc:
             self._mark_budget_unknown(reservation_id, reason=f"usage reconciliation failed: {exc}")
@@ -385,6 +433,43 @@ class LLMClient:
         if not output:
             raise LLMResponseError(_empty_response_message(response))
         return output
+
+    def _image_inputs(self, paths: tuple[Path, ...]) -> tuple[str, ...]:
+        if not isinstance(paths, tuple) or len(paths) > 4:
+            raise LLMError("image_paths must be a tuple of at most four local Paths")
+        if not paths:
+            return ()
+        if (self._settings.api_mode not in {"chat", "responses"}
+                or self._settings.transport_backend != "openai"):
+            raise LLMError("Vision requires explicit chat/responses mode and the OpenAI SDK transport")
+        if self._purpose != "vision" or self._model_catalog is None:
+            raise LLMError("Route explicitly to a named vision profile before supplying images")
+        try:
+            self._model_catalog.select(f"profile:{self._profile_name}", purpose="vision")
+        except ModelConfigError as exc:
+            raise LLMError(str(exc)) from None
+        total, urls = 0, []
+        try:
+            for path in paths:
+                if not isinstance(path, Path) or path.is_symlink() or not path.is_file():
+                    raise ValueError()
+                with path.open("rb") as handle:
+                    content = handle.read(MAX_VISION_BYTES - total + 1)
+                total += len(content)
+                if total > MAX_VISION_BYTES:
+                    raise ValueError()
+                with Image.open(BytesIO(content)) as image:
+                    mime = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}.get(image.format)
+                    if (not mime or image.width * image.height > MAX_VISION_PIXELS
+                            or getattr(image, "is_animated", False)):
+                        raise ValueError()
+                    image.verify()
+                with Image.open(BytesIO(content)) as image:
+                    image.load()
+                urls.append(f"data:{mime};base64," + base64.b64encode(content).decode("ascii"))
+        except Exception:
+            raise LLMError("Use valid static local PNG/JPEG/WebP images: total <=20 MiB, each <=4 megapixels") from None
+        return tuple(urls)
 
     def with_budget(
         self,
@@ -422,9 +507,9 @@ class LLMClient:
             "profile": self._profile_name,
             "api_key_env": catalog.profiles[self._profile_name].api_key_env,
             "settings": {key: value for key, value in vars(self._settings).items()
-                         if key != "api_key" and not (key == "http2" and value is False)},
+                         if key not in {"api_key", "proxy_env"} and not (key == "http2" and value is False)},
             "code_route": {"profile": code_name, "connection": code.model_dump(
-                mode="json", exclude={"http2"} if not code.http2 else set())} if code else None,
+                mode="json", exclude={"proxy_env"} | ({"http2"} if not code.http2 else set()))} if code else None,
         }
 
     @classmethod
@@ -512,10 +597,19 @@ class LLMClient:
         label: str = "",
     ) -> tuple[object, int, str | None]:
         """Call the provider with bounded backoff and optional accounting."""
+        try:
+            proxy = resolve_proxy_env(self._settings.proxy_env)
+        except ModelConfigError as exc:
+            raise LLMError(str(exc)) from None
+        if (self._settings.transport_backend == "openai" and self._settings.stream
+                and "chat" in _api_attempt_order(self._settings.api_mode)
+                and _finite_timeout(request.get("timeout"))):
+            _require_no_running_loop()
         attempts = max(1, int(self._settings.retry_attempts or 1))
         last_error: Exception | None = None
         mode_attempts: list[tuple[str, int, Exception]] = []
         provider_attempts = 0
+        visual = _has_image_input(request)
         reserved_total_tokens = prompt_tokens + (output_cap or 0)
         for api_mode in _api_attempt_order(self._settings.api_mode):
             mode_request = _request_for_api_mode(
@@ -542,6 +636,7 @@ class LLMClient:
                         api_mode,
                         mode_request,
                         http2=self._settings.http2,
+                        **({"proxy": proxy} if proxy else {}),
                     )
                     if mode_request.get("stream") is True:
                         response = _collect_chat_stream(response)
@@ -558,7 +653,12 @@ class LLMClient:
                         exc,
                         reserved_total_tokens=reserved_total_tokens,
                         has_output_cap=output_cap is not None,
+                        visual=visual,
                     )
+                    # A capped text retry keeps the failed attempt's full
+                    # reservation. Uncapped/visual charges cannot be bounded.
+                    if isinstance(exc, LLMDeadlineError) and (output_cap is None or visual):
+                        raise
                     if attempt >= attempts or not _is_transient_llm_error(exc):
                         break
                     if (
@@ -575,13 +675,21 @@ class LLMClient:
                     time.sleep(delay)
             if last_error is None:
                 continue
+            if isinstance(last_error, LLMDeadlineError):
+                raise last_error  # Retry the same API only; never switch after a deadline.
             mode_attempts.append((api_mode, attempted, last_error))
             if not _is_transient_llm_error(last_error):
                 break
+        if (proxy or visual) and last_error is not None and _is_response_format_error(last_error):
+            raise LLMError("Provider response_format is unsupported; transport details omitted") from None
         if last_error is not None and _is_timeout_error(last_error):
+            if proxy or visual:
+                raise LLMError(f"LLM request timed out ({type(last_error).__name__}); transport details omitted") from None
             raise LLMError(
                 f"LLM request timed out after {_attempt_summary(mode_attempts)} attempt(s): {last_error}"
             ) from last_error
+        if proxy or visual:
+            raise LLMError(f"LLM request failed ({type(last_error).__name__}); transport details omitted") from None
         raise LLMError(
             f"LLM request failed after {_attempt_summary(mode_attempts)} attempt(s): {last_error}"
         ) from last_error
@@ -623,12 +731,18 @@ class LLMClient:
         *,
         reserved_total_tokens: int,
         has_output_cap: bool,
+        visual: bool = False,
     ) -> None:
         if self._budget_ledger is None or reservation_id is None:
             return
-        reason = f"provider attempt failed: {type(error).__name__}: {error}"
+        reason = f"provider attempt failed: {type(error).__name__}"
+        if not self._settings.proxy_env and not visual:
+            reason += f": {error}"
         try:
-            if _is_budget_consumption_unknown(error):
+            if visual and not _is_known_provider_rejection(error):
+                self._budget_ledger.mark_unknown(reservation_id, reason=reason,
+                    known_actual={"llm_requests": 1})
+            elif _is_budget_consumption_unknown(error):
                 self._budget_ledger.mark_unknown(
                     reservation_id, reason=reason,
                     known_actual={"llm_requests": 1},
@@ -669,6 +783,7 @@ class LLMClient:
         label: str = "",
         max_output_tokens: int | None = None,
         budget_call_id: str | None = None,
+        image_paths: tuple[Path, ...] = (),
     ) -> dict[str, Any]:
         """Send one request and parse the response as a JSON object.
 
@@ -680,6 +795,7 @@ class LLMClient:
                 the client-wide ``SIMPLE_AR_MAX_OUTPUT_TOKENS`` setting is used.
             budget_call_id: Optional stable logical-call identity for the
                 shared budget ledger.
+            image_paths: Same named-vision local-image contract as ``ask``.
 
         Returns:
             Parsed JSON object.
@@ -697,6 +813,7 @@ class LLMClient:
                 max_output_tokens=max_output_tokens,
                 response_format=response_format,
                 budget_call_id=budget_call_id,
+                **({"image_paths": image_paths} if image_paths != () else {}),
             )
         except LLMError as exc:
             if self._settings.json_response_format == "auto" and _is_response_format_error(exc):
@@ -706,6 +823,7 @@ class LLMClient:
                     label=f"{label}-no-response-format" if label else "",
                     max_output_tokens=max_output_tokens,
                     budget_call_id=budget_call_id,
+                    **({"image_paths": image_paths} if image_paths != () else {}),
                 )
             else:
                 raise
@@ -839,9 +957,15 @@ class LLMClient:
         *,
         label: str,
         provider_attempts: int = 1,
+        visual: bool = False,
+        estimated_image_input_tokens: int = 0,
     ) -> LLMUsage:
         """Build usage without notifying observers or changing state."""
         usage = _usage_from_response(response)
+        if visual and usage is None:
+            return LLMUsage(self.model, label, None, None, None, "unknown",
+                            provider_attempts=max(1, int(provider_attempts)),
+                            estimated_image_input_tokens=estimated_image_input_tokens)
         if usage is None:
             prompt_tokens = estimate_tokens(system) + estimate_tokens(user)
             completion_tokens = estimate_tokens(output)
@@ -862,6 +986,7 @@ class LLMClient:
             source=source,
             estimated_cost_usd=self._estimated_cost(prompt_tokens, completion_tokens),
             provider_attempts=max(1, int(provider_attempts)),
+            estimated_image_input_tokens=estimated_image_input_tokens,
         )
 
         return record
@@ -876,6 +1001,11 @@ class LLMClient:
         if self._budget_ledger is None or reservation_id is None:
             return
         try:
+            if usage.source == "unknown":
+                self._budget_ledger.mark_unknown(reservation_id,
+                    reason="Vision provider usage missing; input reservation was estimated, not actual usage",
+                    known_actual={"llm_requests": 1})
+                return
             self._budget_ledger.settle(
                 reservation_id,
                 {
@@ -1090,13 +1220,92 @@ def _content_from_response(response: object) -> str:
     return ""
 
 
+def _chat_accounting_tail(chunks: object) -> tuple[int, int, int] | None:
+    """A completed choice must not wait indefinitely for optional accounting.
+
+    Only trailing metadata is read off-thread. Normal generation stays on the
+    caller thread; the caller closes the stream/client after this short grace.
+    A daemon prevents an uncooperative gateway from keeping the CLI alive.
+    """
+    result: queue.Queue = queue.Queue(maxsize=1)
+    def collect() -> None:
+        try:
+            for chunk in chunks:
+                usage = _usage_from_response(chunk)
+                if usage is not None:
+                    result.put_nowait(usage)
+                    return
+        except Exception:
+            pass  # Content already finished; accounting may be unavailable.
+        result.put_nowait(None)
+    threading.Thread(target=collect, name="llm-accounting-tail", daemon=True).start()
+    try:
+        return result.get(timeout=2.0)
+    except queue.Empty:
+        return None
+
+
+@dataclass
+class _ChatStreamState:
+    """One normalization contract for synchronous and asynchronous chunks."""
+    parts: list[str] = field(default_factory=list)
+    usage: tuple[int, int, int] | None = None
+    finish_reason: str | None = None
+
+    def add(self, chunk: object) -> tuple[int, int, int] | None:
+        chunk_usage = _usage_from_response(chunk)
+        self.usage = chunk_usage or self.usage
+        choices = _get_value(chunk, "choices")
+        choice = choices[0] if isinstance(choices, list) and choices else {}
+        delta = _get_value(choice, "delta")
+        content = _get_value(delta, "content") if delta is not None else None
+        if content is None:
+            content = _get_value(choice, "text")
+        if content is not None:
+            self.parts.append(_text_from_content(content))
+        value = _get_value(choice, "finish_reason")
+        if value is not None:
+            self.finish_reason = str(value)
+        return chunk_usage
+
+    def response(self) -> dict[str, Any]:
+        if self.finish_reason is None:
+            raise LLMStreamError(
+                "Response stream ended without a completion marker: "
+                f"content_chars={sum(map(len, self.parts))}, usage_received={self.usage is not None}"
+            )
+        response: dict[str, Any] = {
+            "choices": [{"message": {"content": "".join(self.parts)},
+                         "finish_reason": self.finish_reason}],
+        }
+        if self.usage is not None:
+            response["usage"] = dict(zip(
+                ("prompt_tokens", "completion_tokens", "total_tokens"), self.usage
+            ))
+        return response
+
+
+def _stream_error_description(exc: Exception) -> str:
+    # SDK SSE errors often keep the useful reason in their parsed body.
+    # Never expose provider prose: it may contain credentials or input text.
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        body = body.get("error", body)
+    message = body.get("message", "") if isinstance(body, dict) else ""
+    overloaded = isinstance(message, str) and any(
+        marker in message.lower() for marker in ("overloaded", "over capacity")
+    )
+    reason = "; provider reported overload" if overloaded else ""
+    return f"Response stream interrupted ({type(exc).__name__}){reason}; final usage unavailable"
+
+
 def _collect_chat_stream(stream_response: object) -> dict[str, Any]:
     """Normalize Chat Completions chunks into the existing response shape.
 
     Streaming is a transport choice, not a second LLM result contract. The
     caller still receives one assembled response, so parsing, usage settlement
-    and retry handling remain unchanged. Providers that omit a final usage
-    chunk are accounted for by the existing estimated-token path.
+    and retry handling remain unchanged. Missing final usage is handled by
+    ``ask``: text-only estimation or unknown visual usage, respectively.
     """
 
     if isinstance(stream_response, (dict, list, str, bytes)):
@@ -1106,44 +1315,30 @@ def _collect_chat_stream(stream_response: object) -> dict[str, Any]:
     except TypeError:
         return stream_response  # type: ignore[return-value]
 
-    parts: list[str] = []
-    usage: tuple[int, int, int] | None = None
-    finish_reason: str | None = None
+    state = _ChatStreamState()
     try:
         for chunk in chunks:
-            chunk_usage = _usage_from_response(chunk)
-            if chunk_usage is not None:
-                usage = chunk_usage
-            choices = _get_value(chunk, "choices")
-            choice = choices[0] if isinstance(choices, list) and choices else {}
-            delta = _get_value(choice, "delta")
-            content = _get_value(delta, "content") if delta is not None else None
-            if content is None:
-                content = _get_value(choice, "text")
-            if content is not None:
-                rendered = _text_from_content(content)
-                if rendered:
-                    parts.append(rendered)
-            value = _get_value(choice, "finish_reason")
-            if value is not None:
-                finish_reason = str(value)
-            # A completed choice plus final accounting is the whole result.
-            # Some compatible gateways keep the SSE connection open afterwards;
-            # waiting for transport EOF can turn a completed response into a timeout.
-            if finish_reason is not None and chunk_usage is not None:
+            chunk_usage = state.add(chunk)
+            # Content terminality and accounting terminality are independent.
+            # Preserve normal final usage, but never wait the full content timeout
+            # or indefinite gateway heartbeats for an optional metadata tail.
+            if state.finish_reason is not None:
+                if chunk_usage is None:
+                    state.usage = _chat_accounting_tail(chunks) or state.usage
                 break
     except Exception as exc:
         # The response has already opened: a failure here may be billable even
         # when a gateway uses a generic exception with unfamiliar wording.
         # Never adopt the partial draft as a successfully completed response.
-        if finish_reason is None:
+        if state.finish_reason is None:
             raise LLMStreamError(
-                f"Response stream interrupted: content_chars={sum(len(part) for part in parts)}, "
-                f"finish_reason={finish_reason!r}, usage_received={usage is not None}; {exc}"
+                f"Response stream interrupted: content_chars={sum(map(len, state.parts))}, "
+                f"finish_reason={state.finish_reason!r}, usage_received={state.usage is not None}; "
+                f"{_stream_error_description(exc)}"
             ) from exc
         # Generation completed explicitly; a missing accounting tail must not
         # resend an already completed generation. Use the estimated usage path.
-        usage = None
+        state.usage = None
     finally:
         close = getattr(stream_response, "close", None)
         if callable(close):
@@ -1153,22 +1348,7 @@ def _collect_chat_stream(stream_response: object) -> dict[str, Any]:
                 # Cleanup must not replace the response or its original error.
                 pass
 
-    if finish_reason is None:
-        raise LLMStreamError(
-            f"Response stream ended without a completion marker: "
-            f"content_chars={sum(len(part) for part in parts)}, usage_received={usage is not None}"
-        )
-    message: dict[str, Any] = {"content": "".join(parts)}
-    response: dict[str, Any] = {
-        "choices": [{"message": message, "finish_reason": finish_reason}],
-    }
-    if usage is not None:
-        response["usage"] = {
-            "prompt_tokens": usage[0],
-            "completion_tokens": usage[1],
-            "total_tokens": usage[2],
-        }
-    return response
+    return state.response()
 
 
 def _empty_response_message(response: object) -> str:
@@ -1477,10 +1657,15 @@ def _api_attempt_order(api_mode: str) -> list[str]:
     return ["responses"]
 
 
-def _call_provider(backend: str, api_mode: str, request: dict[str, Any], *, http2: bool = False) -> object:
+def _call_provider(backend: str, api_mode: str, request: dict[str, Any], *, http2: bool = False,
+                   proxy: str | None = None) -> object:
     if backend == "litellm":
+        if proxy:
+            raise LLMError("proxy is supported by the OpenAI SDK transport only")
         return _call_litellm(api_mode, request)
     if backend == "openai":
+        if proxy:
+            return _call_openai_sdk(api_mode, request, http2=http2, proxy=proxy)
         if http2:
             return _call_openai_sdk(api_mode, request, http2=True)
         return _call_openai_sdk(api_mode, request)
@@ -1495,7 +1680,126 @@ def _call_litellm(api_mode: str, request: dict[str, Any]) -> object:
     raise ValueError(f"Unsupported LLM API mode: {api_mode}")
 
 
-def _call_openai_sdk(api_mode: str, request: dict[str, Any], *, http2: bool = False) -> object:
+def _finite_timeout(value: object) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def _require_no_running_loop() -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise LLMError("Synchronous SDK Chat streaming cannot run inside an asyncio loop; "
+                   "use await asyncio.to_thread(client.ask, ...) (or client.ask_json).")
+
+
+async def _collect_chat_stream_async(stream: Any, state: _ChatStreamState) -> None:
+    chunks = stream.__aiter__()
+    try:
+        async for chunk in chunks:
+            chunk_usage = state.add(chunk)
+            if state.finish_reason is not None:
+                if chunk_usage is None:
+                    # The enclosing wall-clock deadline also bounds this tail.
+                    try:
+                        async with asyncio.timeout(2.0):
+                            async for tail in chunks:
+                                usage = _usage_from_response(tail)
+                                if usage is not None:
+                                    state.usage = usage
+                                    break
+                    except Exception:
+                        pass  # Explicitly completed content survives missing accounting.
+                return
+    except Exception as exc:
+        raise LLMStreamError(_stream_error_description(exc)) from exc
+
+
+async def _call_openai_chat_stream(
+    payload: dict[str, Any], client_kwargs: dict[str, Any], *, http2: bool, timeout: float,
+    proxy: str | None = None,
+) -> dict[str, Any]:
+    from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+
+    state = _ChatStreamState()
+    client = stream = http_client = None
+    deadline = asyncio.timeout(timeout)
+    try:
+        try:
+            async with deadline:
+                try:
+                    http_client = DefaultAsyncHttpxClient(http2=http2, **({"proxy": proxy} if proxy else {}))
+                except ImportError:
+                    raise LLMError("HTTP/2 requires the optional dependency: install simple-autoresearch[http2]") from None
+                client = AsyncOpenAI(**client_kwargs, http_client=http_client)
+                stream = await client.chat.completions.create(**_drop_none_values(payload))
+                await _collect_chat_stream_async(stream, state)
+        except TimeoutError:
+            if not deadline.expired():
+                raise  # Ordinary network timeouts keep the existing retry policy.
+            if state.finish_reason is None:
+                raise LLMDeadlineError(
+                    "SDK Chat stream wall-clock deadline exceeded; usage unknown."
+                ) from None
+            # Finish was observed: do not resend merely for an absent usage tail.
+        return state.response()
+    finally:
+        # A separate bounded cleanup grace prevents pool/stream close hanging.
+        # Cancellation cannot prove provider-side termination or free usage.
+        cleanup_deadline = asyncio.get_running_loop().time() + 2.0
+        for resource, method in ((stream, "close"),
+                                 (client or http_client, "close" if client is not None else "aclose")):
+            if resource is not None:
+                try:
+                    async with asyncio.timeout_at(cleanup_deadline):
+                        await getattr(resource, method)()
+                except Exception:
+                    pass  # Cleanup must not replace a result or the request error.
+
+
+_proxy_log_lock = threading.Lock()
+_proxy_log_users = 0
+_proxy_log_levels: dict[str, int] = {}
+
+
+@contextmanager
+def _quiet_proxy_transport(proxy: str | None):
+    """Suppress transport URL diagnostics; overlapping calls share the grace."""
+    global _proxy_log_users
+    if not proxy:
+        yield
+        return
+    with _proxy_log_lock:
+        if not _proxy_log_users:
+            names = {"openai", "httpx", "httpcore"} | {
+                name for name in logging.root.manager.loggerDict
+                if name.startswith(("openai.", "httpx.", "httpcore."))}
+            for name in names:
+                logger = logging.getLogger(name)
+                _proxy_log_levels[name] = logger.level
+                logger.setLevel(logging.CRITICAL + 1)
+        _proxy_log_users += 1
+    try:
+        yield
+    finally:
+        with _proxy_log_lock:
+            _proxy_log_users -= 1
+            if not _proxy_log_users:
+                for name, level in _proxy_log_levels.items():
+                    logging.getLogger(name).setLevel(level)
+                _proxy_log_levels.clear()
+
+
+def _call_openai_sdk(api_mode: str, request: dict[str, Any], *, http2: bool = False,
+                     proxy: str | None = None) -> object:
+    # SDK DEBUG can expose inline pixels and credentials; retain them in memory.
+    with _quiet_proxy_transport(proxy or ("vision" if _has_image_input(request) else None)):
+        return _call_openai_sdk_request(api_mode, request, http2=http2, proxy=proxy)
+
+
+def _call_openai_sdk_request(api_mode: str, request: dict[str, Any], *, http2: bool,
+                             proxy: str | None) -> object:
     from openai import OpenAI, DefaultHttpxClient
 
     payload = dict(request)
@@ -1515,10 +1819,16 @@ def _call_openai_sdk(api_mode: str, request: dict[str, Any], *, http2: bool = Fa
         client_kwargs["timeout"] = timeout
     if base_url:
         client_kwargs["base_url"] = str(base_url)
+    if api_mode == "chat" and payload.get("stream") and _finite_timeout(timeout):
+        _require_no_running_loop()
+        return asyncio.run(_call_openai_chat_stream(
+            payload, client_kwargs, http2=http2, timeout=float(timeout),
+            **({"proxy": proxy} if proxy else {}),
+        ))
     http_client = None
-    if http2:
+    if http2 or proxy:
         try:
-            http_client = DefaultHttpxClient(http2=True)
+            http_client = DefaultHttpxClient(http2=http2, **({"proxy": proxy} if proxy else {}))
         except ImportError:
             raise LLMError("HTTP/2 requires the optional dependency: install simple-autoresearch[http2]") from None
         client_kwargs["http_client"] = http_client
@@ -1574,7 +1884,16 @@ def _request_for_api_mode(
     raise ValueError(f"Unsupported LLM API mode: {api_mode}")
 
 
+def _has_image_input(request: dict[str, Any]) -> bool:
+    return any(isinstance(block, dict) and block.get("type") in {"image_url", "input_image"}
+        for row in (request.get("messages") or request.get("input") or [])
+        if isinstance(row, dict) and isinstance(row.get("content"), list)
+        for block in row["content"])
+
+
 def _as_responses_request(request: dict[str, Any]) -> dict[str, Any]:
+    if "messages" in request and _has_image_input(request):
+        raise LLMError("Vision input cannot switch API modes; build native Responses content")
     if "instructions" in request and "input" in request:
         converted = dict(request)
     else:
@@ -1622,6 +1941,8 @@ def _as_chat_request(
     reasoning_effort: str = "",
     thinking_mode: str = "",
 ) -> dict[str, Any]:
+    if "messages" not in request and _has_image_input(request):
+        raise LLMError("Vision input cannot switch API modes; build native Chat content")
     if "messages" in request:
         converted = dict(request)
     else:
@@ -1723,6 +2044,8 @@ def _retry_delay(settings: LLMSettings, attempt: int) -> float:
 
 
 def _is_transient_llm_error(exc: Exception) -> bool:
+    if isinstance(exc, LLMDeadlineError):
+        return True
     if isinstance(exc, LLMStreamError):
         return True
     status = _provider_error_status(exc)
@@ -1843,7 +2166,8 @@ def _is_known_provider_rejection(exc: Exception) -> bool:
 def _is_budget_consumption_unknown(exc: Exception) -> bool:
     """Return whether a failed call may have reached the provider."""
 
-    return _is_response_transport_disconnect(exc) or _is_timeout_error(exc)
+    return (isinstance(exc, LLMDeadlineError)
+            or _is_response_transport_disconnect(exc) or _is_timeout_error(exc))
 
 
 def _is_timeout_error(exc: Exception) -> bool:

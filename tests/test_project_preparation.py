@@ -13,6 +13,152 @@ from simple_ar.research.preparation import _dependency_probe
 
 
 class ProjectPreparationTests(unittest.TestCase):
+    def test_asset_public_download_receipt_and_budget_resume_without_requests(self):
+        import httpx
+        import socket
+        import zipfile
+        from simple_ar.core.budget import BudgetLedger
+        from simple_ar.research.preparation_assets import acquire_asset
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("snapshot/README.md", "Public setup instructions, not commands to execute.")
+        payload = archive.getvalue()
+        original_client = httpx.Client
+        calls = []
+        timeouts = []
+        def serve(request):
+            calls.append(str(request.url))
+            timeouts.append(request.extensions["timeout"]["read"])
+            if request.url.host == "api.github.com":
+                return httpx.Response(302, headers={"location": "https://public.example/snapshot.zip"})
+            return httpx.Response(200, stream=httpx.ByteStream(payload))
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            ledger = BudgetLedger({"download_requests": None}, storage_path=root / "ledger.json")
+            with patch("simple_ar.research.preparation_assets.socket.getaddrinfo",
+                       return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]), \
+                    patch("simple_ar.research.preparation_assets.httpx.Client",
+                          side_effect=lambda **kw: original_client(transport=httpx.MockTransport(serve), **kw)) as client:
+                receipt = acquire_asset(root=root / "repo", role="project", url="https://github.com/owner/repo", ledger=ledger)
+                self.assertEqual(receipt["status"], "completed")
+                self.assertEqual(receipt["url"], "https://github.com/owner/repo")
+                self.assertTrue((Path(receipt["path"]) / "README.md").is_file())
+                self.assertEqual(receipt["provenance"], "default_branch_snapshot_not_fixed_commit")
+                self.assertEqual(ledger.entries[0].reserved["download_requests"], 4)
+                self.assertEqual(ledger.entries[0].reservation_id, f"asset:{(root / 'repo').absolute()}")
+                self.assertEqual(ledger.entries[0].actual, {"download_requests": 2, "download_bytes": len(payload)})
+                self.assertIsNone(ledger.limits["download_requests"])
+                self.assertFalse(client.call_args.kwargs["trust_env"])
+                self.assertFalse(client.call_args.kwargs["follow_redirects"])
+                count = len(calls)
+                self.assertEqual(acquire_asset(root=root / "repo", role="project", url=receipt["url"],
+                    ledger=BudgetLedger.load(root / "ledger.json")), receipt)
+                self.assertEqual(len(calls), count)
+                data = acquire_asset(root=root / "data", role="data", url="https://public.example/dataset.ZIP", ledger=ledger,
+                                     max_download_mb=32)
+                self.assertEqual(data["status"], "completed")
+                self.assertEqual(data["limits"]["download_bytes"], 32 * 1024 * 1024)
+                self.assertEqual(data["limits"]["expanded_bytes"], 128 * 1024 * 1024)
+                self.assertEqual(ledger.entries[-1].reserved["download_bytes"], 32 * 1024 * 1024)
+                self.assertEqual(Path(data["path"]).name, "download.zip")
+                self.assertEqual(Path(data["path"]).read_bytes(), payload)
+                self.assertFalse((root / "data" / "project").exists())
+                direct = acquire_asset(root=root / "direct", role="project",
+                    url="https://public.example/export/version-123", ledger=ledger, max_download_mb=32)
+                self.assertEqual(direct["status"], "completed")
+                self.assertTrue((Path(direct["path"]) / "README.md").is_file())
+                self.assertEqual(timeouts, [30] * len(calls))
+                retained_count = len(calls)
+                restored = acquire_asset(root=root / "data", role="data", url=data["url"],
+                                         ledger=BudgetLedger.load(root / "ledger.json"))
+                self.assertEqual(restored, data)  # Saved capacity survives the old default.
+                self.assertEqual(len(calls), retained_count)
+                for invalid in (0, -1, True, 1.5):
+                    with self.subTest(capacity=invalid), self.assertRaises(ValueError):
+                        acquire_asset(root=root / "invalid", role="data", url=data["url"],
+                                      ledger=ledger, max_download_mb=invalid)
+                    self.assertFalse((root / "invalid").exists())
+                count = len(calls)
+                wrong_role = acquire_asset(root=root / "repo", role="data", url=receipt["url"], ledger=ledger)
+                self.assertEqual(wrong_role["reason"], "AssetRootRequestConflict")
+                project = Path(receipt["path"])
+                project.rename(project.with_name("removed_snapshot"))
+                missing = acquire_asset(root=root / "repo", role="project", url=receipt["url"], ledger=ledger)
+                self.assertEqual(missing["status"], "failed")
+                self.assertEqual(missing["reason"], "completed_asset_path_missing_or_wrong_role")
+                self.assertEqual(len(calls), count)
+
+    def test_asset_failed_private_redirect_and_interruption_never_resend(self):
+        import httpx
+        import socket
+        from simple_ar.core.budget import BudgetLedger
+        from simple_ar.research.preparation_assets import acquire_asset
+        original_client = httpx.Client
+        for failure in ("private_redirect", "interrupted", "empty", "http_error"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                ledger = BudgetLedger(storage_path=root / "ledger.json")
+                def serve(request):
+                    if failure == "interrupted":
+                        raise KeyboardInterrupt()
+                    if failure == "empty":
+                        return httpx.Response(200, stream=httpx.ByteStream(b""))
+                    if failure == "http_error":
+                        return httpx.Response(403, stream=httpx.ByteStream(b"secret server body"))
+                    return httpx.Response(302, headers={"location": "https://127.0.0.1/data.csv"})
+                with patch("simple_ar.research.preparation_assets.socket.getaddrinfo",
+                           return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]), \
+                        patch("simple_ar.research.preparation_assets.httpx.Client",
+                              side_effect=lambda **kw: original_client(transport=httpx.MockTransport(serve), **kw)) as client:
+                    receipt = acquire_asset(root=root / "asset", role="data", url="https://public.example/data.csv", ledger=ledger)
+                    self.assertEqual(receipt["status"], "unknown" if failure == "interrupted" else "failed")
+                    self.assertEqual(receipt["reason"], {"private_redirect": "nonpublic_address", "empty": "empty_download",
+                        "interrupted": "KeyboardInterrupt", "http_error": "HTTPStatusError"}[failure])
+                    if failure == "empty":
+                        self.assertEqual(Path(receipt["path"]).stat().st_size, 0)
+                    self.assertEqual(ledger.entries[0].status, "unknown")
+                    self.assertEqual(receipt["get_requests"], 1)
+                    count = client.call_count
+                    self.assertEqual(acquire_asset(root=root / "asset", role="data", url=receipt["url"], ledger=ledger), receipt)
+                    self.assertEqual(client.call_count, count)
+                    saved = json.loads((root / "asset" / "receipt.json").read_text())
+                    saved["status"] = "started"
+                    (root / "asset" / "receipt.json").write_text(json.dumps(saved))
+                    self.assertEqual(acquire_asset(root=root / "asset", role="data", url=receipt["url"], ledger=ledger)["status"], "unknown")
+                    self.assertEqual(client.call_count, count)
+
+    def test_asset_zip_safety_and_download_limit_preserve_failed_receipts(self):
+        import httpx
+        import socket
+        import zipfile
+        from simple_ar.core.budget import BudgetLedger
+        from simple_ar.research.preparation_assets import acquire_asset, LIMITS
+        original_client = httpx.Client
+        for name in ("../outside", "/absolute", "bad\\path", "symlink", "duplicate", "oversize", "nonzip"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                archive = io.BytesIO()
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    entry = zipfile.ZipInfo(name)
+                    if name == "symlink":
+                        entry.create_system, entry.external_attr = 3, 0o120777 << 16
+                    bundle.writestr(entry, "asset")
+                    if name == "duplicate":
+                        bundle.writestr("DUPLICATE", "second")
+                payload = b"<html>Not a project archive</html>" if name == "nonzip" else archive.getvalue()
+                headers = {"content-length": str(LIMITS["download_bytes"] + 1)} if name == "oversize" else {}
+                with patch("simple_ar.research.preparation_assets.socket.getaddrinfo",
+                           return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]), \
+                        patch("simple_ar.research.preparation_assets.httpx.Client", side_effect=lambda **kw: original_client(
+                            transport=httpx.MockTransport(lambda r: httpx.Response(200, headers=headers, stream=httpx.ByteStream(payload))), **kw)):
+                    receipt = acquire_asset(root=root / "asset", role="project", url="https://public.example/project.zip",
+                                            ledger=BudgetLedger(storage_path=root / "ledger.json"))
+                self.assertEqual(receipt["status"], "failed")
+                self.assertEqual(receipt["reason"], "download_limit" if name == "oversize" else
+                                 "BadZipFile" if name == "nonzip" else "unsafe_zip_entry")
+                self.assertTrue((root / "asset" / "receipt.json").is_file())
+                self.assertFalse((root / "outside").exists())
+
     def test_standard_venv_marker_prunes_arbitrary_dependency_directory_not_source_name(self):
         from simple_ar.code_task.analysis.index import build_codebase_index
         from simple_ar.code_task.review_pipeline import build_review_index
@@ -185,12 +331,12 @@ class ProjectPreparationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'module.py').write_text('def visible(value):\n    return value\n')
-            original = Path.read_text
+            original = Path.read_bytes
             reads = []
             def observe(path, *args, **kwargs):
                 reads.append(path)
                 return original(path, *args, **kwargs)
-            with patch.object(Path, 'read_text', observe):
+            with patch.object(Path, 'read_bytes', observe):
                 index = build_review_index(root)
             self.assertEqual(reads, [root / 'module.py'])
             self.assertIn('def visible(value)', index['files'][0]['public_api'])
@@ -263,7 +409,7 @@ class ProjectPreparationTests(unittest.TestCase):
             self.assertIn('declaration', project_preparation_markdown(facts))
 
     def test_notebook_candidates_reuse_index_without_reading_outputs_or_dependency_trees(self):
-        from simple_ar.code_task.review_pipeline import _project_files, _read_text
+        from simple_ar.code_task.review_pipeline import _project_files, read_code_task_text
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             self.project(root)
@@ -277,7 +423,7 @@ class ProjectPreparationTests(unittest.TestCase):
             (checkpoint / 'copy.ipynb').write_text('old outputs')
             visited = list(_project_files(root))
             self.assertNotIn(dependency / 'main.py', visited)
-            with patch('simple_ar.code_task.review_pipeline._read_text', wraps=_read_text) as read:
+            with patch('simple_ar.code_task.review_pipeline.read_code_task_text', wraps=read_code_task_text) as read:
                 facts = inspect_project_preparation(root)
             self.assertFalse(any(call.args[0] == notebook for call in read.call_args_list))
             self.assertEqual([row['path'] for row in facts['notebook_candidates']], ['experiment.ipynb'])
@@ -297,12 +443,24 @@ class ProjectPreparationTests(unittest.TestCase):
             root = Path(folder)
             self.project(root)
             (root / 'configuration.py').write_text('value = 1\n' * 2000)
+            (root / 'justfile').write_text('run:\n    python main.py --trials 10000\n')
+            (root / 'run.sh').write_text('python main.py --trials 10000\n')
+            (root / 'recipe.custom').write_text('trials = 10000\n')
+            (root / 'image.png').write_bytes(b'\x89PNG\x00binary')
+            (root / '.env').write_text('SECRET=not-source\n')
+            (root / '.env.local').write_text('SECRET=not-source\n')
+            (root / 'uv.lock').write_text('generated lock data\n')
             with patch('subprocess.run', side_effect=AssertionError('read only')):
-                facts = inspect_project_preparation(root, read_paths=('configuration.py',))
+                facts = inspect_project_preparation(root, read_paths=('configuration.py', 'justfile', 'run.sh', 'recipe.custom'))
             row = next(row for row in facts['excerpts'] if row['path'] == 'configuration.py')
             self.assertEqual(len(row['text']), 8000)
             self.assertTrue(row['truncated'])
             self.assertIn('configuration.py', facts['source_file_paths'])
+            for name in ('justfile', 'run.sh', 'recipe.custom'):
+                self.assertIn(name, facts['source_file_paths'])
+                self.assertIn('10000', next(row['text'] for row in facts['excerpts'] if row['path'] == name))
+            for name in ('image.png', '.env', '.env.local', 'uv.lock'):
+                self.assertNotIn(name, facts['source_file_paths'])
             self.assertIn('up to 8000 characters', project_preparation_markdown(facts))
             with self.assertRaisesRegex(ValueError, 'indexed'):
                 inspect_project_preparation(root, read_paths=('../outside.py',))
@@ -351,6 +509,35 @@ class ProjectDataPreparationTests(unittest.TestCase):
             self.assertIn('unrelated.bin', skipped)
             copied.write_bytes(b'changed only in the copy')
             self.assertEqual(data.stat().st_size, 2_000_001)
+
+            # An allow pattern alone never creates a file.
+            from simple_ar.code_task.orchestration.workflow import initialize_code_task, INITIAL_ADAPTER_SOURCE
+            task = root / 'task.md'
+            untouched = initialize_code_task(run_dir=root / 'allow-only', code_root=project,
+                task_file=task, edit_scope_allowed_patterns=('adapter.py',))
+            self.assertFalse((untouched.workspace_dir / 'adapter.py').exists())
+            created = initialize_code_task(run_dir=root / 'explicit', code_root=project,
+                task_file=task, edit_scope_allowed_patterns=('adapters/export.py',),
+                initial_files=('adapters/export.py',))
+            self.assertEqual((created.workspace_dir / 'adapters/export.py').read_text(), INITIAL_ADAPTER_SOURCE)
+            self.assertFalse((project / 'adapters').exists())
+            rejected = ('main.py', 'tests/check.py', 'data/new.py', '../escape.py',
+                        '/absolute.py', 'C:/escape.py', 'adapter*.py', 'adapter.txt')
+            for i, name in enumerate(rejected):
+                with self.subTest(initial_file=name), self.assertRaises(ValueError):
+                    initialize_code_task(run_dir=root / f'rejected-{i}', code_root=project,
+                        task_file=task, edit_scope_allowed_patterns=(name,), initial_files=(name,))
+            with self.assertRaises(ValueError):
+                initialize_code_task(run_dir=root / 'no-exact-allow', code_root=project,
+                    task_file=task, edit_scope_allowed_patterns=('*.py',), initial_files=('adapter.py',))
+            with self.assertRaises(ValueError):
+                initialize_code_task(run_dir=project / 'forbidden-run', code_root=project,
+                    task_file=task, edit_scope_allowed_patterns=('adapter.py',), initial_files=('adapter.py',))
+            self.assertFalse((project / 'forbidden-run').exists())
+            with self.assertRaises(ValueError):
+                initialize_code_task(run_dir=root / 'duplicate', code_root=project, task_file=task,
+                    edit_scope_allowed_patterns=('adapter.py',), initial_files=('adapter.py', 'adapter.py'))
+            self.assertFalse((root / 'duplicate/code_task/workspace/adapter.py').exists())
 
     def test_explicit_directory_retains_relative_paths_but_does_not_copy_secrets(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -421,6 +608,15 @@ class ProjectDataPreparationTests(unittest.TestCase):
                 with self.subTest(name=name), self.assertRaises(ValueError):
                     copy_workspace_inputs(source, workspace, (name,), empty_copy_report())
             self.assertEqual(outside.read_text(), 'unchanged')
+            from simple_ar.code_task.orchestration.workflow import initialize_code_task
+            task = root / 'task.md'
+            task.write_text('Initialize only a confirmed adapter')
+            (source / 'linked').symlink_to(workspace, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                initialize_code_task(run_dir=root / 'adapter-run', code_root=source,
+                    task_file=task, edit_scope_allowed_patterns=('linked/adapter.py',),
+                    initial_files=('linked/adapter.py',))
+            self.assertFalse((workspace / 'adapter.py').exists())
 
     def test_worktree_can_materialize_untracked_named_data(self):
         import subprocess
@@ -434,9 +630,13 @@ class ProjectDataPreparationTests(unittest.TestCase):
             subprocess.run(['git', '-C', str(project), '-c', 'user.email=fixture@example.org',
                             '-c', 'user.name=Fixture', 'commit', '-qm', 'baseline'], check=True)
             (project / 'data.csv').write_text('value\n7\n')
-            initialized = self.initialize(root, workspace_mode='git_worktree', data_inputs=('data.csv',))
+            initialized = self.initialize(root, workspace_mode='git_worktree', data_inputs=('data.csv',),
+                edit_scope_allowed_patterns=('adapter.py',), initial_files=('adapter.py',))
             self.assertEqual(initialized.workspace.selected_mode, 'git_worktree')
             self.assertEqual((initialized.workspace_dir / 'data.csv').read_text(), 'value\n7\n')
+            from simple_ar.code_task.orchestration.workflow import INITIAL_ADAPTER_SOURCE
+            self.assertEqual((initialized.workspace_dir / 'adapter.py').read_text(), INITIAL_ADAPTER_SOURCE)
+            self.assertFalse((project / 'adapter.py').exists())
 
     def test_preparation_maps_original_data_into_candidate_revision_without_reimporting_original(self):
         from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
@@ -464,6 +664,117 @@ class ProjectDataPreparationTests(unittest.TestCase):
             self.assertFalse((workspace / 'external.csv').exists())
             self.assertEqual(payload['workspace_info']['patterns']['data_inputs'], ['data.csv'])
             self.assertEqual((original / 'data.csv').read_text(), 'original')
+
+    def test_code_task_venv_preparation_routes_checker_and_formal_command(self):
+        import sys
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from simple_ar.app.research_application import ResearchApplicationServices, create_session, load_session
+        from simple_ar.app.research_execution import execution_request, implementation_request
+        from simple_ar.code_task.editing.patching import apply_patch_edits
+        from simple_ar.code_task.orchestration.workflow import INITIAL_ADAPTER_SOURCE
+        from simple_ar.code_task.runtime.state import load_code_task_manifest
+        from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
+        from simple_ar.experiment.execution.backend import LocalExecutionBackend
+        from simple_ar.research.implementation import run_implementation_capability
+        from simple_ar.research.workflow_contracts import ResearchBrief
+
+        # Real stdlib venv and checker/formal processes; pip alone is mocked,
+        # so this fixture neither contacts an index nor asserts real installs.
+        class SetupBackend:
+            def __init__(self, ledger, failure=None):
+                self.local = LocalExecutionBackend(budget_ledger=ledger)
+                self.requests, self.failure = [], failure
+            def run(self, request):
+                self.requests.append(request)
+                argv = request.command
+                if argv[1:3] == ['-m', 'venv']:
+                    argv = [*argv, '--without-pip']
+                elif argv[1:3] == ['-m', 'pip']:
+                    argv = [argv[0], '-c', "print('mock pip fixture')"]
+                result = self.local.run(replace(request, command=argv))
+                if request.command[1:3] == ['-m', 'pip']:
+                    if self.failure == 'changed':
+                        (request.cwd / 'check.py').write_text('raise RuntimeError("changed")\n')
+                    if self.failure == 'install':
+                        result = replace(result, returncode=1)
+                return replace(result, command=request.command)
+
+        for failure in (None, 'install', 'changed'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                root, project = Path(folder), Path(folder) / 'author'
+                project.mkdir()
+                (project / 'author.py').write_text('def value():\n    return 7\n')
+                (project / 'requirements.txt').write_text('# No dependencies in this fixture\n')
+                (project / 'check.py').write_text(
+                    "import sys\nfrom adapter import value\nassert value() == 7\n"
+                    "assert sys.prefix != sys.base_prefix\nprint(sys.executable)\n")
+                (project / 'formal.py').write_text(
+                    "import json,sys\nfrom pathlib import Path\nfrom adapter import value\n"
+                    "Path(sys.argv[1]).write_text(json.dumps({'value':value(),'python':sys.executable}))\n")
+                original = {p.name: p.read_bytes() for p in project.iterdir()}
+                execution = {'command': ['python', 'formal.py', '{output_dir}/raw.json'],
+                    'cwd': str(project), 'timeout_sec': 10,
+                    'protocol': {'hypothesis': 'Fixture only', 'dataset': 'Fixed fixture', 'expected_outcome': 'value=7'},
+                    'environment': {'mode': 'venv', 'requirements': ['requirements.txt'], 'timeout_sec': 60},
+                    'code_task': {'code_root': str(project), 'workspace_mode': 'copy', 'env_mode': 'current',
+                        'allowed_patterns': ['adapter.py'], 'initial_files': ['adapter.py'],
+                        'protected_patterns': ['check.py', 'formal.py'], 'approval_note': 'Fixture adapter only',
+                        'validation_command': ['python', 'check.py'], 'validation_timeout_sec': 10}}
+                paper = root / 'paper.md'
+                paper.write_text('Constructed integration fixture, not a paper claim.')
+                services = ResearchApplicationServices(config={'research_task_kind': 'reproduction',
+                    'research_plan_mode': 'deterministic', 'research_materials_only': True,
+                    'research_local_documents': [str(paper)], 'execution': execution},
+                    budget_limits={'process_invocations': 5, 'process_wall_seconds': 200})
+                app = create_session(ResearchBrief(request_text='Connect fixed fixture results',
+                    requested_outputs=('experiments',)), root=root / 'session', services=services)
+                backend = SetupBackend(app.budget_ledger, failure)
+                with patch('simple_ar.app.research_application.LocalExecutionBackend', return_value=backend):
+                    succeeded = app._run_prepare_execution_action()
+                self.assertEqual(succeeded, failure is None, app.controller.manifest.status_reason)
+                self.assertEqual(original, {p.name: p.read_bytes() for p in project.iterdir()})
+                self.assertFalse((project / 'adapter.py').exists())
+                if failure:
+                    self.assertIsNone(app._active_preparation_ref())
+                    self.assertFalse(list((root / 'session').rglob('execution.json')))
+                    continue
+                ref = app._active_preparation_ref()
+                payload = app.controller.store.read_json(ref)
+                prepared, workspace = payload['execution'], Path(payload['workspace'])
+                self.assertEqual(payload['source_project'], str(project.resolve()))
+                self.assertIn('copy_report', payload)
+                self.assertIn('workspace_info', payload)
+                self.assertIn('setup_ref', payload['environment'])
+                self.assertTrue(all(r.cwd == workspace for r in backend.requests))
+                self.assertEqual(app.budget_ledger.remaining('process_invocations'), 2)
+                python, run_dir = prepared['command'][0], Path(prepared['code_task']['run_dir'])
+                self.assertNotEqual(python, sys.executable)
+                self.assertEqual(load_code_task_manifest(run_dir)['environment']['policy']['python_executable'], python)
+                recovered = load_session(root / 'session', services=services)
+                self.assertEqual(recovered._effective_config()['execution'], prepared)
+                self.assertEqual(len(backend.requests), 3)  # Recovery performs no setup.
+                impl = replace(implementation_request(prepared, object(), require_validation=True),
+                    budget_ledger=app.budget_ledger)
+                self.assertEqual(impl.validation_command, (python, 'check.py'))
+                proposal = run_dir / 'code_task/meta/fixture_edits.json'
+                proposal.write_text(json.dumps({'edits': [{'path': 'adapter.py', 'old': INITIAL_ADAPTER_SOURCE,
+                    'new': 'from author import value\n'}]}))
+                def implement(*args, **kwargs):
+                    apply_patch_edits(run_dir, edits_file=proposal, allow_unapproved_plan=True)
+                    return SimpleNamespace(stop_reason='stop_point', next_action='Validate', steps=())
+                context = CapabilityContext(ArtifactStore(root / 'implementation'), AttemptManifest('implement-fixture'),
+                    inputs=app._input_refs('brief', 'runtime_config'), input_store=app.controller.store)
+                with patch('simple_ar.research.implementation.implement_code_task', side_effect=implement):
+                    result = run_implementation_capability(context=context, request=impl)
+                self.assertEqual(result.status, 'completed', result.diagnostics)
+                formal = execution_request(prepared).run
+                observed = backend.local.run(replace(formal, output_dir=root / 'measurement'))
+                self.assertEqual(observed.status, 'passed', observed.stderr)
+                measured = json.loads(next((root / 'measurement').rglob('raw.json')).read_text())
+                self.assertEqual(measured, {'value': 7, 'python': python})
+                self.assertEqual(app.budget_ledger.remaining('process_invocations'), 0)
+                self.assertEqual(original, {p.name: p.read_bytes() for p in project.iterdir()})
 
     def test_guided_code_fix_serializes_data_through_existing_assets(self):
         from simple_ar.cli.parser import build_parser

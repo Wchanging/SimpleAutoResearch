@@ -477,15 +477,16 @@ def implementation_request(
     task_text: str = "",
     revision_instruction: str = "",
     contract: ResearchExperimentContract | Mapping[str, Any] | None = None,
+    require_validation: bool = False,
 ) -> ImplementationRequest:
     task = config.get("code_task")
     if not isinstance(task, Mapping) or set(task) - {
         "run_dir", "approval_note", "max_repairs", "budget_profile", "allow_large_edits",
-        "env_mode", "python_executable",
+        "env_mode", "python_executable", "validation_command", "validation_timeout_sec",
     }:
         raise ValueError(
             "execution.code_task accepts run_dir, approval_note, max_repairs, "
-            "budget_profile, allow_large_edits, env_mode and python_executable."
+            "budget_profile, allow_large_edits, env_mode, python_executable, validation_command and validation_timeout_sec."
         )
     repair_limit(config)
     run_dir = Path(str(task.get("run_dir", "")))
@@ -503,19 +504,57 @@ def implementation_request(
     if not isinstance(allow_large_edits, bool):
         raise ValueError("code_task.allow_large_edits must be a boolean.")
     execution = execution_request(config, task_text=task_text, contract=contract)
+    command, timeout = code_task_validation(config, required=require_validation)
+    if command is None and validate:
+        command, timeout = tuple(execution.run.command), execution.run.timeout_sec
     return ImplementationRequest(
         run_dir,
         execution.run.cwd,
         note,
         client,
         execution.normalized_experiment_contract(),
-        validation_command=tuple(execution.run.command) if validate else None,
-        validation_timeout_sec=execution.run.timeout_sec if validate else None,
-        max_repairs=repair_limit(config) if validate else 0,
+        validation_command=command,
+        validation_timeout_sec=timeout,
+        max_repairs=repair_limit(config) if command else 0,
         revision_instruction=revision_instruction.strip(),
         budget_profile=budget_profile,
         allow_large_edits=allow_large_edits,
     )
+
+
+def code_task_validation(config: Mapping, *, required: bool = False) -> tuple[tuple[str, ...] | None, int | None]:
+    task = config.get("code_task", {})
+    if not isinstance(task, Mapping):
+        raise ValueError("execution.code_task must be an explicit authorized mapping.")
+    command = task.get("validation_command")
+    timeout = task.get("validation_timeout_sec")
+    if command is None and timeout is None and not required:
+        return None, None
+    if not isinstance(command, (list, tuple)) or not command or any(
+        not isinstance(item, str) or not item.strip() for item in command
+    ) or type(timeout) is not int or timeout <= 0:
+        raise ValueError("CodeTask requires an independent validation_command argv and positive validation_timeout_sec.")
+    policy = dict(env_mode=str(task.get("env_mode") or "current"), python_executable=task.get("python_executable"))
+    command = tuple(resolve_code_task_command(command, **policy))
+    if required:
+        protocol = config.get("protocol")
+        if not isinstance(protocol, Mapping) or any(not str(protocol.get(key) or "").strip()
+                for key in ("hypothesis", "dataset", "expected_outcome")):
+            raise ValueError("Reproduction preparation requires a user-confirmed fixed protocol.")
+        if policy["env_mode"] not in {"current", "external"}:
+            raise ValueError("Reproduction CodeTask requires current/external Python.")
+        if "environment" in config:
+            from simple_ar.research.project_environment import environment_profile
+            profile = environment_profile(config["environment"])
+            if profile["mode"] != "venv" or policy["env_mode"] != "current" or task.get("python_executable"):
+                raise ValueError("Reproduction installation requires an explicit venv and an initially current CodeTask interpreter.")
+            if profile.get("check_command"):
+                raise ValueError("CodeTask's independent validation replaces environment.check_command; do not run a second check or formal command in preparation.")
+            if any(argv[0] not in {"python", "python3"} for argv in (task["validation_command"], config["command"])):
+                raise ValueError("CodeTask venv requires python/python3 aliases for both checker and formal command.")
+        if command == tuple(resolve_code_task_command(config["command"], **policy)):
+            raise ValueError("Reproduction validation_command must differ from the formal command.")
+    return command, timeout
 
 
 def repair_limit(config: Mapping) -> int:
@@ -527,6 +566,6 @@ def repair_limit(config: Mapping) -> int:
 
 
 __all__ = [
-    "execution_pairs", "execution_protocol", "execution_request", "implementation_request",
+    "execution_pairs", "execution_protocol", "execution_request", "implementation_request", "code_task_validation",
     "merge_execution_protocol", "normalize_execution_config", "repair_limit",
 ]

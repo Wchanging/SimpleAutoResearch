@@ -141,10 +141,74 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.compile and not result["compiled"]:
             raise SystemExit(1)
         return
+    if args.command == "image-review":
+        from simple_ar.core.budget import BudgetLedger
+        from simple_ar.code_task.reviewing import run_visual_review
+        from simple_ar.integrations.usage import record_usage
+        try:
+            output = args.output.expanduser().resolve()
+            ledger_path = output.with_name(output.name + ".budget.json")
+            ledger = BudgetLedger.load(ledger_path) if ledger_path.exists() else BudgetLedger(
+                {"llm_requests": 1, "total_tokens": 40000}, storage_path=ledger_path)
+            client = LLMClient.from_env(model=args.model, models_config=str(args.config) if args.config else None,
+                purpose="vision", budget_ledger=ledger, budget_session_id=str(output),
+                usage_callback=lambda usage: record_usage(output, usage, stage="visual_review"))
+            result = run_visual_review(client=client,
+                image_paths=tuple(path.expanduser().resolve() for path in args.input),
+                goal=args.goal, output_dir=output)
+        except (OSError, ValueError, LLMError) as exc:
+            raise SystemExit(f"Visual inspection stopped: {exc}") from None
+        print_line(f"Visual feedback: {output / 'feedback.md'}; model opinion: {result['status']}")
+        print_line("Scientific correctness was not assessed. Revise the original source project or use image --input in a new version.")
+        return
+    if args.command == "image":
+        from dotenv import load_dotenv
+        from simple_ar.core.budget import BudgetLedger
+        from simple_ar.core.capabilities import ArtifactStore
+        from simple_ar.integrations.images import ImagesError, run_image
+        from simple_ar.integrations.model_profiles import load_model_catalog
+        load_dotenv()
+        try:
+            catalog = load_model_catalog(args.config)
+            if catalog is None:
+                raise ValueError("Configure a named Images profile and image route first.")
+            output = args.output.expanduser().resolve()
+            ledger_path = output.with_name(output.name + ".budget.json")
+            ledger = BudgetLedger.load(ledger_path) if ledger_path.exists() else BudgetLedger(
+                {"image_requests": 1}, storage_path=ledger_path)
+            source = args.input.expanduser().resolve() if args.input else None
+            source_store = ArtifactStore(source.parent) if source else None
+            result = run_image(catalog, args.prompt, store=ArtifactStore(output), ledger=ledger,
+                reservation_id="image", reserves={"image_requests": 1}, selector=args.model,
+                input_ref=source_store.ref(source, kind="image") if source_store else None,
+                input_store=source_store)
+        except (OSError, ValueError, ImagesError) as exc:
+            raise SystemExit(f"Image request stopped: {exc}") from None
+        for ref in result.artifacts:
+            print_line(f"{ref.kind}: {output / ref.path}")
+        if result.status != "completed":
+            raise SystemExit("; ".join(result.diagnostics))
+        print_line("Image delivered; this raster is not measured scientific data or editable vector layers.")
+        return
+    if args.command == "results":
+        from simple_ar.cli.start import session_materials
+        try:
+            deliveries = session_materials(args.session)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"Cannot read deliveries: {exc}") from exc
+        for name, paths in deliveries.items():
+            print_line(f"{name}: " + ", ".join(str(path) for path in paths))
+        if not deliveries:
+            print_line("No current reusable delivery. The session may be incomplete.")
+        print_line("Continue: simple-ar start --kind writing --from-session SESSION --reuse NAME --goal 'Your changes'")
+        if "code_project" in deliveries:
+            print_line("Revise code/figure: simple-ar start --from-session SESSION --reuse code_project --goal 'Your changes'")
+        return
     if args.command == "start":
-        from simple_ar.cli.start import prepare_start
+        from simple_ar.cli.start import prepare_start, reuse_session_materials
         from simple_ar.core.locking import SessionLockError
         try:
+            reuse_session_materials(args)
             if args.chat or args.resume_setup:
                 from simple_ar.cli.intake_dialogue import discuss_start
                 args._explicit_start_destinations = _explicit_session_option_destinations(parser, arguments, set(), command="start")
@@ -390,7 +454,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
     code_task_baseline_policy = "auto"
     code_task_config = getattr(args, "code_task_config", None)
     if code_task_config:
-        if command:
+        if command and task_kind != "reproduction":
             raise SystemExit(
                 "Use either --command or --code-task-config for research-session, not both."
             )
@@ -420,7 +484,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 "--code-task-config requires [execute].use_llm = true because "
                 "the existing Code-Task backend generates the implementation."
             )
-        code_task_baseline_policy = "skip" if task_kind == "bug_fix" else execute_options.baseline_policy
+        code_task_baseline_policy = "skip" if task_kind in {"bug_fix", "reproduction"} else execute_options.baseline_policy
         timeout_sec = (
             args.timeout_sec
             if args.timeout_sec is not None
@@ -462,9 +526,11 @@ def _print_research_session(args: argparse.Namespace) -> None:
             raise SystemExit(
                 "--code-task-config requires [benchmark].command for the canonical research-session."
             )
-        command = _split_cli_command(code_task_spec.benchmark_command)
-        if not command:
+        validation_command = _split_cli_command(code_task_spec.benchmark_command)
+        if not validation_command:
             raise SystemExit("The configured Code-Task benchmark command is empty.")
+        if task_kind != "reproduction":
+            command = validation_command
         if code_task_spec.task_file is not None:
             try:
                 task_text = code_task_spec.task_file.read_text(encoding="utf-8")
@@ -484,6 +550,15 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 execute_options.allow_large_edits or code_task_spec.allow_large_edits
             ),
         }
+        if task_kind == "reproduction":
+            if execution_details.get("environment") and code_task_spec.env_mode != "current":
+                raise SystemExit("Venv preparation requires an initially current CodeTask interpreter; explicit external Python is not silently replaced.")
+            if args.cwd is not None and Path(args.cwd).resolve() != code_task_spec.code_root.resolve():
+                raise SystemExit("Reproduction measurement cwd must match the isolated CodeTask project.")
+            if code_task_spec.env_mode not in {"current", "external"}:
+                raise SystemExit("Reproduction code preparation requires an existing current/external interpreter.")
+            task.update(validation_command=validation_command,
+                        validation_timeout_sec=execute_options.timeout_sec)
         execution = {
             "command": command,
             "cwd": str(code_task_spec.code_root.resolve()),
@@ -517,8 +592,13 @@ def _print_research_session(args: argparse.Namespace) -> None:
         if execution_details.get("pairs") and code_task_spec is not None and code_task_baseline_policy not in {"auto", "run"}:
             raise SystemExit("Paired experiments require CodeTask baseline_policy=auto/run.")
         execution_details = dict(execution_details)
-        if "output_files" in execution_details:
-            execution["result_schema"]["output_files"] = execution_details.pop("output_files")
+        if "initial_files" in execution_details:
+            if task_kind != "reproduction" or code_task_spec is None:
+                raise SystemExit("Adapter creation requires explicit reproduction CodeTask preparation.")
+            execution["code_task"]["initial_files"] = execution_details.pop("initial_files")
+        for field in ("output_files", "metric_sources"):
+            if field in execution_details:
+                execution["result_schema"][field] = execution_details.pop(field)
         execution.update(execution_details)
         if execution_details.get("pairs"):
             execution.pop("baseline", None)  # Pair rows own both commands.
@@ -600,6 +680,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         })
     assets = tuple(asset_requests)
     display = ResearchConsole()
+    validation_runs = 1 + execute_options.repair_rounds if task_kind == "bug_fix" and code_task_spec is not None else 1
     services = ResearchApplicationServices(
         llm_client=llm_client,
         feasibility_llm_client=feasibility_client,
@@ -612,8 +693,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         budget_limits={
             "llm_requests": args.llm_requests,
             "total_tokens": args.total_tokens,
-            "process_invocations": args.process_invocations if getattr(args, "process_invocations", None) is not None else (1 if task_kind == "bug_fix" else 8 if execution is not None else 0),
-            "process_wall_seconds": args.process_wall_seconds if getattr(args, "process_wall_seconds", None) is not None else (max(30, timeout_sec) if task_kind == "bug_fix" else max(60, timeout_sec * 8) if execution is not None else 0),
+            "process_invocations": args.process_invocations if getattr(args, "process_invocations", None) is not None else (validation_runs if task_kind == "bug_fix" else 8 if execution is not None else 0),
+            "process_wall_seconds": args.process_wall_seconds if getattr(args, "process_wall_seconds", None) is not None else (max(30, timeout_sec) * validation_runs if task_kind == "bug_fix" else max(60, timeout_sec * 8) if execution is not None else 0),
         },
         max_attempts=32 if code_task_spec is not None else 20,
         message_callback=display.message,

@@ -5,14 +5,14 @@ import unittest
 import json
 from unittest.mock import Mock
 
-from simple_ar.integrations.llm import LLMError
+from simple_ar.integrations.llm import LLMError, LLMResponseError, LLMDeadlineError
 from simple_ar.report.agent import (
     _evidence_outline_sections, _maybe_adapt_outline, _resolve_document_plan,
     _validated_outline_delivery, _writer_prompt, run_report_agent,
 )
 from simple_ar.report.document_plan import outline_section_keys, resolve_argument_plan
 from simple_ar.report.editor import document_revision_limit
-from simple_ar.report.narrative import evidence_outline_context, narrative_context
+from simple_ar.report.narrative import evidence_outline_context, narrative_context, outline_evidence_labels, map_evidence_labels
 from simple_ar.report.schema import (
     MetricSource, ReportContext, ReportMemory, ReportRuntimeConfig, ReportSectionPlan, SourceHandle,
 )
@@ -85,8 +85,12 @@ class EvidenceOutlineTests(unittest.TestCase):
         config = ReportRuntimeConfig(template='reproduction', outline_strategy='adaptive')
         template = load_report_template_bundle(report_mode='experiment', config=config)
         client = Mock()
-        client.ask_json.return_value = self.response
+        client.ask_json.return_value = map_evidence_labels(self.response, {"run:1": "source_1"})
         frozen = _resolve_document_plan(self.adapt(client, config), config=config)
+        prompt = client.ask_json.call_args.args[1]
+        prompt_payload = json.loads(prompt[prompt.index('{'):])
+        self.assertEqual(prompt_payload["evidence_handle_choices"], ["source_1"])
+        self.assertEqual(frozen.section_plan[1].evidence_handles, ["run:1"])
         guidance = drafting_template_guidance(template, frozen)
         self.assertIn('Describe the declared reproduction scope', guidance)
         self.assertIn('## Writing Principles', guidance)
@@ -225,6 +229,16 @@ class EvidenceOutlineTests(unittest.TestCase):
         with self.assertRaises(LLMError):
             self.adapt(client, ReportRuntimeConfig(template="analysis_report", outline_strategy="adaptive"))
         self.assertEqual(client.ask_json.call_count, 2)
+        # A provider failure has no outline to correct. Keep the same retry
+        # ownership as Writer/Reviewer, but still repair malformed responses.
+        for error in (LLMError("provider unavailable"), LLMError("budget exhausted"),
+                      LLMDeadlineError("wall-clock deadline"), LLMResponseError("invalid JSON")):
+            with self.subTest(error=type(error).__name__):
+                client = Mock()
+                client.ask_json.side_effect = error
+                with self.assertRaises(LLMError):
+                    self.adapt(client, ReportRuntimeConfig(template="reproduction", outline_strategy="adaptive"))
+                self.assertEqual(client.ask_json.call_count, 2 if isinstance(error, LLMResponseError) else 1)
 
     def test_explicit_fallback_preserves_template_evidence(self):
         client = Mock()
@@ -270,6 +284,30 @@ class EvidenceOutlineTests(unittest.TestCase):
         self.assertEqual(payload["objective"]["text"], self.memory.objective)
         self.assertEqual(payload["objective"]["total_characters"], 4000)
         self.assertEqual(payload["sources_omitted"], 11)
+        canonical = "material:local-d71f11fe6edf246dfe9e"
+        self.memory.source_handles.append(SourceHandle(handle=canonical, kind="material"))
+        self.memory.source_handles.append(SourceHandle(handle="source_1", kind="material"))
+        payload["input_claims"] = [{"claim": canonical, "evidence_handles": [canonical]}]
+        projected, labels = outline_evidence_labels(payload, self.memory.source_handles)
+        alias = next(label for label, handle in labels.items() if handle == canonical)
+        self.assertNotEqual(alias, "source_1")
+        self.assertEqual(projected["input_claims"][0]["evidence_handles"], [alias])
+        self.assertEqual(projected["input_claims"][0]["claim"], canonical)
+        response = {"sections": [{"evidence_handles": [alias]}],
+            "argument_plan": {"counterevidence_handles": [alias]},
+            "context_requests": [{"arguments": {"handle": alias, "query": alias}}],
+            "visual_intents": [{"evidence_handles": [alias]}]}
+        decoded = map_evidence_labels(response, labels)
+        self.assertEqual(decoded["sections"][0]["evidence_handles"], [canonical])
+        self.assertEqual(decoded["argument_plan"]["counterevidence_handles"], [canonical])
+        self.assertEqual(decoded["context_requests"][0]["arguments"], {"handle": canonical, "query": alias})
+        self.assertEqual(decoded["visual_intents"][0]["evidence_handles"], [canonical])
+        for unknown in (alias + "x", canonical[:-1], "source_999"):
+            rejected = map_evidence_labels({"sections": [
+                {"heading": "Scope", "goal": "Define scope", "evidence_handles": []},
+                {"heading": "Findings", "goal": "Use evidence", "evidence_handles": [unknown]}]}, labels)
+            with self.subTest(unknown=unknown), self.assertRaises(ValueError):
+                self.plan(rejected)
 
     def test_custom_template_remains_authoritative(self):
         client = Mock()
@@ -381,6 +419,26 @@ class EvidenceOutlineTests(unittest.TestCase):
         self.assertEqual(validate_length_request(upper, objective="At most 500 words"), upper)
         exact = {**valid, "min_words": 350, "max_words": 350, "target_words": 350, "request_quote": "350 words"}
         self.assertEqual(validate_length_request(exact, objective="Write 350 words"), exact)
+        # An invalid optional annotation must not discard valid organization
+        # or become a different user requirement. The original task survives.
+        from simple_ar.report.agent import _resolve_document_plan, _writer_prompt
+        self.context.problem_markdown = objective
+        self.response["length_request"] = {**valid, "request_quote": "An invented quotation."}
+        client = Mock()
+        client.ask_json.return_value = self.response
+        config = ReportRuntimeConfig(template="reproduction", outline_strategy="adaptive")
+        adapted = self.adapt(client, config)
+        self.assertNotIn("length_request", adapted.outline_planning)
+        self.assertIn("rejected_length_request", adapted.outline_planning)
+        frozen = _resolve_document_plan(adapted, config=config, context=self.context)
+        self.assertFalse(frozen.document_plan.length_budget)
+        self.assertTrue(any("original task" in note for note in frozen.document_plan.notes))
+        client.ask_json.assert_called_once()
+        prompt = _writer_prompt(context=self.context, memory=frozen, config=config,
+            template=load_report_template_bundle(report_mode="experiment", config=config),
+            section=frozen.section_plan[0], previous_draft=None, review=None, extra_context=[],
+            source_batch_index=1, source_batch_count=1, include_previous_draft=False, draft_mode="initial")
+        self.assertIn(objective, prompt)
 
     def test_adaptive_soft_target_survives_outline_projection_freezing_and_recovery(self):
         from simple_ar.report.agent import _resolve_document_plan
@@ -497,7 +555,7 @@ class EvidenceOutlineTests(unittest.TestCase):
                         template=template, config=config, emit=None)
                 self.assertEqual(client.ask_json.call_count, 2)
 
-    def test_invalid_survey_length_uses_existing_correction_not_a_new_loop(self):
+    def test_invalid_survey_length_annotation_preserves_task_without_a_new_loop(self):
         task = "Write 350-500 words."
         context = self.context.model_copy(update={"report_mode": "survey", "problem_markdown": task})
         memory = self.memory.model_copy(update={"template": "survey", "report_mode": "survey",
@@ -511,9 +569,13 @@ class EvidenceOutlineTests(unittest.TestCase):
                 client.ask_json.return_value = {**self.response, "length_request": {
                     "unit": "words", "scope": "whole_document", "request_quote": task,
                     "min_words": 350, "max_words": 500, "target_words": 425, **change}}
-                with self.assertRaises(LLMError):
-                    _maybe_adapt_outline(client=client, context=context, memory=memory, template=template, config=config, emit=None)
-                self.assertEqual(client.ask_json.call_count, 2)
+                adapted = _maybe_adapt_outline(client=client, context=context, memory=memory,
+                    template=template, config=config, emit=None)
+                self.assertTrue(adapted.section_plan)
+                self.assertNotIn("length_request", adapted.outline_planning)
+                self.assertIn("rejected_length_request", adapted.outline_planning)
+                self.assertEqual(context.problem_markdown, task)
+                self.assertEqual(client.ask_json.call_count, 1)
 
     def test_absent_word_request_keeps_legacy_plan_and_serialization(self):
         from simple_ar.report.agent import _resolve_document_plan
@@ -680,7 +742,8 @@ class ArgumentPlanTests(unittest.TestCase):
         self.assertIn('No such heading', correction)
         self.assertIn('Comparison', correction)
         parsed = json.loads(correction[correction.index('{'):])
-        self.assertEqual(parsed['rejected_response'], response)
+        self.assertEqual(map_evidence_labels(parsed['rejected_response'],
+            {"source_1": "source:a", "source_2": "source:b"}), response)
         self.assertIn('metric_id', parsed['retry_instruction'])
         self.assertEqual(len(memory.section_plan), 3)
 
@@ -695,7 +758,8 @@ class ArgumentPlanTests(unittest.TestCase):
         prompt = client.ask_json.call_args_list[1].args[1]
         correction = json.loads(prompt[prompt.index('{'):])
         self.assertIn('coverage_display_name', correction['validation_error'])
-        self.assertEqual(correction['rejected_response'], response)
+        self.assertEqual(map_evidence_labels(correction['rejected_response'],
+            {"source_1": "source:a", "source_2": "source:b"}), response)
         self.assertEqual(client.ask_json.call_count, 2)
 
     def test_comparisons_are_consumed_as_interpretations_not_proof(self):

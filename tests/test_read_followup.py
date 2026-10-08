@@ -2,10 +2,12 @@
 import json
 import unittest
 
+from simple_ar.integrations.llm import LLMError
+
 from simple_ar.core.capabilities import ArtifactRef
 from simple_ar.research.contracts import DocumentRecord, TextChunk
 from simple_ar.research.documents.ingest import DocumentBundle
-from simple_ar.research.evidence.reader import ReadRequest, ReadResult, read_documents, select_reading_chunks
+from simple_ar.research.evidence.reader import ReadRequest, ReadResult, new_source_queries, read_documents, select_reading_chunks
 from simple_ar.research.brief import evidence_pack_from_read
 from simple_ar.research.synthesis import SynthesisRequest, _evidence_notes_markdown, synthesize_evidence
 from simple_ar.research.store.retrieval import order_source_chunks, rank_source_chunks, source_chunk_views
@@ -28,6 +30,50 @@ class FakeClient:
 
 
 class ReadingFollowupTests(unittest.TestCase):
+    def test_external_requests_share_response_but_have_a_global_two_query_bound(self):
+        bundle = DocumentBundle(
+            [DocumentRecord("p", "First source", "local_files"),
+             DocumentRecord("q", "Second source", "local_files")], {}, {}, [],
+            [TextChunk("p-text", "p", "Recorded source conditions."),
+             TextChunk("q-text", "q", "Other recorded source conditions.")])
+        result, client = self.read(bundle, [[
+            {"paper_id": "p", "followup_queries": ["NeverSeenLocalMarker"],
+             "new_source_queries": [" Independent validation ", "Replication evidence"]},
+            {"paper_id": "q", "new_source_queries": ["Replication evidence", "Third external query"]},
+        ]])
+        self.assertEqual(len(client.requests), 2)  # One note per paper; no external call.
+        self.assertEqual(new_source_queries(result), ("Independent validation", "Replication evidence"))
+        self.assertEqual(result.paper_notes[1]["new_source_queries"], ["Replication evidence", "Third external query"])
+        self.assertEqual(result.paper_notes[0]["reading_followup"]["pending_queries"], ["NeverSeenLocalMarker"])
+        self.assertNotIn("NeverSeenLocalMarker", new_source_queries(result))
+        for request in client.requests:
+            self.assertIn("user subquestion", request.user)
+            self.assertIn("saved local text only", request.user)
+            self.assertIn("not permission to search", request.user)
+        restored = ReadResult.from_handoff_dict(json.loads(json.dumps(result.to_handoff_dict())), bundle=bundle)
+        self.assertEqual(new_source_queries(restored), new_source_queries(result))
+
+    def test_external_query_validation_is_bounded_without_truncating_the_request(self):
+        bundle, _ = self.bundle()
+        result, client = self.read(bundle, [{"paper_id": "p", "new_source_queries": ["x" * 500]}])
+        self.assertEqual(new_source_queries(result), ("x" * 500,))
+        self.assertEqual(len(client.requests), 1)
+        for value in ([""], ["   "], ["x" * 501], ["one", "two", "three"], "query"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "new_source_queries"):
+                self.read(bundle, [{"paper_id": "p", "new_source_queries": value}])
+
+    def test_local_only_and_legacy_notes_never_become_external_requests(self):
+        bundle, _ = self.bundle()
+        result, client = self.read(bundle, [{"paper_id": "p", "followup_queries": ["NeverSeenLocalMarker"]}])
+        self.assertEqual(new_source_queries(result), ())
+        self.assertEqual(len(client.requests), 1)
+        handoff = result.to_handoff_dict()
+        handoff["paper_notes"][0].pop("new_source_queries")
+        restored = ReadResult.from_handoff_dict(handoff, bundle=bundle)
+        self.assertEqual(new_source_queries(restored), ())
+        self.assertEqual(restored.paper_notes[0]["followup_queries"], ["NeverSeenLocalMarker"])
+        self.assertEqual(restored.paper_notes[0]["reading_followup"]["pending_queries"], ["NeverSeenLocalMarker"])
+
     def project(self, bundle, note):
         read = ReadResult(status="partial", bundle=bundle, paper_notes=(note,))
         context = ReportContext(topic="review", report_mode="survey", source_handles=[
@@ -243,6 +289,23 @@ class ReadingFollowupTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
             self.read(bundle, [{"paper_id": "p", "followup_queries": ["Heldout comparison"]},
                                RuntimeError("provider unavailable")])
+        bundle.records.append(DocumentRecord("q", "Another source", "local_files"))
+        bundle.chunks.append(TextChunk("q-result", "q", "Heldout comparison with independent conditions."))
+        result, client = self.read(bundle, [[
+            {"paper_id": "p", "key_claims": ["Initial observed result"],
+             "followup_queries": ["Heldout comparison"]},
+            {"paper_id": "q", "followup_queries": ["Heldout comparison"]},
+        ], LLMError("provider unavailable")])
+        self.assertEqual(len(client.requests), 3)  # Two initial notes, one failed optional reread.
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.paper_notes[0]["key_claims"], ["Initial observed result"])
+        trace = result.paper_notes[0]["reading_followup"]
+        self.assertEqual(trace["revision_status"], "failed")
+        self.assertFalse(trace["revision_performed"])
+        self.assertTrue(trace["passages"])
+        self.assertEqual(result.paper_notes[1]["followup_queries"], ["Heldout comparison"])
+        restored = ReadResult.from_handoff_dict(json.loads(json.dumps(result.to_handoff_dict())), bundle=bundle)
+        self.assertEqual(restored.paper_notes, result.paper_notes)
 
     def test_source_view_budgets_are_explicit(self):
         with self.assertRaises(ValueError):

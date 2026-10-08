@@ -121,6 +121,8 @@ def _first_text(row: Mapping[str, Any], *keys: str) -> str:
 
 
 def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]

@@ -24,6 +24,42 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_visual_review_sends_snapshot_preserves_original_and_recovers_without_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "figure.png"
+            image.write_bytes(b"rendered fixture")
+            output = root / "review"
+            client = MagicMock()
+            client.connection_binding.return_value = {"profile": "visual"}
+            client.ask_json.return_value = {"findings": [{"severity": "warning", "category": "layout",
+                "summary": "Arrow crosses a node", "evidence": "source-0.png, right panel",
+                "recommendation": "Route the return edge outside the node"}]}
+            argv = ["image-review", "--input", str(image), "--goal", "Readable feedback loop",
+                    "--output", str(output), "--model", "profile:visual"]
+            with patch("simple_ar.integrations.llm.LLMClient.from_env", return_value=client) as factory, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                main(argv)
+                main(argv)
+            self.assertEqual(factory.call_args.kwargs["purpose"], "vision")
+            self.assertEqual(client.ask_json.call_count, 1)
+            sent = client.ask_json.call_args.kwargs["image_paths"]
+            self.assertEqual(sent, (output / "source-0.png",))
+            self.assertEqual(sent[0].read_bytes(), image.read_bytes())
+            self.assertIn("Arrow crosses", (output / "feedback.md").read_text())
+            self.assertEqual(read_json(output / "review.json")["metadata"]["scientific_validity"], "not_assessed")
+            self.assertEqual(read_json(output / "review.json")['findings'][0]['evidence'], ['source-0.png, right panel'])
+            (output / 'review.json').unlink()
+            with patch("simple_ar.integrations.llm.LLMClient.from_env", return_value=client), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                main(argv)
+            self.assertEqual(client.ask_json.call_count, 1)
+            image.write_bytes(b"changed render")
+            with patch("simple_ar.integrations.llm.LLMClient.from_env", return_value=client), \
+                    self.assertRaisesRegex(SystemExit, "inputs changed"):
+                main(argv)
+            self.assertEqual(client.ask_json.call_count, 1)
+
     def test_writing_resume_keeps_explicit_paper_style_without_authorizing_execution(self):
         from simple_ar.cli.main import _report_config_overrides
 
@@ -1041,22 +1077,40 @@ class CliTests(unittest.TestCase):
         from simple_ar.app.research_application import create_session, load_session, ResearchApplicationServices
         from simple_ar.research.workflow_contracts import ResearchBrief
         from simple_ar.report.schema import AgentReportResult, ReportSectionDraft
+        from simple_ar.research.task_plan import TaskPlanRequest, default_task_steps
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paper = root / "paper.md"
             paper.write_text("# Calibration\nCalibration evidence is limited.\n", encoding="utf-8")
             session = root / "session"
-            app = create_session(ResearchBrief(
+            brief = ResearchBrief(
                 request_text="Review calibration.", objective="Review calibration.",
                 requested_outputs=("report",),
                 asset_requests=({"locator": str(paper), "role": "paper"},),
-            ), root=session, services=ResearchApplicationServices(
-                max_results=1, max_attempts=9,
+            )
+            planned_actions = [row["action"] for row in default_task_steps(TaskPlanRequest(
+                task_kind="survey", goal=brief.objective, request_text=brief.request_text,
+                requested_outputs=brief.requested_outputs,
+                config={"research_local_documents": [str(paper)]}))]
+            initial_attempt_limit = 1 + len(planned_actions)  # One plan attempt plus its actual route.
+            refreshed_attempt_limit = initial_attempt_limit + 4
+            app = create_session(brief, root=session, services=ResearchApplicationServices(
+                max_results=1, max_attempts=initial_attempt_limit,
                 budget_limits={"llm_requests": 10, "total_tokens": 100,
                                "process_invocations": 0, "process_wall_seconds": 0},
             ))
-            self.assertEqual(app.advance(max_actions=6).next_action, "report_write")
+            for _ in range(initial_attempt_limit):
+                if app.view().next_action == "report_write":
+                    break
+                prepared = app.advance(max_actions=1)
+                self.assertNotIn(prepared.status, {"paused", "blocked", "completed"}, prepared.status_reason)
+            self.assertEqual(app.view().next_action, "report_write", app.view().status_reason)
+            self.assertFalse(any(attempt.capability == "report_write" for attempt in app.controller.list_attempts()))
+            accepted_actions = [step.action for step in app._load_task_plan().steps]
+            self.assertEqual(accepted_actions, planned_actions)
+            remaining_actions = accepted_actions[accepted_actions.index("report_write"):]
+            self.assertEqual(remaining_actions, ["report_write", "report", "report_audit"])
             app.services = replace(app.services, llm_client=object())
 
             def writer(**kwargs):
@@ -1067,9 +1121,10 @@ class CliTests(unittest.TestCase):
                         used_sources=[paper_id])])
 
             with patch("simple_ar.report.writing.run_report_agent", side_effect=writer):
-                initial = app.advance(max_actions=3)
-            self.assertEqual(initial.status, "completed")
-            self.assertEqual(initial.budget["attempts"], 9)
+                initial = app.advance(max_actions=len(remaining_actions))
+            self.assertEqual(initial.status, "completed", app.controller.manifest.status_reason)
+            self.assertEqual(initial.budget["attempts"], initial_attempt_limit)
+            self.assertTrue(app.controller.manifest.budget.exhausted())
             old_report = session / initial.state_refs["report"].path
             old_body = old_report.read_bytes()
             resume = ["research-session", "--session-root", str(session), "--topic", "Review calibration."]
@@ -1100,7 +1155,7 @@ class CliTests(unittest.TestCase):
                     view = load_session(session).view()
                     self.assertEqual((view.status, view.revision, view.attempts, view.state_refs),
                                      (initial.status, initial.revision, initial.attempts, initial.state_refs))
-                    self.assertEqual(view.budget["max_attempts"], 13)
+                    self.assertEqual(view.budget["max_attempts"], refreshed_attempt_limit)
                 with self.assertRaisesRegex(SystemExit, "different terms"):
                     main(authorize[:-1] + ["5"])
 
@@ -1112,7 +1167,7 @@ class CliTests(unittest.TestCase):
                     main(report)
                 completed = load_session(session).view()
                 self.assertEqual(completed.status, "completed")
-                self.assertEqual(completed.budget["attempts"], 13)
+                self.assertEqual(completed.budget["attempts"], refreshed_attempt_limit)
                 self.assertNotEqual(completed.state_refs["report"], initial.state_refs["report"])
                 main(authorize)  # Replay remains safe even after all four attempts were spent.
                 main(report)
@@ -1325,6 +1380,38 @@ class CliTests(unittest.TestCase):
             self.assertEqual(execution["code_task"]["max_repairs"], 0)
             self.assertEqual(execution["code_task"]["env_mode"], "external")
             self.assertEqual(Path(execution["code_task"]["python_executable"]), Path(sys.executable))
+            original_config = config.read_text()
+            for repairs, explicit, count, seconds in ((0, False, 1, 30), (1, False, 2, 60), (1, True, 0, 0)):
+                with self.subTest(repairs=repairs, explicit=explicit), \
+                        patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()), \
+                        patch("simple_ar.app.research_application.create_session", return_value=app) as created, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    config.write_text(original_config + f"repair_rounds = {repairs}\n")
+                    main(["research-session", "--task-kind", "bug_fix", "--topic", "Repair the project",
+                          "--model", "gpt-5.4", "--code-task-config", str(config),
+                          *(["--process-invocations", "0", "--process-wall-seconds", "0"] if explicit else [])])
+                    limits = created.call_args.kwargs["services"].budget_limits
+                    self.assertEqual(limits["process_invocations"], count)
+                    self.assertEqual(limits["process_wall_seconds"], seconds)
+            config.write_text(original_config)
+            reproduction = root / "reproduction.toml"
+            reproduction.write_text(
+                '[task]\ngoal="Check published conditions"\nkind="reproduction"\noutputs=["experiments"]\n'
+                '[model]\nname="fixture-model"\n[research]\nmaterials_only=true\n'
+                f'[assets]\npapers=["{task_file.as_posix()}"]\n'
+                f'[execution]\ncode_task_config="{config.as_posix()}"\ncwd="{project.as_posix()}"\n'
+                'command=["python","adapter.py"]\ntimeout_sec=11\n'
+                '[execution.protocol]\nhypothesis="Published claim"\ndataset="Fixed data"\n'
+                'expected_outcome="Compare measured accuracy"\nmetrics=["accuracy"]\n', encoding="utf-8")
+            with patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()), \
+                 patch("simple_ar.app.research_application.create_session", return_value=app) as creator, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                main(["research-session", "--config", str(reproduction)])
+            prepared = creator.call_args.kwargs["services"].config["execution"]
+            self.assertEqual(prepared["command"], ("python", "adapter.py"))
+            self.assertEqual(prepared["code_task"]["validation_command"], ["python", "benchmark.py"])
+            self.assertEqual(prepared["timeout_sec"], 11)
+            self.assertEqual(prepared["code_task"]["validation_timeout_sec"], 7)
 
     def test_research_case_uses_checked_in_configs_and_case_local_paths(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

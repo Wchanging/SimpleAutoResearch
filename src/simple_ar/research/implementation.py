@@ -283,6 +283,8 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
                     kind=f"implementation_{name}", producer="research.implementation",
                 )
     validation_row = None if validation is None else {
+        "command": list(request.validation_command),
+        "timeout_sec": request.validation_timeout_sec,
         "status": validation.status,
         "returncode": validation.returncode,
         "timed_out": validation.timed_out,
@@ -291,6 +293,13 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     proposal_path = paths.meta_dir / "proposed_edits.json"
     proposal = read_json(proposal_path) if proposal_path.is_file() else {}
     feedback = proposal.get("implementation_feedback") if stop_reason == "no_edits_proposed" else None
+    if finished and all((paths.workspace_dir / name).is_file() for name in
+                        ("analysis.py", "tests/verify_delivery.py", "outputs/report.md", "outputs/results.json")):
+        from simple_ar.result_analysis.script_project import copy_code_analysis_package
+        delivery = context.store.root / "code_analysis"
+        copy_code_analysis_package(paths.workspace_dir, delivery, workspace=True)
+        evidence["code_analysis"] = context.store.ref("code_analysis/analysis.json", kind="code_analysis",
+            schema="code_analysis.v1", producer="research.implementation")
     artifact_payload: dict[str, Any] = {
         "schema_version": "research_implementation.v1",
         "status": "validated" if finished else "incomplete",
@@ -328,18 +337,18 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
 
 
 def _implement_with_patch_correction(run_dir: Path, **options: Any) -> tuple[Any, tuple[Any, ...]]:
-    """Use CodeTask's one-shot exact-text correction without restarting research.
+    """Use CodeTask's one-shot proposal correction without restarting research.
 
     A rejected proposal does not change workspace files. CodeTask already
-    records the validation failure and can regenerate once from actual source;
+    records the patch/budget failure and can regenerate once from actual source;
     research must make that existing correction reachable before pausing.
     """
     first = implement_code_task(run_dir, **options)
-    if first.stop_reason != "patch_apply_failed":
+    if first.stop_reason not in {"patch_apply_failed", "edit_budget_rejected"}:
         return first, tuple(first.steps)
     callback = options.get("message_callback")
     if callback is not None:
-        callback("Edit anchor did not match current source; retrying once with recorded failure context.")
+        callback("Edit proposal failed patch or budget validation; retrying once with recorded failure context and unchanged limits.")
     second = implement_code_task(run_dir, **options)
     return second, (*first.steps, *second.steps)
 
@@ -357,8 +366,12 @@ def _prepare_research_task(
         raise ValueError("Implementation requires a research design or a bug-task brief.")
     baseline_refs = [ref for ref in context.inputs if ref.kind == "experiment_result" and ref != request.failure_ref]
     baseline = context.read_input_json(baseline_refs[0]) if baseline_refs else None
+    reproduction = design is None and any(
+        ref.kind == "runtime_config" and context.read_input_json(ref).get("config", {}).get("research_task_kind") == "reproduction"
+        for ref in context.inputs
+    )
     consumed = {
-        "task_kind": "research" if design is not None else "bug_fix",
+        "task_kind": "research" if design is not None else "reproduction" if reproduction else "bug_fix",
         "brief": None if brief_ref is None else context.read_input_json(brief_ref),
         "design": None if design is None else design.to_handoff_dict(),
         "protocol": request.protocol,
@@ -458,6 +471,22 @@ def _prepare_research_task(
             + ("\n## Hard constraints\n\n" + "\n".join(f"- {item}" for item in constraints) + "\n"
                if isinstance(constraints, list) and constraints else "")
         )
+        if reproduction:
+            task = (
+                "# Fixed-scope reproduction preparation\n\n"
+                "Only connect the author program and adapt its actual results to the declared JSON/CSV contract. "
+                "Preserve the user-confirmed method, data, seeds, evaluation conditions and protected checker. "
+                "Do not innovate, fabricate metrics, install dependencies or run formal measurement. "
+                "The outer application owns measurement; the independent validation command must pass first. "
+                "Before measurement outputs exist, validate real readiness: import the required author modules, "
+                "check the actual input path/schema, and exercise the necessary author entry on a bounded "
+                "non-measurement example when feasible. An empty directory, syntax check or absent outputs "
+                "alone cannot establish readiness. A readiness example must not change the formal protocol "
+                "or be reported as its scientific result. If readiness cannot be checked, fail with an "
+                "actionable reason rather than returning success. Existing outputs may be independently "
+                "checked as a separate result-contract mode, not a substitute for pre-run readiness.\n\n"
+                + original + "\n\n" + request.revision_instruction + "\n"
+            )
     task += "\n## Execution boundary\n\n"
     task += "The configured protocol and existing edit scope remain authoritative.\n"
     if design is not None:

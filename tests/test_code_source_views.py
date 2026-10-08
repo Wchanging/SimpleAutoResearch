@@ -354,6 +354,20 @@ class RepairSourceContextTests(unittest.TestCase):
             self.assertIn('assert result == expected', prompt)
             self.assertIn('marked editable', prompt)
             self.assertIn('disproven plan', prompt)
+            from simple_ar.code_task.editing.planning import patch_plan_context
+            for task in ('Full request with final constraint: preserve input units.',
+                         '完整要求\n\n## Run Context\n用户自己的标题不能被截断。'):
+                plan = f'# Patch Plan\n\n## Task\n\n{task}\n\n## Run Context\n\ncommand\n\n## Risks\nkeep contract'
+                compact = patch_plan_context(plan, task)
+                self.assertNotIn(task, compact)
+                self.assertIn('keep contract', compact)
+                self.assertEqual(patch_plan_context(plan, 'Different task'), plan)
+                self.assertEqual(patch_plan_context(plan, ''), plan)
+                revised = _repair_prompt(task_text=task, patch_plan=plan, patch_diff='',
+                    memory_context='', failure_analysis='failed', execution_report={},
+                    validation_report={}, snippets=rows, read_only_context=['test_contract.py'])
+                self.assertEqual(revised.count(task), 1)
+                self.assertIn('assert result == expected', revised)
 
     def test_outside_workspace_and_secrets_not_read(self):
         with tempfile.TemporaryDirectory() as tmp:

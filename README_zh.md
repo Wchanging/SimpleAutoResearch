@@ -93,7 +93,11 @@ SIMPLE_AR_LLM_STREAM=false
 [高级配置](docs/CONFIG_REFERENCE_zh.md)按需使用。
 
 需要多组 API 或分别指定文本、代码模型时，使用[命名模型目录](docs/CONFIG_REFERENCE_zh.md#命名模型连接)。
-每个名称绑定自己的 URL、模型和密钥引用；`simple-ar models` 可本地检查，不发送请求。
+将[目录示例](examples/model-profiles/models.toml)复制到 `.local/models.toml` 等私有位置，
+在 `.env` 中设置 `SIMPLE_AR_MODELS_CONFIG` 为其绝对路径。只需配置一次，后续任务共用
+default/text/code/image 路由，也可用 `--model profile:名称` 单独选择连接。
+TOML 管理 URL、模型和密钥变量名，密钥值仍放 `.env`；`simple-ar models` 可本地检查，不发送请求。
+跨项目共用时，也可将目录放在默认位置 `~/.config/simple-ar/models.toml`。
 
 ### 4. 启动自己的任务
 

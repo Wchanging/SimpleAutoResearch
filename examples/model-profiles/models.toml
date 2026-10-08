@@ -1,11 +1,15 @@
 # Copy to a private location and set SIMPLE_AR_MODELS_CONFIG to its absolute path.
 # Credentials remain in environment variables or your private .env, never here.
 version = 1
+# Optional per-profile proxy_env = "RESEARCH_API_PROXY" references an HTTP(S)
+# proxy URL in that environment variable; it does not reroute literature tools.
 
 [routes]
 default = "daily"
 code = "daily"
 image = "paper_art"
+# To enable rendered-figure inspection, add vision = "figure_eye" and configure
+# the example below with a model your provider actually supports for image input.
 
 [profiles.daily]
 api = "openai_chat"
@@ -19,14 +23,33 @@ stream = true
 request_timeout_sec = 180
 retry_attempts = 3
 
-# Registration only: the image generation/editing executor is a later batch.
-# Confirm this provider's real Images protocol; a Chat example is not proof.
+# Used by simple-ar image. Confirm the provider's real Images protocol;
+# a Chat example or declared capability alone is not proof.
 [profiles.paper_art]
-api = "openai_images"
+api = "cctq_images_async"
+# The cctq async task protocol has real generation/editing checks, including
+# direct feedback editing. It uses this origin; no provider/API fallback.
+# For another provider's standard Images endpoint, explicitly select
+# "openai_images" and its URL/model. This example does not certify that protocol.
 base_url = "https://www.cctq.ai/v1"
 model = "gpt-image-2"
 api_key_env = "CCTQ_API_KEY"
 capabilities = ["image_generate", "image_edit"]
+request_timeout_sec = 600
+retry_attempts = 1
+# Optional provider-supported settings: image_size = "1024x1024", image_quality = "auto".
+
+# A visual reviewer is a vision-capable text model, not an image generator.
+# Replace the model before use; declaring a capability does not verify it.
+[profiles.figure_eye]
+api = "openai_chat"
+base_url = "https://www.cctq.ai/v1"
+model = "YOUR_VISION_MODEL"
+api_key_env = "CCTQ_API_KEY"
+capabilities = ["vision"]
+stream = true
+request_timeout_sec = 600
+retry_attempts = 1
 
 # Add any custom name, URL, model and credential reference, then point a route
 # to it. Text calls can explicitly use --model profile:YOUR_NAME. Do not put

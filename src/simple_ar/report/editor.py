@@ -133,37 +133,27 @@ def edit_joint_document(
             candidate = [candidate_by_id.get(row.section_id, row) for row in sections]
             prior = [finding for review in active for finding in review.findings
                      if finding.type not in DOCUMENT_CONTROL_FINDING_TYPES]
+            # Judge the complete candidate against the request, sources and
+            # editing concerns in one independent inspection. Old opinion IDs
+            # are bookkeeping, not an additional truth source or adoption gate.
+            # Retain old checks in history, but never let a failed closure call
+            # suppress inspection of the actual revised manuscript.
             checks = [row for row in iterations if row.iteration > event.iteration
-                      and row.action in {"document_joint_finding_check", "document_joint_verify"}]
-            checked = next((row for row in checks if row.action == "document_joint_finding_check"), None)
-            if prior and checked is None:
-                rows = inspect(candidate, prior)
-                checked = ReportIterationRecord(iteration=len(iterations) + 1, section_id="",
-                    action="document_joint_finding_check", status="completed",
-                    section_reviews=rows, requested_findings=prior)
-                iterations.append(checked)
-                checkpoint()
-            closed = True
-            if prior:
-                handles = historical_opinion_handles(prior)
-                observed = {(row.section_id, item.finding_id): item
-                    for row in checked.section_reviews for item in row.finding_checks}
-                closed = (set(observed) == set(handles)
-                          and all(item.status != "unresolved" for item in observed.values())
-                          and not any(row.context_requests for row in checked.section_reviews))
+                      and row.action == "document_joint_verify"]
             verified = next((row for row in checks if row.action == "document_joint_verify"), None)
-            if closed and verified is None:
-                rows = inspect(candidate, None)
+            if verified is None:
+                rows = inspect(candidate, prior)
                 verified = ReportIterationRecord(iteration=len(iterations) + 1, section_id="",
-                    action="document_joint_verify", status="completed", section_reviews=rows)
+                    action="document_joint_verify", status="completed", section_reviews=rows,
+                    requested_findings=prior)
                 iterations.append(verified)
                 checkpoint()
-            findings = [row for check in (checked, verified) if check
-                        for review in check.section_reviews for row in review.findings]
+            findings = [row for review in verified.section_reviews for row in review.findings]
             all_findings.extend(findings)
-            acceptable = (closed and verified is not None
+            acceptable = ({row.section_id for row in verified.section_reviews}
+                          == {row.section_id for row in candidate}
                           and not any(needs_change(row) or row.context_requests
-                                      for check in (checked, verified) if check for row in check.section_reviews))
+                                      for row in verified.section_reviews))
             if acceptable:
                 sections[:] = candidate
                 event.status, event.adopted = "verified", True
@@ -181,7 +171,7 @@ def edit_joint_document(
             checkpoint()
             # A rejected candidate can be corrected in the same remaining
             # round allowance. Never adopt only the apparently good sections.
-            rejected_reviews = [row for check in (checked, verified) if check for row in check.section_reviews]
+            rejected_reviews = verified.section_reviews
             active = coalesce_document_reviews([*active, *[row for row in rejected_reviews if needs_change(row)]])
         except (LLMError, ValidationError, ValueError) as exc:
             event.status = "drafted" if event.drafts else "unavailable"
@@ -329,6 +319,7 @@ def review_document(
     supplementary_evidence: list[ReportToolResult] | None = None,
     requested_context: list[ReportToolResult] | None = None,
     historical_findings: list[ReviewerFinding] | None = None,
+    complete_candidate: bool = False,
     on_invalid_response: Callable[[Any, str], None] | None = None,
     on_validated_subset: Callable[[list[ReportSectionReview]], None] | None = None,
     format_correction: Mapping[str, Any] | None = None,
@@ -350,8 +341,9 @@ def review_document(
     # Inspect current prose independently. Prior opinions are supplied only to
     # the separate check, never as extra source facts or an inspection answer.
     prior = historical_findings or []
-    revision_capacity = len(memory.section_plan) if config.draft_scope == "document" else document_revision_limit(memory)
-    correction_allowance = ("joint candidate rounds" if config.draft_scope == "document" else "per-section rounds")
+    joint_revision = config.draft_scope in {"document", "auto"}
+    revision_capacity = len(memory.section_plan) if joint_revision else document_revision_limit(memory)
+    correction_allowance = ("joint candidate rounds" if joint_revision else "per-section rounds")
     primary_sources = review_source_evidence(source_evidence or [])
     prior_by_key = historical_opinion_handles(prior)
     if any(row.section_id not in known or row.type in DOCUMENT_CONTROL_FINDING_TYPES for row in prior):
@@ -418,7 +410,7 @@ def review_document(
             *([] if prior else [
             "Find contradictions between sections about the same method, setting, result or conclusion.",
             "Find substantial repetition of protocol, metrics or limitations across sections; assign each fact a clear home.",
-            *( ["Set revision_scope=document only when an actionable revise finding requires coordinated edits across the article (for example overall length or distributed repetition). Keep the finding under one owning section; its quote anchors the observation, not the entire edit scope. Use section for local corrections, advisory observations and evidence-only verification. Document scope permits keeping unaffected prose unchanged; it never authorizes changing sources, measurements, the frozen plan or assembly-owned content."] if config.draft_scope == "document" else []),
+            *( ["Set revision_scope=document only when an actionable revise finding requires coordinated edits across the article (for example overall length or distributed repetition). Keep the finding under one owning section; its quote anchors the observation, not the entire edit scope. Use section for local corrections, advisory observations and evidence-only verification. Document scope permits keeping unaffected prose unchanged; it never authorizes changing sources, measurements, the frozen plan or assembly-owned content."] if joint_revision else []),
             "Compare observed length with the requested document length and genre. Treat a substantial excess or shortfall as an actionable delivery defect, not optional polish; do not remove required facts or add unrelated material to meet length.",
             "Check that abstract and conclusion do not claim more than results, and that paper versus analysis-report tone matches the evidence.",
             ]),
@@ -427,11 +419,12 @@ def review_document(
             "Distinguish parsed source passages from model reading notes and abstract-only access. Do not deny a reported result merely because it is absent from an abstract; check the supplied passages. Missing passages are not proof that the paper omits the result.",
             "Cold document checking omits earlier model reading cards but retains their locator and original passage window. A get_paper_brief request can retrieve the recorded card; its notes remain derived interpretations, not primary support. Request original source chunks when the passage window is insufficient, and retain the gap when tools are unavailable.",
             "Recorded bibliography is not independently verified identity or edition information. Check important attribution against original source passages; retain conflicting dates/identifiers and author-list coverage limits instead of inventing metadata.",
+            "Draft citation keys are provisional, not the delivered citation style. When delivery_text_observation.references is available, resolve its model_keys to paper ids and citation_numbers before alleging a mismatch with numeric References. Assembly owns this conversion; check incorrect attribution or missing mapping, not the mere difference between raw draft keys and displayed numbers.",
             *([] if prior else [f"Return at most one review per supplied section. Retain all consequential findings; do not pad or omit defects to fit the allowance. The editor can modify up to {revision_capacity} frozen target sections within its existing {correction_allowance}, prioritizing required corrections; unresolved findings remain visible."]),
         ],
         "output_schema": {"section_reviews": [{
             "section_id": "one of the supplied section ids",
-            "revision_scope": "section|document; document only for an actionable whole-article correction" if config.draft_scope == "document" else "section",
+            "revision_scope": "section|document; document only for an actionable whole-article correction" if joint_revision else "section",
             "verdict": "pass|warning|revise_required|fail",
             "findings": [{"finding_id": "stable id", "type": "style|unsupported_claim|metric_mismatch|citation_misuse|missing_limitation|evidence_gap",
                           "severity": "info|minor|major|critical", "message": "specific cross-section issue",
@@ -449,6 +442,13 @@ def review_document(
                                   "arguments": {}, "caller": "document_reviewer"}],
         }]},
     }
+    if complete_candidate:
+        view["focus"].append(
+            "This is independent inspection of a revised candidate. Review every supplied section exactly once. "
+            "Judge the current prose against the task and original evidence, reporting remaining or newly "
+            "introduced problems as concrete anchored findings. Do not return historical finding_checks."
+        )
+        view["output_schema"]["section_reviews"][0]["notes"] = "Current-section assessment against the task and evidence."
     if delivery_text_observation is not None:
         # One count scope for native callers: do not expose the partial
         # section+attachment sum as a competing complete delivery length.
@@ -511,6 +511,8 @@ def review_document(
     )
     try:
         reviews = _validate_document_reviews(response, sections=sections, prior_by_key=prior_by_key, evidence_view=view)
+        if complete_candidate and {row.section_id for row in reviews} != known:
+            raise LLMResponseError("Candidate inspection must review every supplied current section; no complete verification was performed.")
         if prior_by_key and not any(row.context_requests for row in reviews):
             checked = {(row.section_id, check.finding_id) for row in reviews for check in row.finding_checks}
             missing = set(prior_by_key) - checked
@@ -524,7 +526,7 @@ def review_document(
         # normal candidate verifier will recompute it after editing.
         observed = delivery_text_observation or {}
         length = observed.get("length_check") or {}
-        if (not prior and sections and config.draft_scope == "document"
+        if (not prior and sections and joint_revision
                 and observed.get("preview_status") == "pre_render_text_preview"
                 and not observed.get("pending_owner_sections")
                 and length.get("status") in {"above_range", "below_range"}):
@@ -559,7 +561,7 @@ def _validate_document_reviews(
     if not isinstance(response, Mapping) or not isinstance(response.get("section_reviews"), list):
         raise LLMResponseError("Whole-document reviewer did not return section_reviews.")
     raw_reviews = response["section_reviews"]
-    if len(raw_reviews) > len(known):
+    if prior_by_key and len(raw_reviews) > len(known):
         raise LLMResponseError("Whole-document reviewer returned more reviews than supplied sections.")
     reviews: list[ReportSectionReview] = []
     seen: set[str] = set()
@@ -586,7 +588,7 @@ def _validate_document_reviews(
         if (review.verdict in {"revise_required", "fail"} and not review.findings
                 and not any(check.status == "unresolved" for check in review.finding_checks)):
             raise LLMResponseError("Whole-document revision needs a concrete finding.")
-        if review.section_id not in known or review.section_id in seen:
+        if review.section_id not in known or (prior_by_key and review.section_id in seen):
             raise LLMResponseError("Whole-document reviewer targeted an unknown or repeated section.")
         if any(finding.section_id != review.section_id for finding in review.findings):
             raise LLMResponseError("Whole-document finding must identify its target section.")
@@ -610,7 +612,10 @@ def _validate_document_reviews(
             raise LLMResponseError("Historical finding check returned an unrequested target section.")
         seen.add(review.section_id)
         reviews.append(review)
-    return reviews
+    # Inspection observations can legitimately share a target. Validate every
+    # record before merging; a later pass must not erase an earlier defect.
+    # Historical closure keeps its one-target/one-opinion identity contract.
+    return reviews if prior_by_key else coalesce_document_reviews(reviews)
 
 
 def _validated_document_review_subset(
@@ -625,7 +630,7 @@ def _validated_document_review_subset(
     """
     known = {row.section_id for row in sections}
     rows = response.get("section_reviews") if isinstance(response, Mapping) else None
-    if not isinstance(rows, list) or len(rows) > len(known):
+    if not isinstance(rows, list) or (prior_by_key and len(rows) > len(known)):
         return []
     targets: set[str] = set()
     checked: set[tuple[str, str]] = set()
@@ -633,7 +638,7 @@ def _validated_document_review_subset(
     try:
         for raw in rows:
             if (not isinstance(raw, Mapping) or not isinstance(raw.get("section_id"), str)
-                    or raw["section_id"] not in known or raw["section_id"] in targets):
+                    or raw["section_id"] not in known or (prior_by_key and raw["section_id"] in targets)):
                 return []
             target = raw["section_id"]
             targets.add(target)
@@ -688,4 +693,4 @@ def _validated_document_review_subset(
             if any(finding_requires_resolution(f) and f.required_action != "verify" for f in accepted.findings):
                 accepted.verdict = "revise_required"
             result.append(accepted)
-    return result
+    return result if prior_by_key else coalesce_document_reviews(result)

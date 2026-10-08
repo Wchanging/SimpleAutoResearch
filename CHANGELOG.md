@@ -4,13 +4,201 @@
 
 This file records implemented, user-visible changes in reverse chronological order. Usage and technical references live in `docs/`; future plans and private acceptance records are not release claims.
 
+## 2026-10-08
+
+- Saved tasks permit timeout, output-limit and retry tuning without changing their
+  model or endpoint. Capped text stream deadlines support bounded same-API retries,
+  retaining uncertain consumption and the full failed-attempt reservation.
+  Code edit and repair prompts omit the plan's exact duplicate task section while
+  retaining the complete task separately and leaving approved plans unchanged.
+  Named-connection reading checkpoints completed structured responses per
+  attempt, so an explicit retry can reuse unchanged reads after another batch
+  item fails. Changed inputs, prompts or generation bindings are not reused;
+  technical failures still pause rather than silently skipping sources.
+  Outline correction retries malformed responses only; provider failures remain
+  subject to the connection's retry limit rather than a second application retry.
+  Stream errors identify explicit provider overload without exposing the provider's
+  error body; interrupted responses retain unknown consumption.
+- Scripted analysis supports table-only results and multiple named figures, preserving
+  output attachments and matching figure exports in portable packages. Validated
+  revisions publish these packages without requiring a legacy `figure.png`.
+  Generated projects can keep helper modules and editable layouts under `src/`;
+  portable packages preserve this directory alongside the entry script and data.
+  Saved reports and portable analyses remain reusable when an old code workspace
+  is no longer available; project editing still requires a valid registered workspace. Retrieval
+  keeps query/facet memberships when deduplicating papers. Survey review evaluates
+  evidence and comparison without requiring a particular table or heading format.
+  Full-text acquisition uses the source plan's allowance without a second implicit
+  reservation that leaves selected papers unread; total limits and permissions remain intact.
+  Guided reproduction can reuse a validated project with its saved single-command
+  protocol, result selectors, checker and interpreter in a new isolated task.
+  Chat setup also accepts an explicit project/data download capacity, displayed
+  before confirmation and preserved in acquisition receipts.
+  Invalid setup proposals stop after the existing correction attempt and save a
+  resumable diagnostic, instead of asking the user to repair technical configuration.
+  Model-visible semantic options and deterministic conversion share the configuration
+  owner, including table field mappings and function-specific choices.
+- Guided code tasks reserve validation capacity for their configured technical
+  repair rounds unless the user supplies explicit process limits. Bug-fix dispatch
+  uses the existing preparation/implementation route without duplicate model
+  planning; source-level CodeTask planning remains intact. Python syntax checks
+  now include compilation without executing source or writing bytecode;
+  generated analysis scripts start from a minimal whole-module placeholder.
+  Failed short validation pauses with its evidence retained and remains
+  eligible for explicit continuation, rather than closing the implementation step.
+  Generated reproduction preparation separates import/input/entry readiness
+  before measurement from post-run output consistency; an empty output directory
+  alone is not a successful readiness check.
+- Linked public materials support an explicit proxy and trusted CA route for
+  exact source hosts, separate from model connections. Default direct access,
+  TLS verification and acquisition limits remain unchanged.
+  Report references identify linked documentation separately from its parent
+  paper, retaining its own URL without inventing authors, dates or release identity.
+  Reusing a report carries the source bundle consumed by its Writer, including
+  later linked-document reading, instead of only the first ingest.
+- Code tasks report rejected edit budgets rather than misclassifying them as
+  missing designs. The existing one-shot correction receives the rejection
+  reason while retaining edit-size limits and protected files.
+  The normal budget permits compact changes across up to four allowed files;
+  total edit size stays unchanged, and larger changes still require approval.
+- Whole-document inspection groups validated observations by section instead of
+  rejecting the entire review for a repeated section. Findings remain visible;
+  unknown targets, unsupported quotations and duplicate historical closures
+  still fail validation.
+  Joint revisions use one complete candidate inspection against the task,
+  sources and current prose, replacing separate historical-ID closure and
+  manuscript checks. Incomplete inspection cannot adopt a candidate; old drafts
+  and completed inspection checkpoints remain available for recovery.
+- Reports offer explicit experimental automatic draft granularity: fully sized
+  plans up to 2,000 words draft jointly; longer or unsized plans checkpoint sections
+  before complete-document inspection. Guided reports retain joint drafting by default.
+  Existing task configurations and custom writing templates retain their choices.
+  Structured search plans use focused topic keywords instead of concatenating
+  all supporting conditions or forcing the full task into the first query.
+  arXiv joins plain keywords explicitly; advanced connector queries are preserved.
+- Writing retains a valid outline when an optional model-proposed length quota
+  is unsupported. The rejected proposal is recorded and the original request
+  still governs; valid but infeasible numerical budgets remain errors.
+  Evidence-organized outline requests use short source labels, restoring exact
+  identities before validation and saving; unknown references are not guessed.
+- Project preparation and code review share the existing text reader, making
+  extensionless recipes and shell sources available for question-directed reads.
+  Binary files, generated lock files, secret files and oversized files remain
+  outside review text; no task-specific recipe whitelist is introduced.
+- Chat can confirm an existing Python path supplied by the user for code repair
+  or reproduction. Reproduction uses it for execution, or as the base for an
+  explicitly requested task venv; validation and measurement share the selected
+  task environment. This does not certify autonomous reproduction preparation.
+- Guided setup separates task-specific questions from source inspection: reading
+  an approved file no longer consumes a human clarification turn. Report-only
+  investigations can write from retained reading evidence without a mandatory
+  intermediate synthesis; source acquisition, reading and report review remain.
+  Execution suggestions may reference inspected source paths without requiring
+  the model to recopy code quotations; download links still need located URL
+  evidence, and source references do not certify command correctness.
+- Reproduction file selectors own scalar metric names; descriptive labels no
+  longer create a second namespace. Explicitly scoped new adapters reuse the
+  bounded script-creation edit policy, without widening author-file permissions.
+- Report feedback reuses its recorded citation map alongside the draft and
+  registered source text bundle, preserving passages without another download.
+  Reference identities survive rewriting without claiming that the
+  original sources were independently checked again; retained short keys are
+  not renumbered while the old map is supplied to writing.
+  Validated script-analysis deliveries retain source, data, results and figure
+  exports in a relocatable package for writing and report assembly; copying
+  these outputs does not claim independent numerical recomputation.
+  ACM export preserves registered vector variants behind PNG previews and
+  removes external SVG DTD declarations from export copies without fetching
+  them; entity definitions and external rendered resources remain rejected.
+- Automatic investigations leave document and fetch slots for evidence followup
+  within the configured total. Explicit repository links take precedence over
+  generic links; guided full-text setup defaults to six remote resources.
+- Document extraction recovers valid Unicode surrogate pairs from parser output
+  and records unpaired-character replacement as an extraction limitation, rather
+  than aborting the whole acquisition or silently dropping source symbols.
+
 ## 2026-10-07
 
+- Reproduction chat can acquire a human-supplied paper link with confirmation,
+  provide an attributed bounded excerpt, and recover its saved receipt without
+  fetching again. Retrieval planning can carry a quoted publication-year window;
+  providers and local selection apply it before allocating core document slots.
+  These changes do not certify full-paper understanding or survey completeness.
+  Optional OpenAlex and Semantic Scholar credentials are read from their own
+  environment variables and sent in headers; model-profile keys are not reused.
+  Optional source reread failures retain completed notes and unresolved questions,
+  stop further rereads and return partial evidence rather than discard the batch.
+  Explicit reproduction dependency preparation can precede scoped adapter work in
+  the same isolated workspace; implementation, validation and measurement share the
+  prepared interpreter, and installation failure blocks subsequent work.
+  Chat can query later sections of confirmed local documents/materials using the
+  shared document parser and source retrieval; expanded reading is confirmed,
+  persisted and reused on recovery without another parse or download.
+  Source-linked official pages/PDFs can be proposed as supporting material, with
+  separate confirmation, shared download accounting and attributed document reads;
+  their acquisition neither replaces the project nor authorizes execution.
+
+- `results` lists current registered deliveries; `start --from-session --reuse` starts
+  writing from an analysis package, report or summary without rerunning the original.
+  Report reuse includes saved experiment evidence and bibliography.
+  `--reuse code_project` continues a validated project with its original scope,
+  protected files and validator in a new isolated task, leaving the original intact.
+- `image` uses a named Images profile for generation or reference-image editing,
+  keeping versions, request records and one-request accounting. Completed-request
+  recovery makes no additional call; the generic synchronous API requires base64 provider output.
+- `image-review` sends rendered figures to a separate named vision connection,
+  preserving source copies, raw responses and actionable feedback. Completed
+  reviews and saved-response parsing recover without another call; visual feedback
+  is not scientific validation or automatic editing.
+- Image profiles can explicitly select `cctq_images_async` for saved-task polling
+  and authenticated same-origin downloads without another POST; generic synchronous
+  `openai_images` remains available. Saved-task recovery and a feedback edit were
+  verified through a configured proxy; this does not establish direct-server stability.
+- Data setup accepts `--scripted` for goal-driven analysis and code-generated plots,
+  reusing CodeTask isolation, protected inputs, validation and recovery rather than
+  limiting the task to preset charts. Delivery checks validate files, not statistics.
+  New scripted scaffolds disclose the existing `large` patch profile before execution
+  (16,000 characters per new block); ordinary project repair is unchanged.
+  `start --kind figure` uses the same execution path for editable method diagrams
+  without a dummy dataset; vector SVG, PNG, design records and explanation are required.
+  Binary deliveries remain in the project inventory but are not decoded as code
+  context; legacy packs containing them are rebuilt without deleting the originals.
+  JSONL recovery preserves Unicode separators inside strings instead of splitting
+  them into broken records.
+- Setup previews explicitly supplied papers through the existing document parser,
+  retaining page/character coverage and truncation rather than passing paths alone.
+  Search can execute bounded follow-up metadata queries, retaining actual rounds;
+  metadata coverage is not evidence that full-text questions have been answered.
+- Open surveys can use explicit reading gaps to schedule one additional search,
+  ingest and reading cycle within the original limits. Previous evidence remains
+  immutable; downstream work adopts cumulative sources only after reading finishes.
+  Screening can propose searches for missing required questions across the candidate
+  pool, even when no paper is worth retaining. These observations accompany synthesis
+  and writing without being treated as verified answers; follow-up search respects
+  the same publication-year eligibility as initial selection.
+  Explicit links cited in saved passages can enter the same bounded follow-up,
+  retaining independent webpage identities and sharing paper-acquisition limits.
+  URL-only follow-up does not issue provider searches or recursively crawl links.
+- Chat setup can separately confirm public project ZIPs / GitHub default-branch
+  snapshots and single-file data downloads. Bounds are 3 assets, 20 MiB per download,
+  and 80 MiB / 5000 entries per project ZIP; query-bearing URLs are rejected.
+  Acquisition runs no project code or installers and is not a security sandbox.
+  End-to-end real-world reproduction acceptance has not yet passed.
+  Native result files can supply explicitly selected JSON/CSV metrics, with source
+  locations and conflict checks; author output arguments can bind `{output_dir}`
+  to the current invocation without modifying author code or scanning old results.
+  Existing Python projects can explicitly authorize an isolated result adapter,
+  with a separate validation command before formal measurement. Author conditions
+  and protected assets remain unchanged; this is not arbitrary paper preparation.
+  Invocation output directories are created before launch so producers can write
+  directly to their declared output paths.
 - Named TOML model profiles keep URL, model and credential reference together, with separate
   text/code routes and local inspection through `simple-ar models`. Existing `.env` setup remains
   supported; research-session recovery detects connection changes without storing secret keys.
   Profiles can opt into SDK HTTP/2 with the `http2` extra; local inspection shows streaming,
   protocol preference and timeout. HTTP/1.1 remains the default.
+  A profile's optional `proxy_env` routes only its API connection, leaving literature
+  tools unchanged; proxy values are not stored in task snapshots or request bodies.
 - New report plans inline only selected analysis figures; other charts remain in the linked analysis package.
   Package links are consolidated, while recorded legacy visual intents retain their meaning. Findings from
   rejected joint revisions stay in editing history rather than becoming defects of the delivered original.
@@ -20,7 +208,13 @@ This file records implemented, user-visible changes in reverse chronological ord
   data-to-report workflow inspectable; reanalysing the CSVs needs no API.
 - API streaming requests disable HTTP compression by default while preserving explicit header overrides.
   Completed generations survive a failed usage tail with estimated accounting; streams without a completion
-  marker remain failures. Provider retries now report the attempt and delay.
+  marker remain failures. The optional accounting tail has a bounded wait after generation completes;
+  it does not shorten generation timeouts. Provider retries now report the attempt and delay.
+  Finite-timeout SDK Chat streams now also have an elapsed-time deadline; unknown
+  unfinished usage is retained without automatic resubmission, while completed
+  content survives a missing accounting tail.
+  Confirmed interrupted attempts immediately retain unknown usage instead of
+  leaving old in-flight reservations that prevent explicit continuation authorization.
 - SDK connections close after response consumption or failure. Cancelling a provider request records unknown
   usage instead of leaving it in flight, without starting another attempt.
 

@@ -360,7 +360,7 @@ class AnalysisWritingTests(unittest.TestCase):
                 self.assertIn('Supplied Descriptive Data', body)
                 self.assertNotIn('Verified Experiment Metrics', body)
                 self.assertNotIn('| A | score |', body)
-                self.assertIn('Complete numerical records', body)
+                self.assertIn('[numerical records](analyses/analysis-001/analysis.json)', body)
                 self.assertTrue((output / 'analyses/analysis-001/figures/value-1-1.svg').is_file())
                 moved = root / 'moved report with spaces'
                 shutil.copytree(output, moved)
@@ -425,8 +425,10 @@ class AnalysisWritingTests(unittest.TestCase):
                         self.assertEqual(records, load_analysis_package(path)[0]['records'])
                         self.assertEqual(path.read_bytes(), original)
                         self.assertEqual(drafts[0].draft_markdown, 'Supported observations.')
-                        figure = store.read_json('figures/figures_manifest.json')['figures'][0]
-                        self.assertEqual(figure['anchor'], 'findings' if owner_count == 1 else 'supplied_analysis_1')
+                        # Source citations alone no longer select inline figures.
+                        # The complete copied package remains editable/rebuildable.
+                        self.assertFalse(store.exists('figures/figures_manifest.json'))
+                        self.assertTrue(any((store.root / 'analyses/analysis-001/figures').glob('*.svg')))
 
     def test_explicit_data_visual_owner_overrides_shared_citations_without_duplicate_rendering(self):
         from simple_ar.report.schema import ReportDocumentPlan, ReportSectionPlan, ReportVisualIntent
@@ -523,10 +525,10 @@ class AnalysisWritingTests(unittest.TestCase):
             self.assertEqual(len({row['handle'] for row in sources}), 2)
             self.assertTrue(all(row['figure_count'] == 1 for row in sources))
             self.assertTrue(all(row['row_count'] == 3 for row in material_context.results['supplied_analyses']))
-            self.assertIn('2 supplied analysis package(s) were recomputed', material_context.evidence_summary)
+            self.assertIn('2 supplied analysis package(s) retain results', material_context.evidence_summary)
             self.assertNotIn('No experiment', material_context.evidence_summary)
             self.assertTrue(any('No experiment' in text for text in material_memory.limitations))
-            self.assertTrue(any('not data collection' in text for text in material_memory.limitations))
+            self.assertTrue(any('Neither certifies data collection' in text for text in material_memory.limitations))
             self.assertFalse(any('![Descriptive values]' in row.text for row in bundle.sections))
             refs = tuple(store.ref(row.metadata['table_analysis']['artifact']) for row in bundle.records
                          if 'table_analysis' in row.metadata)

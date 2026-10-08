@@ -652,6 +652,18 @@ def execute_code_task(
             )
             if result.edit_count == 0:
                 proposal = read_json(result.proposal_path)
+                budget_status = proposal.get("budget", {}).get("status", "")
+                if budget_status in {"rejected_absolute", "rejected_large"}:
+                    detail = "; ".join(str(item) for item in proposal.get("warnings", []))
+                    detail = detail or f"Edit proposal rejected by {budget_status}."
+                    record_review_finding(root, {
+                        "key": "edit-proposal-budget-rejected", "severity": "blocking",
+                        "category": "patch_validation", "summary": detail,
+                        "evidence": ["code_task/meta/proposed_edits.json"],
+                        "recommendation": "Use focused exact-source edits within the existing limits; do not expand scope or rewrite the whole file.",
+                        "source": "code-task.execute",
+                    })
+                    return _result(paths, steps, "edit_budget_rejected", detail)
                 reasons = [str(item) for item in proposal.get("validation", []) if str(item).strip()]
                 detail = str(proposal.get("summary") or "No edits were proposed.")
                 if reasons:
@@ -1373,7 +1385,7 @@ def _proposal_edit_count(paths: object) -> int:
 
 
 def _patch_validation_recovery_needed(run_dir: Path) -> bool:
-    """Allow one model correction after a proposal failed exact patch validation."""
+    """Allow one model correction after exact-text or edit-budget rejection."""
 
     findings_path = code_task_memory_paths(run_dir).review_findings_jsonl
     if not findings_path.is_file():
@@ -1384,7 +1396,7 @@ def _patch_validation_recovery_needed(run_dir: Path) -> bool:
         return False
     keys = {str(row.get("key") or "") for row in findings if isinstance(row, dict)}
     # Legacy 'recovery' findings record a start, not a generated proposal.
-    return "apply-edits-validation-failed" in keys and "apply-edits-validation-recovery-completed" not in keys
+    return bool(keys & {"apply-edits-validation-failed", "edit-proposal-budget-rejected"}) and "apply-edits-validation-recovery-completed" not in keys
 
 
 def _ensure_context_pack_for_current_batch(

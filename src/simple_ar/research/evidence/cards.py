@@ -346,7 +346,10 @@ def _scope_for_claim(claim: str) -> str:
 
 
 def _urls(text: str) -> list[str]:
-    return re.findall(r"https?://[^\s)>\]]+", text)
+    # Prose delimiters are not part of the address; retain internal dots,
+    # query separators and percent-encoded punctuation.
+    return [url.rstrip(".,;:!?。，；：！？")
+            for url in re.findall(r"https?://[^\s)>\]\"']+", text)]
 
 
 def _repository_name(url: str) -> str | None:

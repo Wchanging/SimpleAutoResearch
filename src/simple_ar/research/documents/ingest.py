@@ -9,6 +9,7 @@ the returned bundle.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
+import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -110,7 +111,35 @@ def analysis_material_paths(paths: Iterable[Path]) -> tuple[Path, ...]:
         if isinstance(payload, dict) and str(payload.get("schema_version", "")).startswith("table_analysis."):
             load_analysis_package(path)
             packages.append(path)
+        elif isinstance(payload, dict) and str(payload.get("schema_version", "")).startswith("code_analysis."):
+            from simple_ar.result_analysis.script_project import copy_code_analysis_package
+            copy_code_analysis_package(path, None)
+            packages.append(path)
     return tuple(packages)
+
+
+def retained_document_materials(paths: Iterable[Path]) -> dict[Path, DocumentBundle]:
+    """Restore declared source bundles, not serialized prose or old judgments.
+
+    Embedded records/sections/chunks are reused. Source paths are provenance,
+    never instructions to open files or fetch remote content. Declared analysis
+    attachments are separately rechecked by the existing package owner.
+    """
+    retained = {}
+    for path in paths:
+        if path.suffix.lower() != ".json":
+            continue
+        payload = read_json(path)
+        if not isinstance(payload, Mapping) or not str(payload.get("schema_version", "")).startswith("document_bundle."):
+            continue
+        bundle = DocumentBundle.from_handoff_dict(payload)
+        identifiers = [record.document_id for record in bundle.records]
+        if not identifiers or len(set(identifiers)) != len(identifiers):
+            raise ValueError("Retained document bundle requires distinct source identities.")
+        if any(row.document_id not in identifiers for row in [*bundle.sections, *bundle.chunks]):
+            raise ValueError("Retained source text refers to an unknown document.")
+        retained[path.resolve()] = bundle
+    return retained
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,9 +154,11 @@ class DocumentIngestRequest:
     resolver: DocumentResolver | None = None
     parser: DocumentParser | None = None
     analysis_paths: tuple[Path, ...] = ()
+    supporting_records: tuple[DocumentRecord, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "papers", tuple(self.papers))
+        object.__setattr__(self, "supporting_records", tuple(self.supporting_records))
         if self.max_chunks is not None and self.max_chunks < 1:
             raise ValueError("DocumentIngestRequest.max_chunks must be positive.")
 
@@ -141,6 +172,7 @@ def build_document_bundle(
     max_chunks: int | None = None,
     resolver: DocumentResolver | None = None,
     parser: DocumentParser | None = None,
+    supporting_records: Iterable[DocumentRecord] = (),
 ) -> DocumentBundle:
     """Build the reusable document/section/chunk handoff.
 
@@ -149,7 +181,56 @@ def build_document_bundle(
     and do not turn a document-ingest failure into a pipeline exception.
     """
 
-    records = build_document_records(papers=papers, source_plan=source_plan)
+    supporting = _supporting_records(supporting_records)
+    exhausted = supporting and any(type(source_plan.budget.get(key)) is not int or source_plan.budget[key] <= 0
+        for key in ("max_fulltext_documents", "max_fulltext_fetch_attempts", "max_pdf_mb"))
+    source_plan = replace(source_plan, require_fulltext=source_plan.require_fulltext and not exhausted)
+    records = [*supporting, *build_document_records(papers=papers, source_plan=source_plan)]
+    return build_record_bundle(records=records, source_plan=source_plan, cache_dir=cache_dir,
+                               extraction_dir=extraction_dir, max_chunks=max_chunks,
+                               resolver=resolver, parser=parser)
+
+
+def build_supporting_material_bundle(
+    *, records: list[DocumentRecord], source_plan: SourcePlan,
+    cache_dir: Path, extraction_dir: Path, max_chunks: int | None = None,
+    resolver: DocumentResolver | None = None, parser: DocumentParser | None = None,
+) -> DocumentBundle:
+    """Ingest explicit webpage records, never Paper rows or guessed URLs.
+
+    Callers provide independent document_ids and metadata.parent_document_id.
+    Budgets are REMAINING allowances: zero/missing documents, attempts or
+    max_pdf_mb denies acquisition (including cache reuse). Original records
+    survive failures; the returned manifest is the attempt/cache history.
+    No network occurs without require_fulltext. No recursive link traversal.
+    """
+    return build_document_bundle(papers=[], supporting_records=records, source_plan=source_plan,
+        cache_dir=cache_dir, extraction_dir=extraction_dir, max_chunks=max_chunks,
+        resolver=resolver, parser=parser)
+
+
+def _supporting_records(records: Iterable[DocumentRecord]) -> list[DocumentRecord]:
+    from simple_ar.research.preparation_assets import validate_public_url
+    material_records = []
+    for record in records:
+        if (record.local_path or not record.url or record.metadata.get("fulltext_hints")
+                or not record.metadata.get("parent_document_id")
+                or record.document_id == record.metadata.get("parent_document_id")):
+            raise ValueError("Explicit independent webpage record with parent_document_id required.")
+        validate_public_url(record.url)  # Syntax only; DNS occurs after budget/permission checks.
+        material_records.append(replace(record, source="supporting_material", metadata={
+            **record.metadata, "kind": "supporting_material",
+            "content_scope": "linked_material_not_paper_or_measured_result",
+        }))
+    return material_records
+
+
+def build_record_bundle(
+    *, records: list[DocumentRecord], source_plan: SourcePlan, cache_dir: Path | None,
+    extraction_dir: Path, max_chunks: int | None = None,
+    resolver: DocumentResolver | None = None, parser: DocumentParser | None = None,
+) -> DocumentBundle:
+    """Shared records→fetch history→extraction→sections/chunks composition."""
     fulltext_manifest = build_fulltext_manifest(
         records=records,
         source_plan=source_plan,
@@ -218,11 +299,29 @@ def run_document_ingest_capability(
     """
 
     packages = analysis_material_paths(request.analysis_paths)
-    analysis_paths = {str(path.resolve()) for path in packages}
+    retained = retained_document_materials(request.analysis_paths)
+    package_paths = list(packages)
+    for path, saved in list(retained.items()):
+        analyses = [record for record in saved.records
+                    if record.metadata.get("table_analysis") is not None or record.metadata.get("code_analysis") is not None]
+        for record in analyses:
+            package = record.metadata.get("table_analysis") or record.metadata["code_analysis"]
+            source = (path.parent / package["artifact"]).resolve()
+            if not source.is_relative_to(path.parent):
+                raise ValueError("Retained analysis must stay inside the selected document package.")
+            package_paths.append(source)
+        if analyses:
+            ids = {record.document_id for record in analyses}
+            retained[path] = replace(saved, records=[row for row in saved.records if row.document_id not in ids],
+                sections=[row for row in saved.sections if row.document_id not in ids],
+                chunks=[row for row in saved.chunks if row.document_id not in ids])
+    packages = tuple(dict.fromkeys(package_paths))
+    analysis_paths = {str(path.resolve()) for path in packages} | {str(path) for path in retained}
     source_plan = replace(request.source_plan, local_documents=[path for path in request.source_plan.local_documents
                          if str(Path(path).resolve()) not in analysis_paths])
     bundle = build_document_bundle(
         papers=list(request.papers),
+        supporting_records=request.supporting_records,
         source_plan=source_plan,
         cache_dir=request.cache_dir,
         extraction_dir=request.extraction_dir,
@@ -234,13 +333,30 @@ def run_document_ingest_capability(
     for index, path in enumerate(packages, start=1):
         from simple_ar.result_analysis.table import copy_analysis_package, table_markdown
         prefix = f"analyses/analysis-{index:03d}"
-        result = copy_analysis_package(path, context.store.root / prefix)
+        code_package = read_json(path).get("schema_version") == "code_analysis.v1"
+        if code_package:
+            from simple_ar.result_analysis.script_project import copy_code_analysis_package
+            result = copy_code_analysis_package(path, context.store.root / prefix)
+            text = (context.store.root / prefix / "outputs/report.md").read_text(encoding="utf-8")
+            text += "\nRecorded script outputs (not independently recomputed):\n" + json.dumps(result["results"], ensure_ascii=False)
+        else:
+            result = copy_analysis_package(path, context.store.root / prefix)
+            text = table_markdown({**result, "figures": []})
         document_id = f"supplied-analysis-{index:03d}"
         # Package-local image links are not report-local paths. Keep the
         # numerical material readable; registered figures travel separately
         # to planning and assembly rather than being copied into writer prose.
-        text = table_markdown({**result, "figures": []})
         artifact = f"{prefix}/analysis.json"
+        if code_package:
+            bundle.records.append(DocumentRecord(document_id=document_id, title=f"Supplied code analysis {index}",
+                source="local_analysis", source_id=str(path.resolve()), extraction_status="parsed", parser="code_analysis.v1",
+                metadata={"code_analysis": {**result, "artifact": artifact},
+                          "evidence_role": "validated_script_output_not_independently_recomputed"}))
+            bundle.sections.append(DocumentSection(section_id=f"{document_id}:results", document_id=document_id,
+                section="results", heading="Supplied script results", text=text, source_path=f"{prefix}/outputs/report.md"))
+            imported.extend(context.store.ref(item.relative_to(context.store.root), kind="code_analysis_attachment")
+                for item in (context.store.root / prefix).rglob("*") if item.is_file())
+            continue
         bundle.records.append(DocumentRecord(document_id=document_id, title=f"Descriptive analysis: {result['source_name']}",
             source="local_analysis", source_id=str(path.resolve()), extraction_status="parsed", parser="table_analysis.v1",
             metadata={"table_analysis": {"artifact": artifact, "records": result["records"], "spec": result["spec"],
@@ -256,6 +372,17 @@ def run_document_ingest_capability(
             for item in (context.store.root / prefix).rglob("*") if item.is_file())
     if packages:
         bundle.chunks[:] = build_text_chunks(bundle.records, sections=bundle.sections, max_chunks=request.max_chunks)
+    for path, saved in retained.items():
+        existing = {record.document_id for record in bundle.records}
+        if existing.intersection(record.document_id for record in saved.records):
+            raise ValueError("Retained document identities conflict with another supplied source.")
+        bundle.records.extend(replace(record, metadata={**record.metadata,
+            "retained_bundle": str(path),
+            "retained_source_role": "paper" if record.metadata.get("paper_id") else "material",
+            "evidence_role": "retained_source_text_not_reverified"})
+            for record in saved.records)
+        bundle.sections.extend(saved.sections)
+        bundle.chunks.extend(saved.chunks)
     output = context.store.write_json(
         "document_bundle.json",
         bundle.to_handoff_dict(),

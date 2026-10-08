@@ -3,13 +3,15 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import io
+import tokenize
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 from simple_ar.core.artifacts import write_json
-from simple_ar.retrieval.index import json_summary, kind_for_path
+from simple_ar.retrieval.index import _looks_like_text, json_summary, kind_for_path
 from simple_ar.code_task.runtime.state import utcnow_iso as _utcnow_iso
 
 
@@ -32,6 +34,39 @@ IGNORED_FILE_NAMES = {
     ".env",
     ".git",
 }
+
+# Shared with question-directed source lookup; retain its existing language
+# coverage rather than inventing another binary-extension denylist.
+SOURCE_SUFFIXES = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs",
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".r", ".jl", ".sh",
+}
+
+
+def read_code_task_text(path: Path) -> str | None:
+    """Read source/context text, not arbitrary inventory artifacts.
+
+    Reuse retrieval's UTF-8 sample/NUL detection for unknown formats. Known
+    source encodings keep the previous replacement fallback; Python's coding
+    declaration is handled by the standard tokenizer before that fallback.
+    """
+    try:
+        if path.suffix.lower() not in SOURCE_SUFFIXES and not _looks_like_text(path):
+            return None
+        data = path.read_bytes()
+        if b"\0" in data:
+            return None
+        if path.suffix.lower() == ".py":
+            try:
+                encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+                text = data.decode(encoding)
+            except (SyntaxError, UnicodeError, LookupError):
+                text = data.decode("utf-8", errors="replace")
+        else:
+            text = data.decode("utf-8", errors="replace")
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+    except OSError:
+        return None
 
 
 def is_python_environment(directory: Path) -> bool:
@@ -151,6 +186,7 @@ def _index_file(root: Path, path: Path) -> dict[str, Any]:
 def _python_summary(path: Path) -> dict[str, Any]:
     try:
         tree = ast.parse(path.read_bytes(), filename=str(path))
+        compile(tree, str(path), "exec", dont_inherit=True)
     except SyntaxError as exc:
         return {
             "syntax_ok": False,
@@ -272,9 +308,8 @@ def _summary_for_file(
 ) -> str:
     if kind == "other":
         return ""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    text = read_code_task_text(path)
+    if text is None:
         return ""
     if kind == "json":
         summary = json_summary(text[:8192])

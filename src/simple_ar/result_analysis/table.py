@@ -397,6 +397,19 @@ def read_table_source(path: Path, *, max_mb: int) -> tuple[bytes, list[dict]]:
         raise ValueError(f"Invalid delimited table: {exc}") from exc
 
 
+def preview_table_source(path: Path, *, max_mb: int) -> dict:
+    """Shared bounded shape/examples for dialogue and generated analysis."""
+    _, rows = read_table_source(path, max_mb=max_mb)
+    columns = list(rows[0])
+    shown = columns[:40]
+    return {"row_count": len(rows), "columns": [name[:200] for name in shown],
+        "columns_omitted": max(0, len(columns) - len(shown)),
+        "column_names_truncated": any(len(name) > 200 for name in shown),
+        "example_rows": [{name[:200]: str(row[name])[:200] for name in shown} for row in rows[:5]],
+        "cell_values_truncated": any(len(str(row[name])) > 200 for row in rows[:5] for name in shown),
+        "status": "bounded shape/examples only; truncated names are not selectable names; meanings, independence, units and pairing are not verified"}
+
+
 def validate_table_columns(rows: list[dict], spec: TableSpec) -> None:
     """Report exact available names, without guessing column meaning or types."""
     if not rows:

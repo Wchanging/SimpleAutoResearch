@@ -57,10 +57,11 @@ def environment_profile(value: Any, *, project: Path | None = None) -> dict[str,
 
 
 def prepare_project_environment(*, context: CapabilityContext, request: Any,
-                                backend: ExecutionBackend | None = None) -> CapabilityResult:
+                                backend: ExecutionBackend | None = None,
+                                prepared_payload: Mapping[str, Any] | None = None) -> CapabilityResult:
     config = dict(request.execution)
-    if request.run is None or "code_task" in config or "dataset" in config or config.get("pairs"):
-        raise ValueError("Environment preparation supports a single declared command, not CodeTask, text-baseline or paired execution.")
+    if request.run is None or "dataset" in config or config.get("pairs"):
+        raise ValueError("Environment preparation requires one declared project command.")
     project = request.run.cwd.resolve()
     profile = environment_profile(config["environment"], project=project)
     if not project.is_dir():
@@ -69,7 +70,31 @@ def prepare_project_environment(*, context: CapabilityContext, request: Any,
     # uv/conda launcher or shell remains the user's selected execution protocol.
     isolated = profile["mode"] == "venv"
     aliases = {"python", "python3", "python.exe", "python3.exe"}
-    if isolated and request.run.command[0] not in aliases:
+    formal = list(config["command"]) if "code_task" in config else list(request.run.command)
+    before = {}
+    if "code_task" in config:
+        from simple_ar.app.research_execution import code_task_validation
+        from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest
+        from simple_ar.experiment.execution.measurement import snapshot_protocol_assets
+        task = dict(config["code_task"])
+        run_dir = Path(task["run_dir"])
+        if prepared_payload is None or code_task_paths(run_dir).workspace_dir.resolve() != project:
+            raise ValueError("Environment installation requires the initialized isolated CodeTask workspace.")
+        code_task_validation(config, required=True)
+        manifest = load_code_task_manifest(run_dir)
+        # Reuse the protocol's named assets. Only the actual Python checker/
+        # formal entry and accepted source config are added; never hash a tree.
+        locators = [argv[1] for argv in (formal, task["validation_command"])
+                    if len(argv) > 1 and argv[1].endswith('.py')]
+        conditions = config.get("protocol", {}).get("comparison_conditions", {})
+        source_config = conditions.get("source_config") if isinstance(conditions, Mapping) else None
+        if isinstance(source_config, str) and source_config.strip():
+            locators.append(source_config)
+        assets = [{"asset_id": f"entry:{locator}", "path": locator}
+                  for locator in dict.fromkeys(locators) if (project / locator).is_file()]
+        before = snapshot_protocol_assets(config.get("protocol"), project)
+        before.update(snapshot_protocol_assets({"protected_assets": assets}, project))
+    if isolated and formal[0] not in aliases:
         raise ValueError("Task venv requires the command's first argument to be python/python3; explicit interpreters and non-Python launchers are not silently replaced.")
     directory = context.store.root / "environment"
     if directory.exists() or (context.store.root / "environment_setup.json").exists():
@@ -90,10 +115,11 @@ def prepare_project_environment(*, context: CapabilityContext, request: Any,
     observed = []
     refs = []
     selected_backend = backend or LocalExecutionBackend()
-    limitations = [("Isolated task venv; not an OS sandbox. Approved requirements/project installation may run build code, access package indexes and write build metadata in the source project." if isolated else "Current environment; no dependency installation or interpreter replacement. Checks execute project code, not in an OS sandbox."),
+    limitations = [("Task venv; not an OS sandbox. Approved installation may run build code, access package indexes and write build metadata in the execution workspace." if isolated else "Current environment; no dependency installation or interpreter replacement. Checks execute project code, not in an OS sandbox."),
                    "Successful installation and pip check do not prove project imports, binary/GPU compatibility, data splits or scientific validity.",
                    "A check proves only its observed exit status; its outputs are preparation records, not scientific measurements. No automatic shortening or retry of the scientific command.",
-                   "No automatic data download, framework-directed project-code edits or changes to the scientific command's arguments."]
+                   "No automatic data download, framework-directed project-code edits or changes to the scientific command's arguments.",
+                   *(["Only declared protocol assets and execution/checker entries are content-checked; CodeTask data/edit protections are not an OS sandbox for installation build code."] if "code_task" in config else [])]
     for number, argv in enumerate(steps, 1):
         # Allocate before launch. An interrupted attempt retains this unknown
         # result; normal completed recovery uses the existing prepared_execution.
@@ -110,8 +136,16 @@ def prepare_project_environment(*, context: CapabilityContext, request: Any,
         if result.status != "passed":
             return CapabilityResult(status="failed", artifacts=(*refs, ref),
                 diagnostics=(f"Environment preparation step {number} {result.status}; the scientific command was not run.",))
+    if before:
+        from simple_ar.experiment.execution.measurement import reconcile_protocol_assets
+        integrity = reconcile_protocol_assets(before)
+        guard = context.store.write_json("environment_integrity.json", integrity, kind="asset_integrity")
+        refs.append(guard)
+        if integrity["status"] == "changed":
+            return CapabilityResult(status="failed", artifacts=(*refs, ref),
+                diagnostics=("Environment setup changed a declared asset or execution/checker entry; no implementation or measurement is authorized.",))
     config.pop("environment")
-    config["command"] = list(request.run.command)
+    config["command"] = formal
     if isolated:
         config["command"][0] = str(python)
         baseline = config.get("baseline")
@@ -119,9 +153,17 @@ def prepare_project_environment(*, context: CapabilityContext, request: Any,
             argv = list(baseline["command"])
             if argv and argv[0] in aliases:
                 config["baseline"] = {**baseline, "command": [str(python), *argv[1:]]}
-    prepared = context.store.write_json("execution.json", {"schema_version": "prepared_execution.v1",
-        "execution": config, "source_project": str(project), "workspace": str(project),
+        if "code_task" in config:
+            from simple_ar.code_task.execution.environment import ensure_code_task_environment_policy
+            ensure_code_task_environment_policy(run_dir, manifest,
+                env_mode="external", python_executable=python)
+            config["code_task"] = {**task, "env_mode": "external", "python_executable": str(python)}
+    payload = {**(prepared_payload or {}), "schema_version": "prepared_execution.v1",
+        "execution": config, "source_project": (prepared_payload or {}).get("source_project", str(project)), "workspace": str(project),
         "environment": {"mode": profile["mode"], **({"python_executable": str(python)} if isolated else {}), "setup_ref": ref.to_dict(), "requirements": profile["requirements"],
                         "install_project": profile["install_project"]},
-        "limitations": limitations}, kind="prepared_execution", schema="prepared_execution.v1", producer="research.preparation")
+        "limitations": [*limitations, *[item for item in (prepared_payload or {}).get("limitations", [])
+                         if not item.startswith("No dependency installation")]]}
+    prepared = context.store.write_json("execution.json", payload,
+        kind="prepared_execution", schema="prepared_execution.v1", producer="research.preparation")
     return CapabilityResult(status="completed", artifacts=(*refs, ref, prepared))

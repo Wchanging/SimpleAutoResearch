@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import os
 import threading
 import time
 from typing import Any
@@ -29,25 +30,29 @@ _rate_lock = threading.Lock()
 class OpenAlexSearchClient:
     """Small OpenAlex metadata search client.
 
-    OpenAlex is used before arXiv because its public API has more generous rate
-    limits and indexes many arXiv works through a broader scholarly graph.
+    Optional credentials improve the provider's anonymous quota; they do not
+    imply unlimited requests or access to full text.
 
     Args:
         mailto: Optional polite-pool contact passed to OpenAlex.
-        timeout_sec: Retained for public API compatibility. The pyalex
-            transport manages request timing and retry behavior internally.
+        timeout_sec: Timeout for the existing requests transport.
+        api_key: Explicit key; None reads OPENALEX_API_KEY, empty means anonymous.
     """
 
-    def __init__(self, *, mailto: str = "simple-autoresearch@example.com", timeout_sec: int = _TIMEOUT_SEC) -> None:
+    def __init__(self, *, mailto: str = "simple-autoresearch@example.com", timeout_sec: int = _TIMEOUT_SEC,
+                 api_key: str | None = None) -> None:
         self.mailto = mailto
         self.timeout_sec = timeout_sec
+        self.api_key = os.environ.get("OPENALEX_API_KEY", "") if api_key is None else api_key
 
-    def search(self, query: str, *, max_results: int = 5) -> list[Paper]:
+    def search(self, query: str, *, max_results: int = 5,
+               year_range: tuple[int, int] | None = None) -> list[Paper]:
         """Search OpenAlex and return normalized paper metadata.
 
         Args:
             query: Free-text literature query.
             max_results: Maximum number of papers to return.
+            year_range: Optional inclusive publication-year endpoints.
 
         Returns:
             Parsed OpenAlex works in provider relevance order.
@@ -61,18 +66,24 @@ class OpenAlexSearchClient:
             raise OpenAlexSearchError("OpenAlex query is empty")
         if max_results < 1:
             raise OpenAlexSearchError("max_results must be at least 1")
+        params = {"search": query, "per-page": min(max_results, _MAX_RESULTS),
+                  "select": _SELECT_FIELDS, "mailto": self.mailto}
+        if year_range is not None:
+            if (not isinstance(year_range, tuple) or len(year_range) != 2 or
+                    any(type(year) is not int for year in year_range) or
+                    not 1 <= year_range[0] <= year_range[1] <= 9999):
+                raise OpenAlexSearchError("year_range requires ordered integer publication years.")
+            params["filter"] = f"publication_year:{year_range[0]}-{year_range[1]}"
 
         _respect_rate_limit()
+        headers = {"Accept": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         try:
             response = requests.get(
                 _OPENALEX_API_URL,
-                params={
-                    "search": query,
-                    "per-page": min(max_results, _MAX_RESULTS),
-                    "select": _SELECT_FIELDS,
-                    "mailto": self.mailto,
-                },
-                headers={"Accept": "application/json"},
+                params=params,
+                headers=headers,
                 timeout=self.timeout_sec,
             )
             response.raise_for_status()

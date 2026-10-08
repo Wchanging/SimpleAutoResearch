@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,8 @@ from typing import Any
 
 from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
 from simple_ar.code_task.analysis.locate import locate_code_task_context
+from simple_ar.code_task.analysis.index import SOURCE_SUFFIXES, read_code_task_text
+from simple_ar.retrieval.index import _looks_like_text
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     is_relative_to,
@@ -306,6 +309,14 @@ def load_latest_code_task_context_pack(run_dir: Path) -> LoadedCodeTaskContextPa
     snippets_path = _context_child(context_pack_path.parent, str(snippets_name))
     prompt_context_path = _context_child(context_pack_path.parent, str(prompt_name))
     snippets = tuple(row for row in read_jsonl(snippets_path) if isinstance(row, dict))
+    # Reject a legacy pack that decoded inventory binaries as source. The
+    # existing ensure owner builds a NEW pack; old receipts/snippets stay intact.
+    # Known source paths need no new source read just to consume cached text.
+    for row in snippets:
+        target = workspace_file(code_task_paths(root).workspace_dir, str(row.get("path", "")))
+        if "\0" in str(row.get("text", "")) or (target is not None and target.is_file()
+                and target.suffix.lower() not in SOURCE_SUFFIXES and not _looks_like_text(target)):
+            return None
     return LoadedCodeTaskContextPack(
         run_dir=root,
         context_pack_path=context_pack_path,
@@ -320,12 +331,12 @@ def load_latest_code_task_context_pack(run_dir: Path) -> LoadedCodeTaskContextPa
 def ensure_code_task_context_pack(
     run_dir: Path, *, query: str, max_files: int, max_source_chars_per_file: int,
 ) -> LoadedCodeTaskContextPack | None:
-    """Share fresh planning retrieval; never refresh an already saved pack.
+    """Share planning retrieval; rebuild only absent/non-text legacy packs.
 
     Ordinary and staged model planning need the same named definitions, local
     collaborators and exact offsets before decomposing edits. Offline planning
-    keeps its existing no-retrieval path. This writes only the original pack and
-    manifest references, with the caller's existing file/character allowance.
+    keeps its existing no-retrieval path. A rebuild uses the existing numbered
+    directories and manifest references, with the caller's file/character allowance.
     """
     loaded = load_latest_code_task_context_pack(run_dir)
     if loaded is None:
@@ -418,11 +429,10 @@ def _collect_snippets(
             omitted["missing_or_unreadable_files"] += 1
             _append_detail(omitted, path, "missing_or_outside_workspace")
             continue
-        try:
-            text = file_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        text = read_code_task_text(file_path)
+        if text is None:
             omitted["missing_or_unreadable_files"] += 1
-            _append_detail(omitted, path, "unreadable")
+            _append_detail(omitted, path, "non_text_or_unreadable")
             continue
         limit = min(max_chars_per_file, remaining)
         start = _named_definition_offset(text, path, str(locate_data.get("query", "")),
@@ -448,6 +458,11 @@ def _collect_snippets(
         )
         used_chars += len(snippet_text)
     return snippets, omitted
+
+
+def definition_start_line(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    """Decorators are part of a Python definition's executable contract."""
+    return min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)])
 
 
 def _named_definition_offset(text: str, path: str, query: str, symbols: list[dict[str, Any]]) -> int:
@@ -478,7 +493,18 @@ def _named_definition_offset(text: str, path: str, query: str, symbols: list[dic
             hit = re.search(rf"(?<!\w){re.escape(choice)}(?!\w)", query, flags=re.IGNORECASE)
             if hit:
                 candidates.append((hit.start(), -len(choice), line))
-    return sum(len(line) for line in lines[:min(candidates)[2] - 1]) if candidates else 0
+    if not candidates:
+        return 0
+    line = min(candidates)[2]
+    try:
+        node = next((node for node in ast.walk(ast.parse(text))
+                     if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                     and node.lineno == line), None)
+        if node is not None:
+            line = definition_start_line(node)
+    except SyntaxError:
+        pass  # Preserve the existing validated declaration anchor for incomplete source.
+    return sum(len(row) for row in lines[:line - 1])
 
 
 def clip_source_snippet(row: dict[str, Any], *, max_chars: int) -> dict[str, Any]:
@@ -513,9 +539,8 @@ def read_source_snippets(
         path = workspace_file(workspace_dir, rel_path)
         if path is None or not path.is_file() or path.name.startswith(".env"):
             continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        text = read_code_task_text(path)
+        if text is None:
             continue
         snippets.append(clip_source_snippet(
             {"path": rel_path, "text": text, "source_chars": len(text), "start_line": 1,

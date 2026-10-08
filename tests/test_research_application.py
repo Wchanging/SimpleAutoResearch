@@ -48,6 +48,17 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(len(restored.controller.list_attempts()), len(attempts) + 1)
             self.assertEqual(next(row for row in restored.controller.list_attempts()
                                   if row.attempt_id == failed.attempt_id).status, "blocked")
+            # A saved partial code result is evidence, not a completed task.
+            implementation = restored.controller.store.write_json("checks/implementation.json", {
+                "status": "incomplete", "stop_reason": "validation_failed"})
+            restored.controller.manifest.state_refs["implementation"] = implementation
+            step = SimpleNamespace(state_name="implementation", capability="implement")
+            attempt = SimpleNamespace(status="completed", trigger="application:implementation", capability="implement")
+            with patch.object(restored, "_attempt_for_ref", return_value=attempt):
+                self.assertFalse(restored._step_completed(step))
+                restored.controller.store.write_json(implementation.path, {
+                    "status": "validated", "stop_reason": "stop_point"})
+                self.assertTrue(restored._step_completed(step))
 
     def test_local_document_selection_uses_parser_formats_without_importing_raw_tables(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -242,6 +253,177 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIn(goal, projected.problem_markdown)
             self.assertIn("At most three citations.", memory.objective)
             self.assertIn("at most 3 distinct sources across all sections", memory.objective)
+            app.services = replace(app.services, llm_client=object())
+            with patch.object(app, '_execute', return_value=True) as execute:
+                self.assertTrue(app._run_plan_action())
+            planning = execute.call_args.args[2]
+            self.assertTrue(planning.use_llm)  # Open search needs scientific queries and constraints.
+            self.assertFalse(planning.task_plan_request.use_llm)  # Fixed dispatch needs no model call.
+            from simple_ar.research.contracts import QueryPlan, SourcePlan
+            from simple_ar.research.planning.capability import ResearchPlanResult
+            from simple_ar.research.sources.capability import SearchResult
+            for model, auto, rounds, cap, expected in (
+                (object(), True, 2, 3, 1), (None, True, 2, 3, 3),
+                (object(), False, 2, 3, 3), (object(), True, 1, 3, 3), (object(), True, 2, 1, 1),
+            ):
+                with self.subTest(auto=auto, rounds=rounds, cap=cap, model=model is not None):
+                    app.services = replace(app.services, llm_client=model)
+                    planned = ResearchPlanResult((), QueryPlan("Study", ["seed"], queries=["seed"],
+                        auto_expansion=auto, max_rounds=rounds), SourcePlan(["seed"], require_fulltext=True,
+                        allow_pdf_download=True, budget={"max_documents": cap, "max_fulltext_documents": 6}))
+                    with patch.object(app, "_load_plan", return_value=planned), patch.object(app, "_input_refs", return_value=()), \
+                            patch.object(app, "_execute", return_value=True) as execute, \
+                            patch.object(app, "_load_search", return_value=SearchResult("completed", (), selected_papers=(object(),))):
+                        self.assertTrue(app._run_search_action())
+                    policy = execute.call_args.kwargs["selection_policy"]
+                    self.assertEqual(policy.max_documents, expected)
+                    reserved = model is not None and auto and rounds > 1
+                    self.assertEqual(policy.next_query_limit, 0 if reserved else 3)
+                    self.assertEqual(policy.query_plan.max_rounds, 1 if reserved else rounds)
+                    # Source selection owns its bound; acquisition must not
+                    # silently reserve two more slots and starve known papers.
+                    app.controller.manifest.state_refs["search"] = app.controller.manifest.state_refs["brief"]
+                    with patch.object(app, "_load_plan", return_value=planned), patch.object(app, "_input_refs", return_value=()), \
+                            patch.object(app, "_execute", return_value=False) as execute, \
+                            patch.object(app, "_load_search", return_value=SearchResult("completed", (), selected_papers=(object(),))):
+                        self.assertFalse(app._run_document_ingest_action())
+                    self.assertEqual(execute.call_args.args[2].source_plan.budget, planned.source_plan.budget)
+
+    def test_evidence_followup_cycle_recovers_empty_ingest_and_keeps_base_refs(self):
+        from simple_ar.core.capabilities import CapabilityResult
+        from simple_ar.literature.models import Paper
+        from simple_ar.research.contracts import QueryPlan, SourcePlan, ResearchQuestion
+        from simple_ar.research.documents.ingest import build_document_bundle
+        from simple_ar.research.evidence.reader import ReadRequest
+        from simple_ar.research.planning.capability import ResearchPlanResult
+        from simple_ar.research.sources.base import SearchResponse
+        from simple_ar.research.sources.capability import SearchResult
+        from simple_ar.research.sources.registry import SearchProviderRegistry
+
+        for outcome in ("empty", "abstract", "exhausted", "web", "mixed"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
+                webpage = outcome in {"web", "mixed"}
+                old = Paper("old", "Seed study", [], "Original evidence." + (
+                    " Author materials: https://example.test/code" if webpage else ""), "", source="fixture")
+                fresh = Paper("new", "Additional study", [], "New abstract evidence.",
+                    "https://example.invalid/new.html", source="fixture", fulltext_url="https://example.invalid/new.html")
+                source = SourcePlan(["seed"], sources=["fixture"], require_fulltext=outcome == "exhausted" or webpage,
+                    allow_pdf_download=True, budget={"max_documents": 3, "max_follow_up_queries": 1,
+                                                   "max_fulltext_documents": 2 if webpage else 1,
+                                                   "max_fulltext_fetch_attempts": 2, "max_pdf_mb": 1})
+                planned = ResearchPlanResult((ResearchQuestion("q", "Study", "general", "Compare evidence"),),
+                    QueryPlan("Study", ["seed"], queries=["seed"], max_rounds=2), source)
+                bundle = build_document_bundle(papers=[old], source_plan=source, cache_dir=None, extraction_dir=Path(tmp))
+                if outcome == "exhausted":
+                    bundle.fulltext_manifest.update(cached_count=1, fetch_attempt_count=2)
+                def base_search(*, context, **_):
+                    value = SearchResult("completed", (SearchResponse("fixture", "seed", [old]),),
+                        papers=(old,), selected_papers=(old,), response_rounds=(1,))
+                    return CapabilityResult("completed", (context.store.write_json("search_result.json", value.to_handoff_dict(),
+                        kind="search_result", schema="search_handoff.v1", producer="test"),))
+                def base_ingest(*, context, **_):
+                    return CapabilityResult("completed", (context.store.write_json("document_bundle.json", bundle.to_handoff_dict(),
+                        kind="document_bundle", schema="document_bundle.v1", producer="test"),))
+                connector = SimpleNamespace(source_name="fixture", search=lambda request: SearchResponse("fixture", request.query,
+                    [] if outcome == "empty" else [old, fresh]))
+                services = ResearchApplicationServices(config={"research_task_kind": "survey", "interaction": "autonomous"},
+                    search_registry=SearchProviderRegistry({"fixture": lambda: connector}))
+                app = create_session(ResearchBrief(request_text="Study", requested_outputs=("report",)),
+                                     root=Path(tmp) / "session", services=services)
+                bundle.fulltext_manifest["cache_dir"] = str(app._cache_dir("literature"))
+                refs = app.controller.manifest.state_refs
+                refs["plan"] = app.controller.store.write_json("planning/plan.json", planned.to_handoff_dict(),
+                    kind="research_plan", schema="research_plan.v1", producer="test")
+                task = TaskPlanResult("survey", "Study", tuple(TaskPlanStep(a, a, c, s, "", "") for a, c, s in (
+                    ("search", "search", "search"), ("document_ingest", "document_ingest", "documents"),
+                    ("read", "read", "read"), ("synthesize", "synthesize", "synthesis"),
+                    ("report_write", "report_write", "writer"))), "deterministic")
+                refs["task_plan"] = app.controller.store.write_json("planning/task_plan.json", task.to_handoff_dict(),
+                    kind="task_plan", schema="research_task_plan.v1", producer="test")
+                app.controller.registry.register("search", base_search, replace=True)
+                app.controller.registry.register("document_ingest", base_ingest, replace=True)
+                app._execute("search", "search", None, ())
+                app._execute("document_ingest", "documents", None, ())
+                with patch("simple_ar.app.research_application.new_source_queries",
+                           return_value=() if outcome == "web" else ("seed", "new question")):
+                    app._execute("read", "read", ReadRequest(bundle=bundle, topic="Study"), ())
+                    base_refs = {name: refs[name] for name in ("search", "documents", "read")}
+                    self.assertEqual(app._next_action(), "search_evidence:1")
+                    app = load_session(app.controller.store.root, services=services)
+                    with patch.object(app, "_provider_registry", wraps=app._provider_registry) as providers:
+                        self.assertTrue(app._run_action("search_evidence:1"), app.view().status_reason)
+                        if outcome == "web":
+                            providers.assert_not_called()
+                    self.assertEqual([r.query for r in app._load_search().responses], ["seed"])
+                    self.assertEqual([r["query"] for r in app._state_payload("search_evidence_1")["responses"]],
+                                     [] if outcome == "web" else ["new question"])
+                    from io import BytesIO
+                    from simple_ar.research.documents.fulltext import _fetch_remote_hint
+                    def response_for(*args, **kwargs):
+                        response = BytesIO(b"<html><p>Author states CPU use; this is not measured runtime.</p></html>")
+                        response.headers = {"Content-Type": "text/html"}
+                        return response
+                    with patch("simple_ar.research.preparation_assets.public_document_response", side_effect=response_for), patch(
+                            "simple_ar.research.documents.fulltext.urllib.request.urlopen", side_effect=response_for), patch(
+                            "simple_ar.research.documents.fulltext._fetch_remote_hint",
+                            side_effect=_fetch_remote_hint if webpage else None) as fetch:
+                        with patch.object(app, "_record_attempt_outputs", side_effect=KeyboardInterrupt):
+                            with self.assertRaises(KeyboardInterrupt):
+                                app._run_action("ingest_evidence:1")
+                        if not webpage:
+                            fetch.assert_not_called()
+                    count = len(app.controller.list_attempts())
+                    app = load_session(app.controller.store.root, services=services)
+                    app._reconcile_running_attempt()
+                    self.assertEqual(len(app.controller.list_attempts()), count)
+
+                    self.assertEqual(app._next_action(), "read_evidence:1")
+                    self.assertEqual(app._input_refs("documents")[0], base_refs["documents"])
+                    self.assertTrue(app._run_action("read_evidence:1"))
+                    self.assertEqual(app._next_action(), "synthesize")
+                    self.assertEqual({n: app.controller.manifest.state_refs[n] for n in base_refs}, base_refs)
+                    self.assertNotEqual(app._input_refs("documents")[0], app.controller.manifest.state_refs["documents_evidence_1"])
+                    expected = 1 if outcome == "empty" else 3 if outcome == "mixed" else 2
+                    self.assertEqual(len(app._load_documents().records), expected)
+                    if webpage:
+                        linked = [r for r in app._load_documents().records if r.metadata.get("kind") == "supporting_material"]
+                        self.assertEqual(len(linked), 1)
+                        self.assertIn(linked[0].url, linked[0].metadata["parent_quote"])
+                        self.assertNotIn(linked[0].document_id, {c.paper_id for c in app._load_read().paper_cards})
+                        self.assertTrue(any(c.document_id == linked[0].document_id for c in app._load_documents().chunks))
+                        from simple_ar.research.evidence.reader import read_documents
+                        fresh_bundle = type(bundle).from_handoff_dict(app._state_payload("documents_evidence_1"))
+                        dropped = [{"paper_id": r.document_id, "decision": "drop"}
+                                   for r in fresh_bundle.records if r.metadata.get("kind") != "supporting_material"]
+                        with patch("simple_ar.research.evidence.reader.screen_papers_with_llm", return_value=dropped) as screen, patch(
+                                "simple_ar.research.evidence.reader.read_paper_notes_with_llm", return_value=[]) as notes:
+                            observed = read_documents(ReadRequest(bundle=fresh_bundle, topic="CPU cost",
+                                use_llm=True, llm_client=object()))
+                        if outcome == "web":
+                            screen.assert_not_called()
+                        else:
+                            self.assertTrue(all(r["metadata"].get("kind") != "supporting_material"
+                                for r in screen.call_args.kwargs["papers"]))
+                        self.assertIn(linked[0].document_id, notes.call_args.kwargs["evidence_snippets_by_document"])
+                        self.assertEqual(observed.paper_cards, ())
+                    self.assertEqual(len(app._load_search().selected_papers), expected - int(webpage))
+                    self.assertEqual(app._load_search().response_rounds, (1,) if outcome == "web" else (1, 2))
+                    with patch.object(app, "_report_writing_parts", return_value=(
+                        SimpleNamespace(source_handles=[]), None, None, None, None)), \
+                         patch.object(app, "_execute", return_value=True) as write:
+                        self.assertTrue(app._run_report_write_action())
+                        document_inputs = [ref for ref in write.call_args.args[3]
+                                           if ref.schema == "document_bundle.v1"]
+                        self.assertEqual(document_inputs, [app._input_refs("documents")[0]])
+                    raw = app._state_payload("documents_evidence_1")
+                    if outcome == "exhausted":
+                        self.assertEqual(raw["fulltext_manifest"]["budget"]["max_fulltext_documents"], 0)
+                        self.assertEqual(raw["fulltext_manifest"]["budget"]["max_fulltext_fetch_attempts"], 0)
+                        self.assertTrue(raw["fulltext_manifest"]["allow_pdf_download"])
+                    count = len(app.controller.list_attempts())
+                    app = load_session(app.controller.store.root, services=services)
+                    self.assertEqual(app._next_action(), "synthesize")
+                    self.assertEqual(len(app.controller.list_attempts()), count)
 
     def test_separate_feasibility_client_uses_session_and_attempt_budget(self):
         from simple_ar.research.design import ResearchDesignRequest
@@ -574,6 +756,8 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(len(resumed.view().attempts), 3)
 
     def test_explicit_interrupted_recovery_retries_current_step_without_losing_evidence(self):
+        from simple_ar.core.budget import BudgetConflictError
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paper = root / "paper.md"
@@ -585,10 +769,13 @@ class ResearchApplicationTests(unittest.TestCase):
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=session, services=ResearchApplicationServices(
                 config={"research_materials_only": True},
+                budget_limits={"llm_requests": 1, "total_tokens": 100},
             ))
             inputs = dict(app.view().state_refs)
 
-            def interrupt(**_):
+            def interrupt(*, context, **_):
+                app.budget_ledger.reserve("interrupted-plan-call", {"llm_requests": 1, "total_tokens": 60},
+                    attempt_id=context.attempt.attempt_id, purpose="Interrupted LLM planning request")
                 raise KeyboardInterrupt()
 
             app.controller.registry.register("plan", interrupt, replace=True)
@@ -601,12 +788,29 @@ class ResearchApplicationTests(unittest.TestCase):
                 app.advance()
             with self.assertRaisesRegex(ResearchApplicationError, "running/empty"):
                 app.continue_session()
+            self.assertEqual(app.budget_ledger.entries[0].status, "reserved")
+            with self.assertRaisesRegex(BudgetConflictError, "calls remain in flight"):
+                app.budget_ledger.authorize_remaining({"llm_requests": 2, "total_tokens": 120},
+                    authorization_id="after-confirmed-stop", reason="Allow future calls only after stopping the old worker.")
 
             recovered = app.recover_interrupted_attempt(reason="Confirmed stopped test worker.")
             self.assertEqual(recovered.status, "running")
             self.assertEqual(recovered.next_action, "plan")
             self.assertEqual(recovered.budget["attempts"], 1)
             self.assertEqual(recovered.attempts[0]["status"], "failed")
+            old_usage = app.budget_ledger.entries[0]
+            self.assertEqual(old_usage.status, "unknown")
+            self.assertEqual(old_usage.actual, {})
+            self.assertEqual(old_usage.reserved, {"llm_requests": 1, "total_tokens": 60})
+            self.assertEqual(old_usage.attempt_id, recovered.attempts[0]["attempt_id"])
+            self.assertEqual(app.budget_ledger.remaining("total_tokens"), 40)
+            unknown_record = old_usage.to_dict()
+            app.budget_ledger.authorize_remaining({"llm_requests": 2, "total_tokens": 120},
+                authorization_id="after-confirmed-stop", reason="Explicit allowance for future calls; old usage stays unknown.")
+            self.assertEqual(app.budget_ledger.remaining("llm_requests"), 2)
+            self.assertEqual(app.budget_ledger.remaining("total_tokens"), 120)
+            self.assertEqual(app.budget_ledger.entries[0].to_dict(), unknown_record)
+            self.assertEqual(BudgetLedger.load(session / "budget_ledger.json").entries[0].to_dict(), unknown_record)
             for name, ref in inputs.items():
                 self.assertEqual(recovered.state_refs[name], ref)
             with self.assertRaisesRegex(ResearchApplicationError, "exactly one current running"):
@@ -614,6 +818,7 @@ class ResearchApplicationTests(unittest.TestCase):
             resumed = app.advance(max_actions=1)
             self.assertEqual(resumed.attempts[1]["capability"], "plan")
             self.assertIn("task_plan", resumed.state_refs)
+            self.assertEqual(app.budget_ledger.entries[0].to_dict(), unknown_record)
 
     def test_uncertain_goal_uses_analysis_report_and_writer_recovery_keeps_measurement(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2396,6 +2601,8 @@ class ResearchApplicationTests(unittest.TestCase):
             self.advance_to(app, "report_write")
             view = app.view()
             self.assertEqual(view.next_action, "report_write")
+            self.assertNotIn("synthesis", view.state_refs)
+            self.assertIn("read", view.state_refs)
             app.services = replace(app.services, llm_client=LLMClient(LLMSettings(api_key="fixture")))
 
             def writer(**kwargs):

@@ -19,6 +19,20 @@ def build_parser(
 
     from simple_ar.cli.start import add_start_parser
     add_start_parser(subparsers)
+    results = subparsers.add_parser("results", help="List current reusable session deliveries without executing a task.")
+    results.add_argument("session", type=Path)
+    image = subparsers.add_parser("image", help="Generate or edit one concept image with a named Images profile; preserve each version separately.")
+    image.add_argument("--prompt", required=True)
+    image.add_argument("--input", type=Path, help="Existing image to edit; the original is never overwritten.")
+    image.add_argument("--output", type=Path, required=True, help="New version directory, or identical saved request to recover without another call.")
+    image.add_argument("--config", type=Path, help="Named model catalog TOML.")
+    image.add_argument("--model", help="Named selector, e.g. profile:illustration; default image route.")
+    image_review = subparsers.add_parser("image-review", help="Inspect rendered figures with a named vision model; save actionable feedback without editing originals.")
+    image_review.add_argument("--input", type=Path, action="append", required=True, help="Rendered PNG/JPEG/WebP; repeat for up to four images.")
+    image_review.add_argument("--goal", required=True, help="What the figure must communicate, including visual constraints.")
+    image_review.add_argument("--output", type=Path, required=True, help="New review version directory; identical completed inputs recover without another call.")
+    image_review.add_argument("--config", type=Path, help="Named model catalog TOML.")
+    image_review.add_argument("--model", help="Named vision selector; default vision route.")
 
     preparation_parser = subparsers.add_parser("project-info", help="Read project instructions, dependency declarations, entry candidates and named data locations without execution.")
     preparation_parser.add_argument("--project", type=Path, required=True)
@@ -918,8 +932,8 @@ def _add_report_document_args(parser: argparse.ArgumentParser, *, prefix: str = 
             "help": "Enable bounded whole-document review and targeted revision."}),
         ("review-scope", {"choices": ("section", "document"),
             "help": f"Review each section or the complete body; document requires --{prefix}document-review."}),
-        ("draft-scope", {"choices": ("section", "document"),
-            "help": f"Draft separately or jointly; document requires --{prefix}review-scope document and --{prefix}document-review."}),
+        ("draft-scope", {"choices": ("section", "document", "auto"),
+            "help": f"Draft by section, jointly, or auto (joint up to 2000 planned words; otherwise section checkpoints). document/auto require --{prefix}review-scope document and --{prefix}document-review."}),
         ("--max-document-review-prompt-chars", {"type": int,
             "help": "Optional complete review request character limit; 0 uses client/session capacity without truncating evidence."}),
         ("outline-strategy", {"choices": ("auto", "template", "adaptive"),

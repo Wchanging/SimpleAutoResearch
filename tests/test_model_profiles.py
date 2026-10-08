@@ -6,10 +6,10 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from simple_ar.integrations.llm import LLMClient, LLMError
-from simple_ar.integrations.model_profiles import load_model_catalog, ModelConfigError
+from simple_ar.integrations.model_profiles import load_model_catalog, ModelConfigError, model_connections_compatible
 
 
 CATALOG = '''version = 1
@@ -42,6 +42,233 @@ capabilities = ["image_generate", "image_edit"]
 
 
 class ModelProfileTests(unittest.TestCase):
+    def test_run_image_async_pending_reservation_resume_and_completed_restore(self):
+        from PIL import Image
+        from simple_ar.core.budget import BudgetLedger
+        from simple_ar.core.capabilities import ArtifactStore
+        from simple_ar.integrations.image_tasks import ImageTaskError
+        from simple_ar.integrations.images import run_image
+        sync_catalog = load_model_catalog(self.path)
+        with self.assertRaises(ModelConfigError):
+            sync_catalog.select("profile:artist", purpose="text")
+        with self.assertRaises(ModelConfigError):
+            sync_catalog.profiles["artist"].text_settings()
+        self.path.write_text(CATALOG.replace('api = "openai_images"',
+                                            'api = "cctq_images_async"\nproxy_env = "IMAGE_PROXY"'), encoding="utf-8")
+        os.environ["IMAGE_PROXY"] = "http://127.0.0.1:7890"
+        catalog = load_model_catalog(self.path)
+        with self.assertRaises(ModelConfigError):
+            catalog.select("profile:artist", purpose="text")
+        os.environ["IMAGE_KEY"] = "image-secret"
+        payload = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(payload, format="PNG")
+        store = ArtifactStore(self.root / "async-integration")
+        ledger_path = self.root / "async-integration.budget.json"
+        kwargs = dict(store=store, reservation_id="image", reserves={"image_requests": 1},
+                      ledger=BudgetLedger({"image_requests": 1}, storage_path=ledger_path))
+
+        def helper(**request):
+            self.assertEqual(request["proxy"], os.environ["IMAGE_PROXY"])
+            self.assertNotIn("proxy", json.dumps(store.read_json("request.json")))
+            self.assertNotIn(os.environ["IMAGE_PROXY"], store.read_text("request.json"))
+            self.assertEqual(request["store"].read_json("request.json")["api"], "cctq_images_async")
+            if not store.exists("image_task.json"):
+                store.write_json("image_task.json", {"id": "pending_1", "status": "in_progress"})
+                raise ImageTaskError("Polling interrupted; saved task retained")
+            self.assertEqual(store.read_json("image_task.json")["id"], "pending_1")
+            store.write_json("image_task.json", {"id": "pending_1", "status": "completed"})
+            return payload.getvalue(), {"total_tokens": 5}, "pending_1"
+
+        with patch("simple_ar.integrations.image_tasks.request_task_image", side_effect=helper) as send, \
+                patch("simple_ar.integrations.images.OpenAI") as sdk:
+            failed = run_image(catalog, "Draw an overview", **kwargs)
+            self.assertEqual(failed.status, "failed", failed.diagnostics)
+            self.assertFalse(any(ref.kind == "image" for ref in failed.artifacts))
+            kwargs["ledger"] = BudgetLedger.load(ledger_path)
+            self.assertEqual(kwargs["ledger"].entries[0].status, "reserved")
+            saved_request = store.read_json("request.json")
+            artist = catalog.profiles["artist"].model_copy(update={"http2": True, "request_timeout_sec": 900.0})
+            catalog = catalog.model_copy(update={"profiles": {**catalog.profiles, "artist": artist}})
+            completed = run_image(catalog, "Draw an overview", **kwargs)
+            self.assertEqual(completed.status, "completed", completed.diagnostics)
+            self.assertEqual(store.read_json("request.json"), saved_request)
+            image_ref = next(ref for ref in completed.artifacts if ref.kind == "image")
+            with Image.open(store.require(image_ref)) as image:
+                self.assertEqual(image.size, (8, 8))
+                image.verify()
+            kwargs["ledger"] = BudgetLedger.load(ledger_path)
+            self.assertEqual(len(kwargs["ledger"].entries), 1)
+            entry = kwargs["ledger"].entries[0]
+            self.assertEqual((entry.status, entry.actual["image_requests"], entry.provider_call_id),
+                             ("settled", 1, "pending_1"))
+            self.assertEqual(run_image(catalog, "Draw an overview", **kwargs), completed)
+            self.assertEqual(send.call_count, 2)
+            sdk.assert_not_called()
+
+    def test_async_images_poll_and_download_recovery_never_resubmit(self):
+        import httpx
+        from simple_ar.core.capabilities import ArtifactStore
+        from simple_ar.integrations import image_tasks
+        store = ArtifactStore(self.root / "async-generation")
+        clock, calls, stage = [0.0], [], ["timeout"]
+        real_client = httpx.Client
+        png = b"caller-validates-image-bytes"
+        os.environ["IMAGE_PROXY"] = "http://127.0.0.1:7890"
+        profile = load_model_catalog().profiles["artist"].model_copy(update={"proxy_env": "IMAGE_PROXY"})
+
+        def send(request):
+            calls.append((request.method, request.url.path))
+            self.assertEqual(request.headers["Authorization"], "Bearer image-secret")
+            self.assertEqual(request.url.host, "images.example")
+            saved = store.read_json("image_task.json")
+            if request.method == "POST":
+                self.assertEqual(saved["phase"], "started")
+                self.assertNotIn("id", saved)
+                self.assertEqual(json.loads(request.content), {
+                    "model": "artist", "prompt": "overview", "async": True, "quality": "low"})
+                return httpx.Response(202, json={"object": "image.task", "id": "task_1-A",
+                    "status": "queued", "poll_url": "https://elsewhere.example/secret"})
+            self.assertEqual(saved["id"], "task_1-A")
+            self.assertLessEqual(request.extensions["timeout"]["read"], 12)
+            if request.url.path.endswith("/files/0"):
+                if stage[0] == "redirect":
+                    return httpx.Response(302, headers={"Location": "https://elsewhere.example/secret"})
+                return httpx.Response(200, content=png)
+            return httpx.Response(200, json={"object": "image.task", "id": "task_1-A",
+                "status": "in_progress" if stage[0] == "timeout" else "completed",
+                "result": {"data": [{"url": "https://elsewhere.example/secret"}], "usage": {
+                    "total_tokens": 7, "input_tokens_details": {"image_tokens": 2},
+                    "text": "image-secret", "image-secret": 99, "flag": True}},
+                "error": {"message": "image-secret provider body"}})
+
+        def factory(**kwargs):
+            self.assertFalse(kwargs["follow_redirects"])
+            self.assertNotIn("trust_env", kwargs)  # Standard SDK-compatible environment routing.
+            self.assertEqual(kwargs.pop("proxy"), profile.resolve_proxy())
+            return real_client(transport=httpx.MockTransport(send), **kwargs)
+
+        kwargs = dict(base_url="https://images.example/v1", key="image-secret", model="artist",
+                      prompt="overview", source=None, options={"quality": "low"},
+                      timeout=12, http2=False, store=store, proxy=profile.resolve_proxy())
+        with patch.object(image_tasks.httpx, "Client", side_effect=factory), \
+                patch.object(image_tasks.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(image_tasks.time, "sleep", side_effect=lambda n: clock.__setitem__(0, clock[0] + n)):
+            with self.assertRaisesRegex(image_tasks.ImageTaskError, "deadline"):
+                image_tasks.request_task_image(**kwargs)
+            self.assertEqual(clock[0], 12)
+            stage[0] = "redirect"
+            with self.assertRaisesRegex(image_tasks.ImageTaskError, "download failed"):
+                image_tasks.request_task_image(**kwargs)
+            self.assertEqual(store.read_json("image_task.json")["status"], "completed")
+            stage[0] = "complete"
+            recovery_start = len(calls)
+            self.assertEqual(image_tasks.request_task_image(**kwargs),
+                (png, {"total_tokens": 7, "input_tokens_details": {"image_tokens": 2}}, "task_1-A"))
+            self.assertEqual(calls[recovery_start:], [("GET", "/v1/images/tasks/task_1-A/files/0")])
+        self.assertEqual(sum(method == "POST" for method, _ in calls), 1)
+        self.assertTrue(all(path.startswith("/v1/images/") for _, path in calls))
+        saved = store.read_text("image_task.json")
+        self.assertNotIn("image-secret", saved)
+        self.assertNotIn("elsewhere", saved)
+        self.assertNotIn(os.environ["IMAGE_PROXY"], saved)
+
+    def test_async_images_interrupted_submission_and_multipart_edit(self):
+        import httpx
+        from simple_ar.core.capabilities import ArtifactStore
+        from simple_ar.integrations import image_tasks
+        real_client, calls = httpx.Client, []
+        store = ArtifactStore(self.root / "async-interrupted")
+        kwargs = dict(base_url="https://images.example/v1", key="image-secret", model="artist",
+                      prompt="overview", source=None, options={}, timeout=10, http2=False, store=store)
+
+        def interrupted(request):
+            calls.append(request.method)
+            self.assertEqual(store.read_json("image_task.json")["phase"], "started")
+            raise httpx.ReadTimeout("image-secret provider body", request=request)
+
+        with patch.object(image_tasks.httpx, "Client", side_effect=lambda **kw:
+                          real_client(transport=httpx.MockTransport(interrupted), **kw)):
+            with self.assertRaises(image_tasks.ImageTaskError) as caught:
+                image_tasks.request_task_image(**kwargs)
+            self.assertNotIn("image-secret", str(caught.exception))
+            with self.assertRaises(image_tasks.ImageTaskInterrupted):
+                image_tasks.request_task_image(**kwargs)
+        self.assertEqual(calls, ["POST"])
+        source = self.root / "input.png"
+        from PIL import Image
+        Image.new("RGB", (2, 2), "white").save(source)
+        edit_store = ArtifactStore(self.root / "async-edit")
+        kwargs.update(source=source, store=edit_store)
+
+        def edit(request):
+            if request.method == "POST":
+                self.assertEqual(request.url.path, "/v1/images/edits")
+                self.assertEqual(edit_store.read_json("image_task.json")["phase"], "started")
+                self.assertIn('multipart/form-data', request.headers["content-type"])
+                self.assertIn(b'name="async"\r\n\r\ntrue', request.content)
+                self.assertIn(b'name="image"; filename="input.png"', request.content)
+                self.assertIn(source.read_bytes(), request.content)
+                return httpx.Response(202, json={"object": "image.task", "id": "edit_1", "status": "queued"})
+            self.assertEqual(edit_store.read_json("image_task.json")["id"], "edit_1")
+            if request.url.path.endswith("/files/0"):
+                return httpx.Response(200, content=source.read_bytes())
+            return httpx.Response(200, json={"object": "image.task", "id": "edit_1",
+                                            "status": "completed", "result": {"usage": {}}})
+
+        with patch.object(image_tasks.httpx, "Client", side_effect=lambda **kw:
+                          real_client(transport=httpx.MockTransport(edit), **kw)):
+            self.assertEqual(image_tasks.request_task_image(**kwargs), (source.read_bytes(), {}, "edit_1"))
+            kwargs["prompt"] = "different request"
+            with self.assertRaisesRegex(image_tasks.ImageTaskError, "differs"):
+                image_tasks.request_task_image(**kwargs)
+            old = ArtifactStore(self.root / "old-sync")
+            old.write_json("request.json", {"old": "synchronous"})
+            kwargs["store"] = old
+            with self.assertRaisesRegex(image_tasks.ImageTaskError, "synchronous"):
+                image_tasks.request_task_image(**kwargs)
+
+    def test_images_generate_edit_and_saved_recovery_use_one_request_each(self):
+        import base64
+        from types import SimpleNamespace
+        from PIL import Image
+        from simple_ar.core.budget import BudgetLedger
+        from simple_ar.core.capabilities import ArtifactStore
+        from simple_ar.integrations.images import run_image
+        os.environ["IMAGE_KEY"] = "image-secret"
+        os.environ["IMAGE_PROXY"] = "http://127.0.0.1:7890"
+        self.path.write_text(CATALOG.replace('api = "openai_images"',
+                            'api = "openai_images"\nproxy_env = "IMAGE_PROXY"'), encoding="utf-8")
+        payload = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(payload, format="PNG")
+        response = SimpleNamespace(data=[SimpleNamespace(b64_json=base64.b64encode(payload.getvalue()).decode())],
+            usage=None, _request_id="request-test")
+        catalog = load_model_catalog(self.path)
+        with patch("simple_ar.integrations.images.OpenAI") as factory, \
+                patch("simple_ar.integrations.images.DefaultHttpxClient") as transport:
+            client = factory.return_value.__enter__.return_value
+            client.images.generate.return_value = response
+            client.images.edit.return_value = response
+            original = None
+            for version in ("original", "edited"):
+                store = ArtifactStore(self.root / version)
+                ledger = BudgetLedger({"image_requests": 1}, storage_path=self.root / (version + ".json"))
+                kwargs = dict(store=store, ledger=ledger, reservation_id=version,
+                    reserves={"image_requests": 1})
+                if original:
+                    kwargs.update(input_ref=original[1], input_store=original[0])
+                result = run_image(catalog, "Draw a method overview", **kwargs)
+                self.assertEqual(result.status, "completed", result.diagnostics)
+                self.assertEqual(run_image(catalog, "Draw a method overview", **kwargs), result)
+                self.assertEqual(ledger.entries[0].actual["image_requests"], 1)
+                self.assertIsNone(result.usage["cost"])
+                self.assertEqual(transport.call_args.kwargs["proxy"], os.environ["IMAGE_PROXY"])
+                self.assertNotIn("proxy", json.dumps(store.read_json("request.json")))
+                self.assertNotIn(os.environ["IMAGE_PROXY"], store.read_text("request.json"))
+                original = (store, result.artifacts[0])
+            self.assertEqual(client.images.generate.call_count, 1)
+            self.assertEqual(client.images.edit.call_count, 1)
+            self.assertEqual(factory.call_args.kwargs["max_retries"], 0)
+
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
@@ -98,12 +325,25 @@ class ModelProfileTests(unittest.TestCase):
         self.assertNotIn("http2", binding["code_route"]["connection"])
         self.assertNotIn("writer-secret", json.dumps(binding))
         self.assertNotIn("writer-secret", repr(client._settings))
+        self.path.write_text(CATALOG.replace('api_key_env = "WRITER_KEY"',
+                            'api_key_env = "WRITER_KEY"\nproxy_env = "WRITER_PROXY"').replace(
+                            'api_key_env = "CODER_KEY"', 'api_key_env = "CODER_KEY"\nproxy_env = "CODER_PROXY"'),
+                            encoding="utf-8")
+        self.assertEqual(LLMClient.from_env().connection_binding(), binding)
+        self.assertNotIn("proxy_env", binding["settings"])
+        self.assertNotIn("proxy_env", binding["code_route"]["connection"])
         os.environ["WRITER_KEY"] = "rotated"
         self.assertEqual(LLMClient.from_env().connection_binding(), binding)
         self.path.write_text(CATALOG.replace("image-model", "new-image-model"), encoding="utf-8")
         self.assertEqual(LLMClient.from_env().connection_binding(), binding)
+        self.path.write_text(CATALOG.replace('retry_attempts = 1',
+            'retry_attempts = 3\nrequest_timeout_sec = 1200.0\nmax_output_tokens = 16384'), encoding="utf-8")
+        tuned = LLMClient.from_env().connection_binding()
+        self.assertNotEqual(tuned, binding)
+        self.assertTrue(model_connections_compatible(binding, tuned))
         self.path.write_text(CATALOG.replace("coder-model", "next-model"), encoding="utf-8")
         self.assertNotEqual(LLMClient.from_env().connection_binding(), binding)
+        self.assertFalse(model_connections_compatible(binding, LLMClient.from_env().connection_binding()))
 
     def test_catalog_inspection_needs_no_credentials_and_images_are_not_text(self):
         catalog = load_model_catalog()
@@ -122,6 +362,7 @@ class ModelProfileTests(unittest.TestCase):
             ('api_key_env = "WRITER_KEY"', 'api_key = "accidental-secret"'),
             ('https://writer.example/v1', 'https://accidental-secret@writer.example/v1'),
             ('retry_attempts = 1', 'retry_attempts = 0'),
+            ('api_key_env = "WRITER_KEY"', 'api_key_env = "WRITER_KEY"\nproxy_env = "http://accidental-secret@proxy"'),
             ('api = "openai_chat"', 'api = "openai_responses"'),
         ]:
             with self.subTest(replacement=replacement):
@@ -129,6 +370,39 @@ class ModelProfileTests(unittest.TestCase):
                 with self.assertRaises(ModelConfigError) as caught:
                     load_model_catalog()
                 self.assertNotIn("accidental-secret", str(caught.exception))
+
+    def test_proxy_reference_validation_and_invalid_image_preflight_never_reserve(self):
+        from simple_ar.core.budget import BudgetLedger
+        from simple_ar.core.capabilities import ArtifactStore
+        from simple_ar.integrations.images import ImagesError, run_image
+        self.assertIsNone(load_model_catalog().profiles["artist"].resolve_proxy())
+        self.path.write_text(CATALOG.replace('api = "openai_images"',
+                            'api = "openai_images"\nproxy_env = "IMAGE_PROXY"'), encoding="utf-8")
+        catalog = load_model_catalog()
+        profile = catalog.profiles["artist"]
+        os.environ["IMAGE_KEY"] = "image-secret"
+        for value in (None, "", "socks5://127.0.0.1:7890", "http://user:accidental-secret@proxy",
+                      "http://@proxy", "http://proxy/?accidental-secret", "http://proxy/#accidental-secret",
+                      "http://proxy:bad", "http://proxy:99999", "http://proxy\n"):
+            with self.subTest(value=value):
+                if value is None:
+                    os.environ.pop("IMAGE_PROXY", None)
+                else:
+                    os.environ["IMAGE_PROXY"] = value
+                with self.assertRaises(ModelConfigError) as caught:
+                    profile.resolve_proxy()
+                self.assertNotIn("accidental-secret", str(caught.exception))
+                ledger = BudgetLedger({"image_requests": 1}, storage_path=self.root / "bad-proxy-budget.json")
+                with patch("simple_ar.integrations.images.OpenAI") as send:
+                    with self.assertRaises(ImagesError):
+                        run_image(catalog, "Draw a source map", store=ArtifactStore(self.root / "bad-proxy"),
+                                  ledger=ledger, reservation_id="bad", reserves={"image_requests": 1})
+                self.assertEqual(ledger.entries, ())
+                send.assert_not_called()
+                self.assertFalse((self.root / "bad-proxy" / "request.json").exists())
+        for value in ("http://127.0.0.1:7890", "https://proxy.example:8443"):
+            os.environ["IMAGE_PROXY"] = value
+            self.assertEqual(profile.resolve_proxy(), value)
 
     def test_no_catalog_keeps_legacy_env(self):
         del os.environ["SIMPLE_AR_MODELS_CONFIG"]
@@ -163,15 +437,13 @@ class ModelProfileTests(unittest.TestCase):
         self.path.write_text(CATALOG.replace('stream = true', 'stream = true\nhttp2 = true'), encoding="utf-8")
         client = LLMClient.from_env()
         self.assertNotEqual(client.connection_binding(), original_binding)
-        with patch("openai.DefaultHttpxClient") as transport, patch("openai.OpenAI") as factory:
-            factory.return_value.chat.completions.create.return_value = {
-                "choices": [{"message": {"content": "ok"}}]}
+        with patch("simple_ar.integrations.llm._call_openai_chat_stream", new_callable=AsyncMock) as transport:
+            transport.return_value = {"choices": [{"message": {"content": "ok"}}]}
             self.assertEqual(client.ask("system", "user"), "ok")
-            transport.assert_called_once_with(http2=True)
-            self.assertIs(factory.call_args.kwargs["http_client"], transport.return_value)
-            self.assertNotIn("http2", factory.return_value.chat.completions.create.call_args.kwargs)
-            factory.return_value.close.assert_called_once()
-        with patch("openai.DefaultHttpxClient", side_effect=ImportError), patch("openai.OpenAI") as factory:
+            self.assertTrue(transport.call_args.kwargs["http2"])
+            self.assertNotIn("http2", transport.call_args.args[0])
+            transport.assert_awaited_once()
+        with patch("openai.DefaultAsyncHttpxClient", side_effect=ImportError), patch("openai.AsyncOpenAI") as factory:
             with self.assertRaisesRegex(LLMError, "optional dependency"):
                 client.ask("system", "user")
             factory.assert_not_called()

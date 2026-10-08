@@ -1,6 +1,6 @@
 """Prepare an existing project with the established CodeTask workspace builder."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 import os
@@ -387,7 +387,7 @@ def inspect_execution_entry(execution: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def run_preparation_capability(*, context: CapabilityContext, request: PreparationRequest, backend=None) -> CapabilityResult:
-    if "environment" in request.execution:
+    if "environment" in request.execution and "code_task" not in request.execution:
         from simple_ar.research.project_environment import prepare_project_environment
         return prepare_project_environment(context=context, request=request, backend=backend)
     if "dataset" in request.execution:
@@ -398,12 +398,17 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
         "code_root", "approval_note", "max_repairs", "allowed_patterns",
         "budget_profile", "allow_large_edits", "workspace_mode", "protected_patterns",
         "env_mode", "python_executable",
+        "validation_command", "validation_timeout_sec", "initial_files",
     }:
         raise ValueError(
             "Preparing code_task accepts code_root, approval_note, max_repairs, "
-            "allowed_patterns, protected_patterns, budget_profile, allow_large_edits, workspace_mode, env_mode and python_executable."
+            "allowed_patterns, protected_patterns, budget_profile, allow_large_edits, workspace_mode, env_mode, python_executable, validation_command, validation_timeout_sec and initial_files."
         )
     allowed = task.pop("allowed_patterns", None)
+    initial_files = task.pop("initial_files", ())
+    if initial_files or "environment" in config:
+        from simple_ar.app.research_execution import code_task_validation
+        code_task_validation(config, required=True)
     protected = task.pop("protected_patterns", ())
     workspace_mode = task.pop("workspace_mode", "auto")
     env_mode = task.get("env_mode", "current")
@@ -434,7 +439,10 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
             data_inputs.append(path.relative_to(lineage_root).as_posix())
     data_inputs = tuple(dict.fromkeys(data_inputs))
     task_ref = context.store.write_text("inputs/task.md", request.task_text, kind="task_input", schema="markdown.v1")
-    command = subprocess.list2cmdline(request.run.command) if os.name == "nt" else shlex.join(request.run.command)
+    # Keep the checker portable until the approved environment has been built.
+    # request.run already resolves current Python, and is NOT the formal command.
+    argv = task["validation_command"] if "environment" in config else request.run.command
+    command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
     initialized = initialize_code_task(
         run_dir=context.store.root / (request.run_dir or Path("project_run")), code_root=root,
         task_file=context.store.resolve(task_ref), benchmark_command=command,
@@ -443,6 +451,7 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
         edit_scope_allowed_patterns=tuple(allowed or ()),
         edit_scope_protected_patterns=tuple(protected),
         data_inputs=data_inputs,
+        initial_files=initial_files,
     )
     config["cwd"] = str(initialized.workspace_dir)
     if "baseline" in config:
@@ -453,7 +462,7 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     task.pop("code_root")
     task["run_dir"] = str(initialized.run_dir)
     config["code_task"] = task
-    ref = context.store.write_json("execution.json", {
+    payload = {
         "schema_version": "prepared_execution.v1", "execution": config,
         "source_project": str(lineage_root.resolve()), "workspace": str(initialized.workspace_dir),
         "copy_report": initialized.copy_report.to_json(),
@@ -461,7 +470,15 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
         "limitations": ["No dependency installation or dataset download; external datasets remain external assets.",
                          "Declared project data is copied independently and protected from automated edits, not OS-sandboxed. Undeclared large files and excluded paths may remain absent; inspect the copy report.",
                          *initialized.workspace.warnings],
-    }, kind="prepared_execution", schema="prepared_execution.v1", producer="research.preparation")
+    }
+    if "environment" in config:
+        from simple_ar.research.project_environment import prepare_project_environment
+        result = prepare_project_environment(context=context,
+            request=replace(request, execution=config, run=replace(request.run, cwd=initialized.workspace_dir)),
+            backend=backend, prepared_payload=payload)
+        return replace(result, artifacts=(task_ref, *result.artifacts))
+    ref = context.store.write_json("execution.json", payload,
+        kind="prepared_execution", schema="prepared_execution.v1", producer="research.preparation")
     return CapabilityResult(status="completed", artifacts=(task_ref, ref))
 
 

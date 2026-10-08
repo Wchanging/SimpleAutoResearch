@@ -18,9 +18,265 @@ from simple_ar.code_task.runtime.config import load_code_task_init_options, load
 
 
 class StartTests(unittest.TestCase):
+    def test_document_urls_preserve_literal_input_and_require_confirmed_chat_acquisition(self):
+        url = 'https://example.test/paper'
+        args = build_parser().parse_args(['start', '--kind', 'reproduction', '--goal', 'Inspect paper',
+            '--document', url, '--document', 'local-paper.md', '--prepare-only'])
+        self.assertEqual(args.document, [url, Path('local-paper.md')])
+        with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'), \
+             patch('simple_ar.research.documents.fulltext.urllib.request.urlopen') as fetch:
+            with self.assertRaisesRegex(ValueError, 'Paper URLs require reproduction --chat'):
+                prepare_start(args)
+        fetch.assert_not_called()
+
+    def test_registered_code_revision_preserves_scope_checker_policy_and_original(self):
+        from simple_ar.core.capabilities import CapabilityRegistry
+        from simple_ar.core.session import SessionController
+        from simple_ar.code_task.orchestration.workflow import initialize_code_task
+        from simple_ar.cli.start import reuse_session_materials, session_materials
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'source'
+            source.mkdir()
+            (source / 'main.py').write_text('VALUE = 1\n')
+            task = root / 'task.md'
+            task.write_text('Fixture project, no execution during preparation.')
+            session = SessionController.create(root / 'old', session_id='old', topic='Fixture', registry=CapabilityRegistry())
+            initialized = initialize_code_task(run_dir=session.store.root / 'project_run', code_root=source,
+                task_file=task, benchmark_command='python main.py',
+                edit_scope_allowed_patterns=('main.py',), edit_scope_protected_patterns=('gold/**',))
+            session.manifest.state_refs['implementation'] = session.store.write_json('implementation.json',
+                {'status': 'validated', 'workspace_dir': str(initialized.workspace_dir), 'code_task_run_dir': str(initialized.run_dir)})
+            session.manifest.state_refs['preparation'] = session.store.write_json('prepared.json',
+                {'execution': {'cwd': str(initialized.workspace_dir), 'code_task': {'budget_profile': 'large', 'allow_large_edits': True}}},
+                kind='prepared_execution')
+            session.save()
+            before = session.store.resolve('session_manifest.json').read_bytes()
+            self.assertEqual(session_materials(session.store.root)['code_project'], [initialized.workspace_dir.resolve()])
+            args = build_parser().parse_args(['start', '--from-session', str(session.store.root), '--reuse', 'code_project',
+                '--goal', 'Change VALUE to two', '--output-root', str(root / 'new'), '--prepare-only'])
+            reuse_session_materials(args)
+            self.assertEqual(args.allow, ['main.py'])
+            self.assertEqual(args.validate, 'python main.py')
+            with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'):
+                config = prepare_start(args)
+            settings = tomllib.loads((config.parent / 'code_task.toml').read_text())
+            self.assertIn('gold/**', settings['edit_scope']['protected_patterns'])
+            self.assertEqual(settings['execute']['budget_profile'], 'large')
+            self.assertTrue(settings['execute']['allow_large_edits'])
+            self.assertEqual((initialized.workspace_dir / 'main.py').read_text(), 'VALUE = 1\n')
+            self.assertEqual(session.store.resolve('session_manifest.json').read_bytes(), before)
+            conflict = build_parser().parse_args(['start', '--from-session', str(session.store.root), '--reuse', 'code_project', '--allow', '**'])
+            with self.assertRaisesRegex(ValueError, 'do not override'):
+                reuse_session_materials(conflict)
+            # Repeating measurement uses the saved protocol and existing files;
+            # creation-only initial_files must never enter the new configuration.
+            session.manifest.state_refs['preparation'] = session.store.write_json('prepared.json',
+                {'execution': {'cwd': str(initialized.workspace_dir), 'command': ['python', 'main.py', '--measure'],
+                    'result_schema': {'required_metrics': ['count'], 'primary_metric': 'count',
+                                      'output_files': {'counts': 'counts.json'},
+                                      'metric_sources': {'count': {'output': 'counts', 'path': ['count']}}}, 'timeout_sec': 45,
+                    'protocol': {'hypothesis': 'Check published count', 'dataset': 'Fixture data',
+                                 'expected_outcome': 'Compare the recorded count'},
+                    'code_task': {'budget_profile': 'large', 'allow_large_edits': True}}},
+                kind='prepared_execution')
+            session.save()
+            retained = session.store.resolve('session_manifest.json').read_bytes()
+            paper = root / 'paper.md'
+            paper.write_text('Supplied paper and fixed comparison scope.')
+            repeat = build_parser().parse_args(['start', '--kind', 'reproduction', '--from-session',
+                str(session.store.root), '--reuse', 'code_project', '--goal', 'Check readiness and repeat the fixed measurement',
+                '--document', str(paper), '--output-root', str(root / 'repeat'), '--prepare-only', '--yes'])
+            with patch('sys.stdin.isatty', return_value=False), patch('simple_ar.cli.start.print_line'), patch('subprocess.run') as process:
+                repeated = prepare_start(repeat)
+            process.assert_not_called()
+            parsed = tomllib.loads(repeated.read_text())
+            self.assertNotIn('initial_files', parsed['execution'])
+            self.assertEqual(parsed['execution']['command'][1:], ['main.py', '--measure'])
+            self.assertEqual(parsed['execution']['protocol']['dataset'], 'Fixture data')
+            self.assertEqual(parsed['execution']['timeout_sec'], 45)
+            self.assertEqual(parsed['execution']['metric_sources'], {'count': {'output': 'counts', 'path': ['count']}})
+            repeat_code = tomllib.loads((repeated.parent / 'code_task.toml').read_text())
+            self.assertEqual(parsed['execution']['command'][0], repeat_code['environment']['python'])
+            self.assertEqual(repeat_code['edit_scope']['allowed_patterns'], ['main.py'])
+            self.assertIn('gold/**', repeat_code['edit_scope']['protected_patterns'])
+            self.assertEqual(repeat_code['benchmark']['command'], 'python main.py')
+            self.assertEqual(session.store.resolve('session_manifest.json').read_bytes(), retained)
+
+    def test_figure_prepare_only_without_data_uses_canonical_large_code_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            goal = "Draw a conceptual inputs-to-model-to-evidence method with an uncertainty branch"
+            with patch("simple_ar.result_analysis.script_project.preview_table_source") as preview, \
+                    patch("subprocess.run") as process:
+                config = self.prepare("--kind", "figure", "--goal", goal,
+                                      "--output-root", str(root / "tasks"), "--prepare-only")
+            preview.assert_not_called()
+            process.assert_not_called()
+            defaults = research_defaults(["research-session", "--config", str(config)])
+            self.assertEqual(defaults["task_kind"], "bug_fix")
+            source = config.parent / "source"
+            self.assertEqual(list((source / "data").iterdir()), [])
+            self.assertEqual(list(source.rglob("*.csv")), [])
+            compile((source / "analysis.py").read_bytes(), "analysis.py", "exec", dont_inherit=True)
+            self.assertIn("No dataset was supplied", (source / "README.md").read_text(encoding="utf-8"))
+            self.assertIn(goal, (source / "README.md").read_text(encoding="utf-8"))
+            self.assertIn("figure.svg", (source / "tests/verify_delivery.py").read_text(encoding="utf-8"))
+            self.assertIn("embedded raster", (source / "tests/verify_delivery.py").read_text(encoding="utf-8"))
+            self.assertFalse((source / "outputs").exists())
+            options = load_code_task_init_options(config_path=defaults["code_task_config"])
+            execution = load_code_task_execute_options(config_path=defaults["code_task_config"])
+            self.assertEqual(Path(options.code_root), source.resolve())
+            self.assertEqual(options.edit_scope_allowed_patterns, ("analysis.py", "src/**", "outputs/**"))
+            self.assertIn("data/**", options.edit_scope_protected_patterns)
+            self.assertIn("tests/**", options.edit_scope_protected_patterns)
+            self.assertEqual(execution.budget_profile, "large")
+            self.assertTrue(execution.allow_large_edits)
+            self.assertEqual(execution.baseline_policy, "skip")
+            self.assertEqual(defaults["data_path"], [str((source / "data").resolve())])
+
+    def test_script_project_diagram_entry_reuses_scaffold_and_checks_vectors(self):
+        import json
+        from simple_ar.result_analysis import script_project
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "measurements.csv"
+            data.write_text("stage,value\ninput,1\n", encoding="utf-8")
+            goal = "  Draw inputs → model → evidence.\nKeep the uncertainty branch.  "
+            for name, source, diagram in (("concept", None, True), ("combined", data, True),
+                                          ("analysis", data, False)):
+                with self.subTest(mode=name), patch.object(script_project, "preview_table_source",
+                        wraps=script_project.preview_table_source) as preview, \
+                        patch("subprocess.run") as process:
+                    project, command = script_project.prepare_script_project(root / name, source, goal, diagram=diagram)
+                    self.assertEqual(command, ("python", "tests/verify_delivery.py"))
+                    self.assertEqual(script_project.PROTECTED_PATTERNS, ("data/**", "tests/**"))
+                    self.assertTrue((project / "README.md").read_text(encoding="utf-8").startswith(goal + "\n"))
+                    self.assertFalse((project / "outputs").exists())
+                    process.assert_not_called()  # Preparation never executes the scaffold.
+                    if source is None:
+                        preview.assert_not_called()
+                        self.assertEqual(list((project / "data").iterdir()), [])
+                        self.assertIn("No dataset was supplied", (project / "README.md").read_text())
+                    else:
+                        preview.assert_called_once()
+                        self.assertEqual((project / "data/input.csv").read_bytes(), data.read_bytes())
+                    checker = project / "tests/verify_delivery.py"
+                    if not diagram:
+                        outputs = project / "outputs"
+                        outputs.mkdir()
+                        (outputs / "results.json").write_text('{"count": 2}')
+                        (outputs / "report.md").write_text("Two observations; no figure requested.")
+                        namespace = {"__file__": str(checker), "__name__": "delivery_checker_test"}
+                        exec(compile(checker.read_text(), str(checker), "exec"), namespace)
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            namespace["main"]()
+                        (outputs / "custom.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            namespace["main"]()
+                        (outputs / "custom.svg").write_text("not svg")
+                        from xml.etree.ElementTree import ParseError
+                        with self.assertRaises(ParseError):
+                            namespace["main"]()
+                        continue
+                    readme = (project / "README.md").read_text(encoding="utf-8")
+                    self.assertIn("Do not invent measured values", readme)
+                    self.assertIn("svg.fonttype='none'", readme)
+                    outputs = project / "outputs"
+                    outputs.mkdir()
+                    from PIL import Image
+                    Image.new("RGB", (2, 2), "white").save(outputs / "figure.png")
+                    (outputs / "results.json").write_text(json.dumps({"components": ["model"],
+                        "relationships": [], "input_sources": ["user goal"]}), encoding="utf-8")
+                    (outputs / "report.md").write_text("Conceptual method; no measured performance.")
+                    namespace = {"__file__": str(checker), "__name__": "delivery_checker_test"}
+                    exec(compile(checker.read_text(), str(checker), "exec"), namespace)
+                    valid = '<svg xmlns="http://www.w3.org/2000/svg"><text x="1" y="1">Model</text><path d="M0 0 L1 1"/></svg>'
+                    (outputs / "figure.svg").write_text(valid)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        namespace["main"]()
+                    self.assertEqual(process.call_args.args[0][1], str(project / "analysis.py"))
+                    for invalid in (valid.replace("</svg>", '<image href="data:image/png;base64,AA=="/></svg>'),
+                                    '<svg xmlns="http://www.w3.org/2000/svg"/>'):
+                        (outputs / "figure.svg").write_text(invalid)
+                        with self.assertRaisesRegex(ValueError, "editable|text, paths or shapes"):
+                            namespace["main"]()
+            missing = root / "missing-data"
+            with self.assertRaisesRegex(ValueError, "only for diagram=True"):
+                script_project.prepare_script_project(missing, None, goal)
+            self.assertFalse(missing.exists())
+
+    def test_scripted_analysis_reuses_code_task_and_protects_inputs_and_checker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "measurements.csv"
+            data.write_text("method,cost,quality\na,1,3\nb,2,4\n", encoding="utf-8")
+            config = self.prepare("--kind", "data_analysis", "--scripted", "--data-file", str(data),
+                "--goal", "Draw a cost/performance trade-off with an inset", "--observation-unit", "one supplied method summary", "--output-root", str(root / "tasks"), "--prepare-only")
+            defaults = research_defaults(["research-session", "--config", str(config)])
+            self.assertEqual(defaults["task_kind"], "bug_fix")
+            settings = tomllib.loads((config.parent / "code_task.toml").read_text())
+            self.assertEqual(settings["edit_scope"]["allowed_patterns"], ["analysis.py", "src/**", "outputs/**"])
+            self.assertIn("tests/**", settings["edit_scope"]["protected_patterns"])
+            self.assertEqual((config.parent / "source/data/input.csv").read_bytes(), data.read_bytes())
+            self.assertIn("Never infer pairing", (config.parent / "task.md").read_text())
+            self.assertIn("one supplied method summary", (config.parent / "task.md").read_text())
+            self.assertFalse((config.parent / "source/outputs").exists())
+
+    def test_saved_delivery_reuse_keeps_draft_evidence_and_old_session(self):
+        from simple_ar.core.capabilities import CapabilityRegistry
+        from simple_ar.core.session import SessionController
+        from simple_ar.cli.start import session_materials
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = SessionController.create(root / "original", session_id="original",
+                topic="Measured comparison", registry=CapabilityRegistry())
+            ref = session.store.write_json("delivery/report.json", {"status": "completed"})
+            session.store.write_text("delivery/report_body.md", "# Comparison\nA draft.")
+            session.store.write_json("delivery/report_experiment_evidence.json", {"measured": True})
+            session.store.write_json("delivery/citation_map.json", {"schema_version": "citation_map.v1", "entries": []})
+            session.manifest.state_refs["report"] = ref
+            documents = session.store.write_json("sources/document_bundle.json", {
+                "schema_version": "document_bundle.v1", "documents": [], "chunks": []})
+            session.manifest.state_refs["documents"] = documents
+            current_documents = session.store.write_json("sources/after-reading.json", {
+                "schema_version": "document_bundle.v1", "documents": [], "chunks": []},
+                kind="document_bundle", schema="document_bundle.v1")
+            session.store.write_json("writing/report_inputs.json", {"sources": [current_documents.to_dict()]})
+            session.manifest.state_refs["writer"] = session.store.write_json("writing/writer.json", {
+                "input_snapshot": {"path": "report_inputs.json"}})
+            code = session.store.write_json("implementation/code_analysis/analysis.json", {"schema_version": "code_analysis.v1"})
+            implementation = session.store.write_json("implementation/implementation.json", {
+                "status": "validated", "artifact_refs": {"code_analysis": {"path": "code_analysis/analysis.json"}},
+                "workspace_dir": str(root / "retired/code_task/workspace"),
+                "code_task_run_dir": str(root / "retired")})
+            session.manifest.state_refs["implementation"] = implementation
+            session.save()
+            original = (session.store.root / "session_manifest.json").read_bytes()
+            files = session_materials(session.store.root)["report"]
+            self.assertEqual(session_materials(session.store.root)["code_analysis"], [session.store.resolve(code)])
+            self.assertNotIn("code_project", session_materials(session.store.root))
+            with self.assertRaisesRegex(ValueError, "No current reusable code_project"):
+                self.prepare("--from-session", str(session.store.root), "--reuse", "code_project",
+                    "--goal", "Revise the retired project", "--prepare-only")
+            self.assertEqual(len(files), 4)
+            self.assertIn(session.store.resolve(current_documents).resolve(), files)
+            self.assertNotIn(session.store.resolve(documents).resolve(), files)
+            config = self.prepare("--from-session", str(session.store.root), "--reuse", "report",
+                "--goal", "Reorganize the argument and replace the chapter structure", "--output-root", str(root / "new"), "--prepare-only")
+            defaults = research_defaults(["research-session", "--config", str(config)])
+            self.assertEqual(defaults["task_kind"], "writing")
+            self.assertEqual(defaults["report_outline_strategy"], "adaptive")
+            self.assertEqual(defaults["report_draft_scope"], "document")
+            self.assertIn("Reorganize the argument", config.read_text())
+            self.assertEqual(set(defaults["material"]), {str(path) for path in files})
+            self.assertEqual((session.store.root / "session_manifest.json").read_bytes(), original)
+            with self.assertRaisesRegex(ValueError, "No current reusable"):
+                self.prepare("--from-session", str(session.store.root), "--reuse", "data_analysis",
+                    "--goal", "Explain", "--prepare-only")
+
     def test_table_options_share_owner_defaults_and_choices(self):
-        from simple_ar.cli.intake_dialogue import CHOICES
-        from simple_ar.cli.research_config import FIELDS, data_options_supplied
+        from simple_ar.cli.research_config import FIELDS, data_options_supplied, setup_option_contract
         from simple_ar.result_analysis.table import TABLE_CHOICES, TableSpec
         parser = build_parser()
         args = parser.parse_args(["start", "--kind", "survey"])
@@ -28,10 +284,11 @@ class StartTests(unittest.TestCase):
         for name, default in TableSpec.defaults().items():
             destination = FIELDS["analysis"][name][0]
             self.assertEqual(getattr(args, destination), default)
+        contract = setup_option_contract('data_analysis')
         for name, choices in TABLE_CHOICES.items():
             destination = FIELDS["analysis"][name][0]
-            if destination in CHOICES:
-                self.assertEqual(CHOICES[destination], set(choices))
+            if destination in contract:
+                self.assertEqual(set(contract[destination]['allowed_values']), set(choices))
         for flag, value in (("--data-mode", "values"), ("--data-max-mb", "0"),
                             ("--data-association", "pearson"), ("--group-column", "group")):
             with self.subTest(flag=flag):
@@ -47,6 +304,8 @@ class StartTests(unittest.TestCase):
             defaults = research_defaults(['research-session', '--config', str(config)])
             self.assertEqual(defaults['report_outline_strategy'], 'adaptive')
             self.assertTrue(defaults['report_document_review'])
+            self.assertEqual(defaults['report_draft_scope'], 'document')
+            self.assertEqual(defaults['report_review_scope'], 'document')
             self.assertNotIn('command_argv', defaults)
             old = root / 'old.toml'
             old.write_text('[task]\ngoal="Review"\nkind="survey"\noutputs=["report"]\n[report]\noutline_strategy="template"\n')
@@ -388,7 +647,7 @@ class StartTests(unittest.TestCase):
                 self.assertEqual(values["research_allow_pdf_download"], expected)
                 self.assertEqual(values["research_keep_raw_pdf"], expected)
                 if expected:
-                    self.assertEqual(values["research_max_fulltext_documents"], 4)
+                    self.assertEqual(values["research_max_fulltext_documents"], 6)
                     self.assertEqual(values["research_max_pdf_mb"], 20)
                 else:
                     self.assertNotIn("research_max_fulltext_documents", values)
@@ -465,7 +724,7 @@ class StartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "output"
             args = build_parser().parse_args(["start", "--output-root", str(root)])
-            with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="6"), \
+            with patch("sys.stdin.isatty", return_value=True), patch("builtins.input", return_value="99"), \
                     contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "Choose"):
                 prepare_start(args)
             self.assertFalse(root.exists())
@@ -490,6 +749,7 @@ class StartTests(unittest.TestCase):
                 "--dataset", "User-prepared adapted data", "--expected-outcome", "Compare coverage with 0.9",
                 "--metric", "coverage", "--metric", "mc_error", "--cwd", directory, "--timeout-sec", "12",
                 "--output-files", '{"raw":"measurements.json","setup":"summary.json"}',
+                "--metric-sources", '{"coverage":{"output":"raw","path":["scores",0,"coverage"]}}',
                 "--max-cited-sources", "1", "--output-root", str(root / "runs"), "--prepare-only",
                 "--command", "python", "a script.py", "--label", "one value")
             values = research_defaults(["research-session", "--config", str(config)])
@@ -502,13 +762,27 @@ class StartTests(unittest.TestCase):
             self.assertEqual(values["process_invocations"], 1)
             self.assertEqual(values["process_wall_seconds"], 12)
             self.assertEqual(values["report_template"], "reproduction")
+            self.assertEqual(values["report_draft_scope"], "document")
+            self.assertEqual(values["report_review_scope"], "document")
             self.assertEqual(values["report_outline_strategy"], "adaptive")
             self.assertEqual(values["execution_details"]["output_files"], {"raw": "measurements.json", "setup": "summary.json"})
+            self.assertEqual(values["execution_details"]["metric_sources"], {"coverage": {"output": "raw", "path": ["scores", 0, "coverage"]}})
             self.assertTrue(values["report_document_review"])
             self.assertEqual(values["report_max_cited_sources"], 1)
             self.assertNotIn("total_tokens", values)
             self.assertFalse(values["research_allow_pdf_download"])
             self.assertFalse((config.parent / "code_task.toml").exists())
+            adapter = self.prepare("--kind", "reproduction", "--goal", "Export author results without changing the method",
+                "--document", str(paper), "--hypothesis", "Published claim", "--dataset", "Fixed data",
+                "--expected-outcome", "Measure coverage", "--metric", "coverage", "--project", directory,
+                "--data-path", directory, "--allow", "adapter.py", "--validate", "python tests/check_adapter.py",
+                "--output-root", str(root / "adapted-runs"), "--prepare-only", "--command", "python", "adapter.py")
+            prepared = research_defaults(["research-session", "--config", str(adapter)])
+            self.assertEqual(prepared["command_argv"], ["python", "adapter.py"])
+            self.assertEqual(prepared["process_invocations"], 3)
+            self.assertEqual(load_code_task_init_options(config_path=adapter.parent / "code_task.toml").benchmark_command,
+                             "python tests/check_adapter.py")
+            self.assertIn("do not alter methods", (adapter.parent / "task.md").read_text())
 
     def test_invalid_reproduction_and_cross_function_options_create_no_bundle(self):
         with tempfile.TemporaryDirectory() as directory:

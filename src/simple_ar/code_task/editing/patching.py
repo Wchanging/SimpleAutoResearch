@@ -40,7 +40,7 @@ from simple_ar.code_task.analysis.context import (
 from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.analysis.source_context import inferred_source_request, requested_source_context as _requested_source_context
 from simple_ar.code_task.analysis.dependency_api import inspect_dependency_api
-from simple_ar.code_task.editing.planning import select_relevant_files
+from simple_ar.code_task.editing.planning import select_relevant_files, patch_plan_context
 from simple_ar.code_task.analysis.repo_map import build_repo_map
 from simple_ar.code_task.memory import task_memory_context
 from simple_ar.code_task.analysis.interfaces import render_source_snippets, snippet_api_contract, source_snippet_views
@@ -57,7 +57,10 @@ CODE_TASK_EDIT_SYSTEM = (
 
 MessageCallback = Callable[[str], None]
 CONTROLLED_PATCH_BACKEND = "controlled_patch"
-MAX_EDIT_EVIDENCE_ROUNDS = 2
+# Configuration -> caller -> result interfaces can require successive reads.
+# Shared character/token budgets still bound acquisition; stop when no new
+# source is available rather than assuming two dependency hops are sufficient.
+MAX_EDIT_EVIDENCE_ROUNDS = 4
 
 
 def editor_metadata(*, backend: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -667,8 +670,10 @@ def _ask_llm_for_edits(
             "naming the same file and, when possible, a specific `query` or `symbols`. "
             "A visible file is not necessarily a fully inspected file. Do not invent edits. "
             if partial_source else
-            "The requested editable files and source snippets were already provided. "
-            "Do not ask to inspect complete files again. "
+            "The editable files are visible, but their read-only dependencies may not be. "
+            "Choose the missing configuration, callers or result interfaces from the "
+            "read_only_files inventory and request them explicitly. Do not confuse a "
+            "complete editable placeholder with complete implementation evidence. "
         )
         response = client.ask_json(
             CODE_TASK_EDIT_SYSTEM,
@@ -676,6 +681,8 @@ def _ask_llm_for_edits(
             + "\n\n"
             + "You returned no edits and no actionable source request. "
             + source_guidance
+            + 'When source is missing, return context_request={"files":["exact indexed path"],'
+            + '"query":"specific interface question","symbols":[],"reason":"what is missing"}. '
             + "Produce exact old/new replacements when the needed source is visible. "
             + "Only declare the approved patch plan impossible for a concrete design or "
             + "scope blocker, not because a bounded snippet omitted later code.",
@@ -744,6 +751,11 @@ def _edit_user_prompt(
         "required design decisions, return empty edits and implementation_feedback: "
         "{kind: design_gap, reason: string, questions: [specific unresolved questions]}. "
         "Do not use design_gap for missing source or an ordinary coding failure.\n\n"
+        'A workspace source request uses context_request={"files":["exact indexed path"],'
+        '"query":"specific interface question","symbols":[],"reason":"what is missing"}. '
+        "Paths in read_only_files can be requested without edit permission. A missing "
+        "configuration or return interface requires this request, not just a sentence "
+        "in summary/validation; the controller cannot execute that sentence.\n\n"
         "Each item in `edits` must contain exactly these string fields: "
         "`path`, `old`, `new`, and `reason`.\n\n"
         "Hard rules:\n"
@@ -789,7 +801,7 @@ def _edit_user_prompt(
         "Available budget profiles for later planning:\n"
         f"{json.dumps(budget_profiles_json(), indent=2, ensure_ascii=False)}\n\n"
         f"Task:\n{task_text}\n\n"
-        f"Approved patch plan:\n{patch_plan}\n\n"
+        f"Approved patch plan:\n{patch_plan_context(patch_plan, task_text)}\n\n"
         f"Task memory:\n{memory_context}\n\n"
         f"Workspace file inventory JSON:\n{json.dumps(compact_files, separators=(',', ':'), ensure_ascii=False)}\n\n"
         "Read-only context files omitted from editable snippets:\n"

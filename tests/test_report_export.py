@@ -151,6 +151,11 @@ class ReportExportTests(unittest.TestCase):
             root = Path(tmp)
             source = self._source(root)
             (source / "original.png").write_bytes(b"image")
+            vector = '<svg xmlns="http://www.w3.org/2000/svg"><text>Editable figure</text></svg>'
+            (source / "original.svg").write_text(vector, encoding="utf-8")
+            (source / "figures").mkdir()
+            (source / "figures/figures_manifest.json").write_text(json.dumps({"figures": [
+                {"path": "original.png", "exports": {"svg": "original.svg"}}]}), encoding="utf-8")
             document = _ast(image="original.png")
             document["blocks"].append({"t": "Para", "c": [{"t": "Link", "c": [
                 ["", [], []], [{"t": "Str", "c": "Measured source"}], ["../../experiment/results.json", ""],
@@ -172,6 +177,9 @@ class ReportExportTests(unittest.TestCase):
             source.rename(root / "original-isolated")
             self.assertIn("figures/figure-1.png", (root / "moved/source.md").read_text())
             self.assertTrue((root / "moved/figures/figure-1.png").is_file())
+            saved_vector = result["figure_exports"]["original.png"]["svg"]
+            self.assertEqual((root / "moved" / saved_vector).read_text(), vector)
+            self.assertFalse((root / "moved/experiment").exists())
 
     def test_generated_figure_placement_prefers_source_location_without_forcing_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -224,6 +232,14 @@ class ReportExportTests(unittest.TestCase):
             image.write_text('<svg><image href="https://example.test/image.png"/></svg>', encoding="utf-8")
             with self.assertRaises(ReportExportError):
                 _copy_image(image, output, 2)
+            image.write_text('<!DOCTYPE svg PUBLIC "SVG" "https://example.test/svg.dtd"><svg><text>Editable</text></svg>', encoding="utf-8")
+            self.assertEqual(_copy_image(image, output, 3, convert_svg=False), "figures/figure-3.svg")
+            self.assertNotIn("DOCTYPE", (output / "figures/figure-3.svg").read_text())
+            self.assertIn("Editable", (output / "figures/figure-3.svg").read_text())
+            self.assertIn("DOCTYPE", image.read_text())
+            image.write_text('<!DOCTYPE svg [<!ENTITY value "expanded">]><svg><text>&value;</text></svg>', encoding="utf-8")
+            with self.assertRaisesRegex(ReportExportError, "external resource"):
+                _copy_image(image, output, 4, convert_svg=False)
 
     def test_compile_failure_retains_diagnostics_and_limits_file_access(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

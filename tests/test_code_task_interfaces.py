@@ -352,6 +352,86 @@ class CodeTaskInterfaceTests(unittest.TestCase):
         self.assertIn("class Service", contract["service.py"][0])
         self.assertTrue(any("Service.def run" in row for row in contract["service.py"]))
 
+        from io import BytesIO
+        from PIL import Image
+        from simple_ar.code_task.analysis.context import (
+            ensure_code_task_context_pack, load_latest_code_task_context_pack, read_source_snippets,
+        )
+        from simple_ar.code_task.analysis.source_context import requested_source_context
+        from simple_ar.code_task.runtime.state import code_task_paths
+        from simple_ar.core.artifacts import write_jsonl
+        with tempfile.TemporaryDirectory() as folder:
+            root, project = Path(folder), Path(folder) / 'project'
+            (project / 'outputs').mkdir(parents=True)
+            image = BytesIO()
+            Image.new('RGB', (2, 2), 'red').save(image, format='PNG')
+            (project / 'outputs/figure.png').write_bytes(image.getvalue())
+            # A text extension must not bypass the content boundary either.
+            (project / 'outputs/not_text.csv').write_bytes(image.getvalue())
+            write_text(project / 'outputs/results.json', '{"score": 4}\n')
+            write_text(project / 'outputs/values.csv', 'value\n4\n')
+            diagrams = {'outputs/method.svg': '<svg xmlns="http://www.w3.org/2000/svg"><text>Method</text></svg>\n',
+                        'outputs/method.dot': 'digraph method { input -> output; }\n',
+                        'Dockerfile': 'FROM python:3.12\nCOPY analysis.py /app/\n',
+                        'outputs/source.custom': 'A legitimate UTF-8 source: 方法\n'}
+            for name, content in diagrams.items():
+                write_text(project / name, content)
+            text = 'LABEL = "alpha\u0085beta\u2028gamma\u2029delta"\n'
+            write_text(project / 'analysis.py', text)
+            (project / 'legacy.py').write_bytes('# coding: cp1252\nLABEL = "café"\n'.encode('cp1252'))
+            task = root / 'task.md'
+            write_text(task, 'Inspect analysis.py legacy.py outputs/figure.png outputs/results.json outputs/values.csv')
+            initialize_code_task(run_dir=root / 'run', code_root=project, task_file=task,
+                edit_scope_allowed_patterns=('analysis.py', 'legacy.py', 'outputs/**'))
+            workspace = code_task_paths(root / 'run').workspace_dir
+            index = build_codebase_index(workspace)
+            self.assertIn('outputs/figure.png', [row['path'] for row in index['files']])
+            selected = ['outputs/figure.png', 'outputs/not_text.csv', 'analysis.py', 'legacy.py',
+                        'outputs/results.json', 'outputs/values.csv', *diagrams]
+            snippets = read_source_snippets(workspace, selected, max_chars_per_file=2000)
+            rows = {row['path']: row for row in snippets}
+            self.assertNotIn('outputs/figure.png', rows)
+            self.assertNotIn('outputs/not_text.csv', rows)
+            self.assertEqual(rows['analysis.py']['text'], text)
+            self.assertIn('café', rows['legacy.py']['text'])
+            self.assertIn('outputs/results.json', rows)
+            self.assertIn('outputs/values.csv', rows)
+            for name, content in diagrams.items():
+                self.assertEqual(rows[name]['text'], content)
+            lookup = requested_source_context(workspace, index, {'files': selected}, supplied=[],
+                max_files=8, max_chars=2000, max_total_chars=10000)
+            self.assertFalse(any(row['path'].endswith('figure.png') or row['path'].endswith('not_text.csv')
+                                 for row in lookup))
+            pack = build_code_task_context_pack(root / 'run', max_files=8, max_source_chars_per_file=2000,
+                max_total_chars=10000)
+            self.assertNotIn('outputs/figure.png', pack.selected_files)
+            saved = read_jsonl(pack.snippets_path)
+            self.assertTrue(any(row['path'] == 'analysis.py' and '\u0085' in row['text'] for row in saved))
+            # Simulate the pre-fix cached context. Refresh must retain it as
+            # evidence, not mutate its snippets or reuse its prompt garbage.
+            write_jsonl(pack.snippets_path, [*saved, {'path': 'outputs/figure.png',
+                'text': image.getvalue().decode('utf-8', errors='replace')}])
+            write_text(pack.prompt_context_path, 'Old binary source preview')
+            old_bytes = pack.snippets_path.read_bytes()
+            self.assertIsNone(load_latest_code_task_context_pack(root / 'run'))
+            fresh = ensure_code_task_context_pack(root / 'run', query=task.read_text(), max_files=8,
+                max_source_chars_per_file=2000)
+            self.assertIsNotNone(fresh)
+            self.assertNotEqual(fresh.context_pack_path, pack.context_pack_path)
+            self.assertNotIn('outputs/figure.png', fresh.selected_files)
+            # Cached editable vector/code sources remain eligible regardless
+            # of their extension; they must not cause perpetual rebuilding.
+            fresh_rows = list(fresh.snippets)
+            for name, content in diagrams.items():
+                if not any(row['path'] == name for row in fresh_rows):
+                    fresh_rows.append({'path': name, 'text': content})
+            write_jsonl(fresh.snippets_path, fresh_rows)
+            self.assertEqual(load_latest_code_task_context_pack(root / 'run').context_pack_path,
+                             fresh.context_pack_path)
+            self.assertEqual(pack.snippets_path.read_bytes(), old_bytes)
+            self.assertEqual(pack.prompt_context_path.read_text(), 'Old binary source preview')
+            self.assertNotIn('Old binary source preview', fresh.prompt_context_path.read_text())
+
     def test_review_blocks_cross_file_api_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)

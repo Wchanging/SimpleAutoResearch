@@ -87,6 +87,13 @@ installed). The preview does not download fonts automatically. Missing-glyph
 warnings mean PNG/PDF labels need checking; successful analysis is not a visual
 quality check. See [Matplotlib's font fallback guide](https://matplotlib.org/stable/users/explain/text/fonts.html).
 
+For graph-like method diagrams, optionally install [Graphviz](https://graphviz.org/download/)
+on the execution host and make `dot` available on `PATH` (Debian/Ubuntu:
+`sudo apt install graphviz`). The figure scaffold reports its availability so generated
+code can use a mature layout renderer rather than manually placing every node.
+It is not required for data plots; setup does not install it automatically, and
+rendered labels and feedback arrows still need visual inspection.
+
 Clone the current preview branch (also shown in the [README](../README.md)):
 
 ```bash

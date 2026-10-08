@@ -17,8 +17,9 @@ about scope.
   "Evidence Summary", "Pipeline", "Artifact", or "Stage Outputs".
 - Text after a taxonomy table should explain cross-family contrasts and
   boundary conditions, not repeat every row.
-- Evaluation / benchmark sections should include a compact evidence-quality map
-  when the available sources support it.
+- Evaluation comparisons must explain consequential differences in conditions
+  and evidence strength. Prose or a table can satisfy this requirement; a named
+  evidence-quality map is not required.
 - Claims about performance or usefulness should include a boundary condition,
   such as benchmark type, task scale, cross-dataset or domain transfer risk, or cost.
 - Each section should be readable: avoid one very large paragraph. Prefer
@@ -48,3 +49,7 @@ actual section responsibilities. They are not additional evidence requirements.
 
 Reviewer findings should be structured by severity and suggested action. Do not
 rewrite the report directly unless the coordinator asks for a revision.
+Judge whether the user's questions are answered and important claims supported.
+Formatting preferences (table presence, heading wording, paragraph count) are
+optional suggestions unless explicitly requested or necessary for comprehension.
+Do not require another revision solely to impose the fallback structure.

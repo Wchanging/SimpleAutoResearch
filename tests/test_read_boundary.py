@@ -1,22 +1,319 @@
 from __future__ import annotations
 
 import unittest
+import json
+from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from simple_ar.research.contracts import DocumentRecord, TextChunk
-from simple_ar.research.documents.ingest import DocumentBundle
+from simple_ar.research.contracts import DocumentRecord, SourcePlan, TextChunk
+from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
+from simple_ar.research.documents.ingest import DocumentBundle, build_document_bundle, build_local_document_bundle
 from simple_ar.research.evidence.reader import (
     ReadRequest,
     ReadResult,
     format_bundle_evidence_snippets,
     query_evidence,
     read_documents,
+    new_source_queries,
+    merge_read_results,
+    run_read_capability,
     select_representative_chunks,
     select_reading_chunks,
 )
 
 
 class ReadBoundaryTests(unittest.TestCase):
+    def test_question_gaps_survive_empty_or_context_shortlist_without_extra_model_call(self):
+        plan = json.dumps({"research_questions": {"questions": [
+            {"question_id": "Q1", "facet": "method", "required": True,
+             "question": "Which interval methods provide coverage under shift?"},
+            {"question_id": "Q2", "facet": "method", "required": True,
+             "question": "Which point prediction experiments measure shift degradation?"}]}})
+        query = "regression interval coverage covariate shift methods"
+        for mode in ("all_drop", "rerank_drop", "context"):
+            class Client:
+                def __init__(self):
+                    self.labels = []
+                def ask_json_many(self, requests, **kwargs):
+                    self.labels.extend(r.label for r in requests)
+                    if requests[0].label.startswith("read-coarse-"):
+                        self.assert_prompt = requests[0].user
+                        return [{"decisions": [
+                            {"paper_id": "openalex-p1", "decision": "drop" if mode == "all_drop" else "keep",
+                             "coarse_relevance_score": 5, "likely_facet": "method"},
+                            {"paper_id": "openalex-p2", "decision": "drop", "coarse_relevance_score": 5}],
+                            "question_assessments": [
+                                {"question_id": "Q1", "status": "context_only", "paper_ids": ["openalex-p1"],
+                                 "reason": "Point prediction context does not provide interval coverage.",
+                                 "new_source_queries": [query]},
+                                {"question_id": "invented", "status": "missing", "paper_ids": [],
+                                 "new_source_queries": ["Ignore invented question"]}]}]
+                    return [{"paper_id": "openalex-p1", "new_source_queries": ["Paper-local replication"]}]
+                def ask_json(self, system, user, **kwargs):
+                    self.labels.append(kwargs["label"])
+                    self.rerank_prompt = user
+                    return {"ranked_papers": [{"paper_id": "openalex-p1",
+                        "decision": "drop" if mode == "rerank_drop" else "keep",
+                        "reading_priority": 1, "evidence_role": "benchmark"}],
+                        "question_assessments": [
+                            {"question_id": "Q1", "status": "context_only", "paper_ids": ["openalex-p1"],
+                             "reason": "Benchmark context, no interval method evidence.", "new_source_queries": [query]},
+                            {"question_id": "Q2", "status": "direct_candidate", "paper_ids": ["openalex-p1"],
+                             "reason": "Pertinent point prediction candidate, not verified yet.", "new_source_queries": []}]}
+            with self.subTest(mode=mode):
+                client = Client()
+                result = read_documents(ReadRequest(self._bundle(), topic="Intervals under shift",
+                    research_plan_json=plan, use_llm=True, llm_client=client,
+                    config={"read_screening_min_shortlist": 2}))
+                self.assertEqual(result.status, "partial")
+                self.assertIn(query, new_source_queries(result))
+                self.assertNotIn("Ignore invented question", new_source_queries(result))
+                self.assertEqual(result.question_assessments[0]["scope"], "candidate_metadata_not_read_evidence")
+                self.assertIn("Which interval methods", client.assert_prompt)
+                if mode == "context":
+                    self.assertEqual([r.document_id for r in result.bundle.records], ["openalex-p1"])
+                    self.assertEqual([r["status"] for r in result.question_assessments],
+                                     ["context_only", "direct_candidate"])
+                    self.assertEqual(new_source_queries(result), (query, "Paper-local replication"))
+                    self.assertEqual(len(client.labels), 3)  # Existing coarse + rerank + notes only.
+                    self.assertIn("Whole-candidate question observations", client.rerank_prompt)
+                else:
+                    self.assertEqual(result.bundle.records, [])
+                    self.assertEqual(result.paper_notes, ())
+                    self.assertEqual(result.question_assessments[0]["status"], "missing")
+                    self.assertEqual(len(client.labels), 1 if mode == "all_drop" else 2)
+                saved = result.to_handoff_dict()
+                restored = ReadResult.from_handoff_dict(saved, bundle=result.bundle)
+                self.assertEqual(restored.question_assessments, result.question_assessments)
+                self.assertEqual(new_source_queries(restored), new_source_queries(result))
+                saved.pop("question_assessments")
+                legacy = ReadResult.from_handoff_dict(saved, bundle=result.bundle)
+                self.assertEqual(legacy.question_assessments, ())
+                if mode != "context":
+                    previous = read_documents(ReadRequest(self._bundle()))
+                    merged = merge_read_results(previous, restored)
+                    self.assertEqual(merged.bundle, previous.bundle)
+                    self.assertEqual(merged.paper_cards, previous.paper_cards)
+                    self.assertEqual(new_source_queries(merged), (query,))
+        # No existing screening call to reuse for a genuinely empty input bundle.
+        empty = replace(self._bundle(), records=[], chunks=[])
+        client = Client()
+        result = read_documents(ReadRequest(empty, use_llm=True, llm_client=client, research_plan_json=plan))
+        self.assertEqual(client.labels, [])
+        self.assertEqual(result.status, "empty")
+
+    def test_question_assessment_combines_batches_without_mistaking_local_absence_for_global_gap(self):
+        from simple_ar.research.evidence.screening import screen_papers_with_llm
+        class Client:
+            def ask_json_many(self, requests, **kwargs):
+                return [{"decisions": [{"paper_id": pid, "decision": "keep"}],
+                    "question_assessments": [{"question_id": "Q", "status": status, "paper_ids": ids,
+                                              "new_source_queries": queries}]}
+                    for pid, status, ids, queries in (
+                        ("p", "missing", [], ["batch-local gap"]),
+                        ("q", "direct_candidate", ["q"], []))]
+            def ask_json(self, *args, **kwargs):
+                return {}  # Existing coarse fallback preserves assessment and shortlist.
+        assessments = []
+        decisions = screen_papers_with_llm(Client(), topic="Methods", problem_markdown="",
+            research_plan_json=json.dumps({"research_questions": {"questions": [
+                {"question_id": "Q", "question": "Which method?"}]}}),
+            papers=[{"paper_id": "p"}, {"paper_id": "q"}],
+            config={"read_screening_batch_size": 1}, question_assessments=assessments)
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(assessments[0]["status"], "direct_candidate")
+        self.assertEqual(assessments[0]["paper_ids"], ["q"])
+        self.assertEqual(assessments[0]["new_source_queries"], [])
+
+    def _source_batches(self, root, budgets=None):
+        bundles = []
+        for name, budget in zip(("first", "second"), budgets or ({}, {})):
+            path = root / f"{name}.md"
+            path.write_text(f"# {name}\n\n## Methods\nMeasured source observations.\n"
+                            "\n## Results\nObserved values and stated limitations.\n", encoding="utf-8")
+            bundles.append(build_document_bundle(papers=[], source_plan=SourcePlan(
+                queries=["local documents"], sources=["local_files"], local_documents=[str(path)],
+                require_fulltext=True, allow_pdf_download=False, budget=budget),
+                cache_dir=root / "cache", extraction_dir=root / "extraction"))
+        return bundles
+
+    def test_fresh_remaining_budget_does_not_conflict_with_original_total(self):
+        with TemporaryDirectory() as directory:
+            first, second = self._source_batches(Path(directory), budgets=(
+                {"max_fulltext_documents": 4, "max_fulltext_fetch_attempts": 8},
+                {"max_fulltext_documents": 3, "max_fulltext_fetch_attempts": 7}))
+            old_budget = dict(first.fulltext_manifest["budget"])
+            fresh_before = json.dumps(second.to_handoff_dict(), sort_keys=True)
+            merged = merge_read_results(read_documents(ReadRequest(first)), read_documents(ReadRequest(second)))
+            manifest = merged.bundle.fulltext_manifest
+            self.assertEqual(manifest["budget"], old_budget)
+            self.assertEqual(second.fulltext_manifest["budget"]["max_fulltext_documents"], 3)
+            self.assertEqual(second.fulltext_manifest["budget"]["max_fulltext_fetch_attempts"], 7)
+            self.assertEqual(manifest["cache_dir"], first.fulltext_manifest["cache_dir"])
+            self.assertEqual(manifest["documents"], first.fulltext_manifest["documents"] + second.fulltext_manifest["documents"])
+            self.assertIn("original total limits", " ".join(manifest["notes"]))
+            self.assertEqual(json.dumps(second.to_handoff_dict(), sort_keys=True), fresh_before)
+            disabled = build_document_bundle(papers=[], source_plan=SourcePlan(
+                queries=["local documents"], sources=["local_files"],
+                local_documents=[str(Path(directory) / "first.md")], require_fulltext=False,
+                allow_pdf_download=False, budget={"max_fulltext_documents": 4, "max_fulltext_fetch_attempts": 8}),
+                cache_dir=Path(directory) / "cache", extraction_dir=Path(directory) / "extraction")
+            enabled = merge_read_results(read_documents(ReadRequest(disabled)), read_documents(ReadRequest(second)))
+            self.assertFalse(disabled.fulltext_manifest["enabled"])
+            self.assertTrue(enabled.bundle.fulltext_manifest["enabled"])
+            self.assertTrue(enabled.bundle.fulltext_extraction["enabled"])
+            # Policy changes remain conflicts even though remaining allowances can change.
+            for policy, manifest in (
+                ("allow_pdf_download", {**second.fulltext_manifest, "allow_pdf_download": True}),
+                ("parser_backend", {**second.fulltext_manifest, "budget": {
+                    **second.fulltext_manifest["budget"], "parser_backend": "unstructured"}}),
+            ):
+                bad = replace(second, fulltext_manifest=manifest)
+                with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, policy):
+                    merge_read_results(read_documents(ReadRequest(first)), read_documents(ReadRequest(bad)))
+
+    def test_cumulative_real_bundles_preserve_questions_and_deduplicate(self):
+        from simple_ar.research.evidence.cards import build_code_links
+        document = replace(self._bundle().records[0], abstract=(
+            'Code: "https://example.test/a.b?q=1&v=2"; '
+            'data https://data.test/. Next https://example.test/a%2E.'))
+        self.assertEqual([link.url for link in build_code_links(documents=[document], chunks=[])],
+                         ["https://example.test/a.b?q=1&v=2", "https://data.test/",
+                          "https://example.test/a%2E"])
+        with TemporaryDirectory() as directory:
+            first, second = self._source_batches(Path(directory))
+            old = read_documents(ReadRequest(first))
+            owner = first.records[0].document_id
+            note = {"paper_id": owner, "open_questions": ["Unresolved instrument conditions"],
+                    "followup_queries": ["Instrument appendix"],
+                    "reading_followup": {"pending_queries": ["Instrument appendix"]},
+                    "new_source_queries": ["Independent instrument validation"]}
+            old = replace(old, status="partial", paper_notes=(note,), notes_markdown="Old unresolved notes",
+                          screening_decisions=({"paper_id": owner, "decision": "keep"},),
+                          diagnostics=("Original uncertainty remains",))
+            fresh = read_documents(ReadRequest(second))
+            new_owner = second.records[0].document_id
+            fresh = replace(fresh, paper_notes=({"paper_id": new_owner, "open_questions": ["New question"]},),
+                            screening_decisions=({"paper_id": new_owner, "decision": "keep"},),
+                            notes_markdown="New reading notes")
+            before = json.dumps(first.to_handoff_dict(), sort_keys=True)
+            merged = merge_read_results(old, fresh)
+            self.assertEqual(merged.bundle.records, first.records + second.records)
+            self.assertEqual(merged.bundle.chunks, first.chunks + second.chunks)
+            self.assertEqual(merged.bundle.sections, first.sections + second.sections)
+            for name in ("paper_cards", "claim_cards", "method_cards", "dataset_cards", "code_links",
+                         "paper_notes", "screening_decisions"):
+                self.assertEqual(getattr(merged, name), getattr(old, name) + getattr(fresh, name))
+            self.assertEqual(merged.paper_notes[0]["open_questions"], ["Unresolved instrument conditions"])
+            self.assertEqual(merged.paper_notes[0]["reading_followup"]["pending_queries"], ["Instrument appendix"])
+            self.assertIn("Original uncertainty remains", merged.diagnostics)
+            self.assertIn("Old unresolved notes", merged.notes_markdown)
+            self.assertEqual(merged.status, "partial")
+            for name, schema in (("fulltext_manifest", "research_fulltext_manifest.v1"),
+                                 ("fulltext_extraction", "fulltext_extraction.v1")):
+                value = getattr(merged.bundle, name)
+                self.assertEqual(value["schema_version"], schema)
+                self.assertEqual(value["documents"], getattr(first, name)["documents"] + getattr(second, name)["documents"])
+                self.assertEqual(value["document_count"], 2)
+                self.assertEqual(sum(value["status_counts"].values()), 2)
+            self.assertEqual(merged.bundle.fulltext_manifest["cached_count"], 2)
+            self.assertEqual(merged.bundle.fulltext_extraction["parsed_count"], 2)
+            self.assertEqual(json.dumps(first.to_handoff_dict(), sort_keys=True), before)
+            # Exact replay and replay of a batch inside the cumulative bundle add nothing.
+            self.assertEqual(merge_read_results(old, old), old)
+            self.assertEqual(merge_read_results(merged, old), merged)
+            empty = read_documents(ReadRequest(build_local_document_bundle([], extraction_dir=Path(directory) / "empty")))
+            self.assertIs(merge_read_results(old, empty), old)
+
+    def test_cumulative_identity_conflicts_are_rejected(self):
+        with TemporaryDirectory() as directory:
+            first, _ = self._source_batches(Path(directory))
+            old = read_documents(ReadRequest(first))
+            conflicts = (
+                replace(old, bundle=replace(first, records=[replace(first.records[0], title="Changed source")])),
+                replace(old, bundle=replace(first, chunks=[replace(first.chunks[0], text="Changed passage")])),
+                replace(old, bundle=replace(first, sections=[replace(first.sections[0], text="Changed section")])),
+                replace(old, paper_cards=(replace(old.paper_cards[0], title="Changed card"),)),
+                replace(old, bundle=replace(first, fulltext_extraction={**first.fulltext_extraction,
+                    "documents": [{**first.fulltext_extraction["documents"][0], "reason": "Changed extraction"}]})),
+            )
+            for fresh in conflicts:
+                with self.subTest(fresh=fresh), self.assertRaisesRegex(ValueError, "Conflicting read evidence identity"):
+                    merge_read_results(old, fresh)
+            note = {"paper_id": first.records[0].document_id, "open_questions": ["Old question"]}
+            with self.assertRaisesRegex(ValueError, "paper_id"):
+                merge_read_results(replace(old, paper_notes=(note,)),
+                                   replace(old, paper_notes=({**note, "open_questions": []},)))
+
+    def test_previous_capability_delivers_restorable_cumulative_bundle(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, second = self._source_batches(root)
+            previous = read_documents(ReadRequest(first))
+            context = CapabilityContext(ArtifactStore(root / "read-attempt"), AttemptManifest("read-2"))
+            outcome = run_read_capability(context=context, request=ReadRequest(second, previous=previous))
+            bundle_ref = next(ref for ref in outcome.artifacts if ref.kind == "document_bundle")
+            read_ref = next(ref for ref in outcome.artifacts if ref.kind == "read_result")
+            bundle = DocumentBundle.from_handoff_dict(context.store.read_json(bundle_ref))
+            restored = ReadResult.from_handoff_dict(context.store.read_json(read_ref), bundle=bundle)
+            expected = merge_read_results(previous, read_documents(ReadRequest(second)))
+            self.assertEqual(restored, expected)
+            self.assertEqual(len(query_evidence(restored.bundle)), len(first.chunks) + len(second.chunks))
+            legacy = previous.to_handoff_dict()  # No bundle/new-query fields required in old handoffs.
+            self.assertEqual(ReadResult.from_handoff_dict(legacy, bundle=first), previous)
+
+            # A failed batch retains completed reads without accepting a
+            # partial technical failure as a successful evidence handoff.
+            from simple_ar.integrations.llm import LLMClient, LLMSettings, LLMRequest, LLMError
+            client = LLMClient(LLMSettings(api_key="checkpoint-secret", model="checkpoint-model"))
+            binding = {"profile": "reader", "settings": {"model": "checkpoint-model", "temperature": 0.1}}
+            session = ArtifactStore(root / "session")
+            input_ref = session.write_text("source.txt", "Original source")
+            requests = [LLMRequest("system", value, label=value) for value in ("first", "second", "third")]
+            sent = []
+
+            def respond(system, user, *, label=""):
+                sent.append(user)
+                if sent == ["first", "second"]:
+                    raise LLMError("temporary failure")
+                return {"value": user}
+
+            def read_batch(request):
+                responses = request.llm_client.ask_json_many(requests, max_workers=1)
+                self.assertEqual([row["value"] for row in responses], [r.user for r in requests])
+                return previous
+
+            def context_for(number, inputs=(input_ref,)):
+                return CapabilityContext(ArtifactStore(session.root / "attempts" / f"read-{number}"),
+                    AttemptManifest(f"read-{number}", capability="read", trigger="application:read", inputs=inputs),
+                    inputs=inputs, input_store=session)
+
+            with patch.object(client, "connection_binding", return_value=binding), patch.object(
+                    client, "ask_json", side_effect=respond), patch(
+                    "simple_ar.research.evidence.reader.read_documents", side_effect=read_batch):
+                with self.assertRaises(LLMError):
+                    run_read_capability(context=context_for(1), request=ReadRequest(first, use_llm=True, llm_client=client))
+                saved = (session.root / "attempts/read-1/read_progress.json").read_bytes()
+                self.assertNotIn(b"checkpoint-secret", saved)
+                self.assertFalse((session.root / "attempts/read-1/read_result.json").exists())
+                binding["settings"]["request_timeout_sec"] = 1200
+                run_read_capability(context=context_for(2), request=ReadRequest(first, use_llm=True, llm_client=client))
+                self.assertEqual(sent, ["first", "second", "second", "third"])
+                self.assertEqual((session.root / "attempts/read-1/read_progress.json").read_bytes(), saved)
+                # Changed registered input and changed prompt each invalidate
+                # reuse; successful ordering and source association remain.
+                changed = session.write_text("other.txt", "Different source")
+                run_read_capability(context=context_for(3, (changed,)), request=ReadRequest(first, use_llm=True, llm_client=client))
+                self.assertEqual(sent[-3:], ["first", "second", "third"])
+                requests[0] = LLMRequest("system", "changed", label="first")
+                run_read_capability(context=context_for(4), request=ReadRequest(first, use_llm=True, llm_client=client))
+                self.assertEqual(sent[-1], "changed")
+                binding["settings"]["temperature"] = 0.8
+                run_read_capability(context=context_for(5), request=ReadRequest(first, use_llm=True, llm_client=client))
+                self.assertEqual(sent[-3:], ["changed", "second", "third"])
+
     def test_initial_selection_uses_source_positions_not_ingest_priority(self) -> None:
         chunks = [TextChunk(chunk_id=f"unrelated-id-{30-index}", document_id="p",
             source_path="paper.md", line_start=10 * index + 1, line_end=10 * index + 5,
@@ -443,6 +740,19 @@ class ReadBoundaryTests(unittest.TestCase):
         )
         self.assertIn("Introduction evidence.", ref.context_text)
         self.assertIn("The limitation is a small fixture.", ref.context_text)
+
+        # Supporting webpages retain independent evidence identity, not their
+        # parent paper's chunk identity, and survive the existing handoff.
+        from dataclasses import replace
+        bundle.records[0] = replace(record, source="supporting_material",
+            url="https://example.test/official",
+            metadata={"kind": "supporting_material", "parent_document_id": "parent-paper"})
+        restored = DocumentBundle.from_handoff_dict(bundle.to_handoff_dict())
+        webpage_ref = query_evidence(restored, document_id="doc-1",
+                                     chunk_ids=("doc-1#chunk-002",))[0]
+        self.assertEqual(webpage_ref.document_id, "doc-1")
+        self.assertEqual(restored.records[0].metadata["parent_document_id"], "parent-paper")
+        self.assertEqual(webpage_ref.text, ref.text)
 
         with self.assertRaisesRegex(ValueError, "Unknown evidence chunk ID"):
             query_evidence(bundle, chunk_ids=("missing",))

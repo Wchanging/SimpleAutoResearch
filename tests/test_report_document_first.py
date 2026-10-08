@@ -79,8 +79,23 @@ class DocumentFirstTests(unittest.TestCase):
         self.assertEqual(result.report_body, resumed.report_body)
         self.assertEqual(len(labels), 3)
 
+        # Auto uses the same two composition paths, with a stable full-plan
+        # decision. Unknown or long plans preserve per-section recovery.
+        for target, expected in ((0, ['report-writer-results', 'report-writer-limits']),
+                                 (1000, ['report-writer-document']),
+                                 (1001, ['report-writer-results', 'report-writer-limits'])):
+            with self.subTest(target=target):
+                automatic = self.inputs(draft_scope='auto')
+                for section in automatic['memory'].section_plan:
+                    section.target_words = target
+                calls = []
+                run_report_agent(**automatic, client=self.client(calls))
+                self.assertEqual(calls, [*expected, 'report-document-reviewer'])
+
     def test_interrupted_drafting_keeps_completed_prefix_and_waits_for_whole_body(self):
-        kwargs, labels, saved = self.inputs(), [], []
+        kwargs, labels, saved = self.inputs(draft_scope='auto'), [], []
+        for section in kwargs['memory'].section_plan:
+            section.target_words = 1500
         def interrupt(row):
             saved.append(row)
             if len(row["sections"]) == 1:
@@ -641,7 +656,10 @@ class JointRevisionTests(unittest.TestCase):
                                 'heading': row['section']['heading'],
                                 'draft_markdown': ('Revised ' if revised else 'Original ') + row['section']['section_id']}
                                 for row in view['sections']]}
-                        if label in ('report-document-reviewer', 'report-document-verifier'):
+                        if label == 'report-document-verifier':
+                            return {'section_reviews': [{'section_id': row['section_id'], 'verdict': 'pass',
+                                'notes': 'Current section satisfies the supplied task.'} for row in view['sections']]}
+                        if label == 'report-document-reviewer':
                             return {'section_reviews': []}
                         raise AssertionError(label)
 
@@ -736,21 +754,16 @@ class JointRevisionTests(unittest.TestCase):
                     return {'sections': [{'section_id': row['section']['section_id'], 'heading': row['section']['heading'],
                         'draft_markdown': 'Reconciled ' + row['section']['section_id']}
                         for row in view['sections']]}
-                if label == 'report-document-finding-checker':
-                    assert [row['markdown'] for row in view['sections']] == ['Reconciled method', 'Reconciled result', 'Original scope']
-                    checks = {}
-                    for row in view['historical_findings_to_check']:
-                        checks.setdefault(row['section_id'], []).append({'finding_id': row['finding_id'], 'status': 'resolved',
-                            'explanation': 'Current candidate separates responsibilities.',
-                            'draft_quotes': draft_quotes(prompt, row['section_id'])})
-                    return {'section_reviews': [{'section_id': sid, 'verdict': 'pass', 'finding_checks': rows}
-                        for sid, rows in checks.items()]}
                 if label == 'report-document-verifier':
                     assert [row['markdown'] for row in view['sections']] == ['Reconciled method', 'Reconciled result', 'Original scope']
-                    return {'section_reviews': [{'section_id': 'result', 'verdict': 'revise_required',
+                    assert 'revision_concerns' not in view and not view['historical_findings_to_check']
+                    passes = [{'section_id': sid, 'verdict': 'pass',
+                        'notes': 'Current prose independently addresses organization against task and evidence.'}
+                        for sid in ('method', 'result', 'scope')]
+                    return {'section_reviews': [passes[0], passes[2], {'section_id': 'result', 'verdict': 'revise_required',
                         'findings': [{'finding_id': 'new-defect', 'type': 'style', 'severity': 'major',
                             'message': 'Candidate introduced an inconsistent transition.',
-                            'draft_quotes': draft_quotes(prompt, 'result')}]}]} if reject else {'section_reviews': []}
+                            'draft_quotes': draft_quotes(prompt, 'result')}]}]} if reject else {'section_reviews': passes}
                 raise AssertionError(label)
         return Client()
 
@@ -758,7 +771,7 @@ class JointRevisionTests(unittest.TestCase):
         labels, saved = [], []
         result = run_report_agent(**self.inputs(), client=self.client(labels), checkpoint_sink=lambda row: saved.append(copy.deepcopy(row)))
         self.assertEqual(labels, ['report-writer-document', 'report-document-reviewer',
-            'report-document-joint-reviser', 'report-document-finding-checker', 'report-document-verifier'])
+            'report-document-joint-reviser', 'report-document-verifier'])
         candidate = next(row for row in saved if any(event.get('drafts') for event in row['iterations']))
         self.assertEqual([row['draft_markdown'] for row in candidate['sections']], ['Original method', 'Original result', 'Original scope'])
         self.assertEqual([row.draft_markdown for row in result.sections], ['Reconciled method', 'Reconciled result', 'Original scope'])
@@ -808,9 +821,9 @@ class JointRevisionTests(unittest.TestCase):
                 response['section_reviews'] = response['section_reviews'][1:]
                 opinion = response['section_reviews'][0]['findings'][0]
                 opinion['draft_quotes'].extend(draft_quotes(prompt, 'method'))
-            if label == 'report-document-finding-checker':
-                self.assertEqual(len(view['historical_findings_to_check']), 1)
-                self.assertEqual(view['historical_findings_to_check'][0]['section_id'], 'result')
+            if label == 'report-document-verifier':
+                self.assertNotIn('revision_concerns', view)
+                self.assertFalse(view['historical_findings_to_check'])
             return response
 
         client.ask_json = ask
@@ -834,8 +847,8 @@ class JointRevisionTests(unittest.TestCase):
         self.assertEqual([row.draft_markdown for row in result.sections], ['Reconciled method', 'Reconciled result', 'Original scope'])
         self.assertEqual(prior, saved[-1])
 
-    def test_second_verification_resume_reuses_completed_old_opinion_check(self):
-        for action in ('document_joint_finding_check', 'document_joint_verify'):
+    def test_candidate_verification_resume_reuses_completed_inspection(self):
+        for action in ('document_joint_verify',):
             with self.subTest(action=action):
                 labels, saved = [], []
                 def interrupt(row):
@@ -846,7 +859,7 @@ class JointRevisionTests(unittest.TestCase):
                     run_report_agent(**self.inputs(), client=self.client(labels), checkpoint_sink=interrupt)
                 run_report_agent(**self.inputs(), client=self.client(labels), completed_checkpoint=saved[-1])
                 self.assertEqual(labels.count('report-document-joint-reviser'), 1)
-                self.assertEqual(labels.count('report-document-finding-checker'), 1)
+                self.assertNotIn('report-document-finding-checker', labels)
                 self.assertEqual(labels.count('report-document-verifier'), 1)
 
     def test_unaccepted_candidates_do_not_mix_or_reset_round_allowance(self):
@@ -876,8 +889,6 @@ class JointRevisionTests(unittest.TestCase):
         self.assertEqual(iterations[0].status, 'unavailable')
 
     def test_rejected_candidate_findings_are_history_not_original_manuscript_defects(self):
-        from simple_ar.report.editor import historical_opinion_handles
-        from simple_ar.report.schema import ReportFindingCheck
         sections = [ReportSectionDraft(section_id='method', heading='Method', draft_markdown='Original')]
         original = ReviewerFinding(finding_id='organization', section_id='method', type='style',
             severity='major', message='Clarify organization.')
@@ -886,10 +897,7 @@ class JointRevisionTests(unittest.TestCase):
         reviews = [ReportSectionReview(section_id='method', verdict='revise_required', findings=[original])]
         memory, history, iterations = ReportMemory(), [], []
         def inspect(candidate, prior):
-            if prior:
-                return [ReportSectionReview(section_id='method', verdict='pass', finding_checks=[
-                    ReportFindingCheck(finding_id=key[1], status='resolved', explanation='Organization corrected.',
-                        draft_quotes=['Candidate']) for key in historical_opinion_handles(prior)])]
+            self.assertIn(original, prior)
             return [ReportSectionReview(section_id='method', verdict='revise_required', findings=[candidate_issue])]
         edit_joint_document(memory=memory, config=ReportRuntimeConfig(max_review_iterations=1), sections=sections,
             iterations=iterations, reviews=reviews, all_findings=history, checkpoint=lambda: None,

@@ -50,7 +50,7 @@ class EditBudget:
 DEFAULT_EDIT_BUDGETS: dict[str, EditBudget] = {
     "normal": EditBudget(
         profile="normal",
-        max_files=2,
+        max_files=4,
         max_edits=4,
         max_old_chars=3000,
         max_new_chars=4000,

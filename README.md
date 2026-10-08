@@ -100,7 +100,13 @@ paths, interpreters, data and task limits belong in task configuration.
 [Advanced settings](docs/CONFIG_REFERENCE.md) are optional.
 
 For multiple providers or separate text/code models, use a [named model catalog](docs/CONFIG_REFERENCE.md#named-model-connections).
-Each profile owns its URL, model and credential reference; `simple-ar models` checks the local setup without sending a request.
+Copy [the catalog example](examples/model-profiles/models.toml) to a private location
+such as `.local/models.toml`, then set `SIMPLE_AR_MODELS_CONFIG` in `.env` to its
+absolute path. Configure it once: subsequent tasks share its default/text/code/image
+routes, or select `--model profile:NAME`. Each profile owns its URL, model and
+credential variable; keep the key values in `.env`. `simple-ar models` checks the
+local setup without sending a request. For reuse across projects, the default
+catalog location is `~/.config/simple-ar/models.toml`.
 
 ### 4. Start your own task
 

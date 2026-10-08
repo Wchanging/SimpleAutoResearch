@@ -87,7 +87,9 @@ class ReportRuntimeConfig(ReportModel):
     review_scope: Literal["section", "document"] = "section"
     # Explicit joint drafting shares one article context, but commits the same
     # section objects and leaves independent inspection to the existing editor.
-    draft_scope: Literal["section", "document"] = "section"
+    # Auto composes short planned documents jointly; longer/unsized plans use
+    # the existing section checkpoints and the same whole-document review.
+    draft_scope: Literal["section", "document", "auto"] = "section"
     # Evidence already has bounded retrieval windows. Do not impose a second
     # hidden character cap on the assembled request: the client and session
     # token ledger own capacity/cost. Experts may opt into a smaller window.
@@ -117,8 +119,8 @@ class ReportRuntimeConfig(ReportModel):
     def require_document_review(self) -> ReportRuntimeConfig:
         if self.review_scope == "document" and not self.document_review:
             raise ValueError('review_scope="document" requires document_review=true.')
-        if self.draft_scope == "document" and (self.review_scope != "document" or self.source_strategy != "full"):
-            raise ValueError('draft_scope="document" requires review_scope="document" and source_strategy="full".')
+        if self.draft_scope in {"document", "auto"} and (self.review_scope != "document" or self.source_strategy != "full"):
+            raise ValueError('draft_scope="document" or "auto" requires review_scope="document" and source_strategy="full".')
         return self
 
 

@@ -946,6 +946,33 @@ class ResearchFoundationTests(unittest.TestCase):
         kept_ids = {paper.id for paper in kept}
         self.assertIn("overview", kept_ids)
         self.assertTrue(any(row["paper_id"] == "overview" and row["reason"] == "facet_coverage" for row in decisions))
+        # Different focused routes can share one facet. Preserve the second
+        # query rather than spending both slots on the dominant lexical family.
+        routes = [
+            RetrievalCandidate(paper, "openalex", query, index, 1, "method")
+            for index, (paper, query) in enumerate([
+                (method_a, "llm agents software engineering benchmark"),
+                (method_b, "llm agents software engineering benchmark"),
+                (overview, "multi-agent collaboration"),
+            ], start=1)
+        ]
+        kept, decisions = screen_retrieval_candidates(routes, max_documents=2, priority_facets=["method"])
+        self.assertIn("overview", {paper.id for paper in kept})
+        self.assertTrue(any(row["paper_id"] == "overview" and row["reason"] == "query_coverage" for row in decisions))
+        # One paper can satisfy several query/facet memberships. Deduplicating
+        # its metadata must not forget those memberships or reserve extra slots
+        # merely because the same query has a different word order.
+        routes = [
+            RetrievalCandidate(method_a, "openalex", "software engineering agents", 1, 1, "method"),
+            RetrievalCandidate(method_a, "arxiv", "agents engineering software", 2, 1, "overview"),
+            RetrievalCandidate(method_b, "arxiv", "engineering software agents", 3, 1, "overview"),
+            RetrievalCandidate(overview, "openalex", "multi-agent collaboration", 4, 1, "method"),
+        ]
+        kept, decisions = screen_retrieval_candidates(routes, max_documents=2,
+                                                       priority_facets=["method", "overview"])
+        self.assertEqual({paper.id for paper in kept}, {method_a.id, overview.id})
+        self.assertEqual(next(row for row in decisions if row["paper_id"] == method_a.id
+                              and row["decision"] == "keep")["matched_facets"], ["method", "overview"])
 
     def test_negative_scope_acronyms_penalize_out_of_scope_metadata(self) -> None:
         paper = Paper(

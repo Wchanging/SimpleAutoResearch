@@ -4,7 +4,73 @@
 
 本文用于查命令语法与操作效果。首次使用看[使用指南](USAGE_zh.md)，TOML 字段看[配置参考](CONFIG_REFERENCE_zh.md)。`simple-ar --help` 及各命令 `--help` 显示当前安装版本的选项。
 
+## 成果复用与概念图
+
+独立方法图/架构图使用 `simple-ar start --kind figure --goal "绘制观测→比较→证据的关系"`。
+无需制造假数据，可选 `--data-file` 提供真实表格；复用脚本项目与 CodeTask，交付 PNG、
+可编辑矢量 SVG、设计记录和解释。结构检查不代表语义或视觉质量通过；此入口暂不直接解释论文材料。
+
+引导代码任务默认允许一轮技术修复。未指定进程限额时，`research-session` 为首次验证及已配置
+的修复复验预留额度；用户明确的限额（包括零）仍优先。修复额度不授权安装、改变科研协议
+或无限重试。
+
+`simple-ar start --from-session SESSION --reuse code_project --goal "调整布局"`
+在新隔离任务中继续已验证的代码/绘图项目，保留登记的编辑范围、保护文件、验证命令和补丁策略，
+不改原交付。此选择不能混用写作材料选择，也不能同时覆盖项目、编辑范围或验证命令。
+
+`simple-ar results SESSION` 列出当前会话登记的可复用成果。
+`simple-ar start --from-session SESSION --reuse data_analysis --goal "解释性能与开销的权衡"`
+可直接用分析包写作；`--reuse report` 或 `summary` 复用相应成果，可重复选择。
+`--reuse code_analysis` 复用已验证代码分析项目。新生成的登记交付包包含脚本、输入数据、
+解释、JSON 结果和 PNG/矢量导出，可选正文图并保留完整链接附件；复制脚本输出不代表
+本次独立数值复算。未登记交付包的旧会话仍只复用解释与 JSON。
+这是新写作任务，不是中断恢复；原会话不修改、不重跑。报告携带已登记原文包、实验依据与引用身份，
+保存的段落可继续读取，不重新下载；
+引用元数据不等于原文或本次重新核验，正文仍按草稿处理；分析包沿用源数据复算。
+
+需要重组论证或章节结构时，用 `--reuse report --goal "重组论证与章节结构"` 新建自适应
+写作任务，复用登记证据，不改原任务已接受的大纲；普通修订保留原大纲。
+生成分析/绘图项目以 `analysis.py` 为入口，辅助模块和可编辑布局可放入 `src/`，
+该目录随脚本和数据进入可搬迁交付包。
+
+`simple-ar image --config models.toml --prompt "方法概览" --output figures/v1`
+使用命名目录的 `image` 路由；可用 `--model profile:NAME` 选择连接。
+编辑时加 `--input figures/v1/image.png`，并选新输出目录，例如 `figures/v2`。
+原图不覆盖，版本保存请求和单次调用账本；相同已完成请求恢复不再次调用。
+失败或中断不自动重发。通用 `openai_images` 要求提供商返回 base64 图片，拒绝 URL-only 结果。
+显式 `cctq_images_async` 在已有 task ID 时恢复同任务轮询，认证下载配置同 origin 的
+`files/0`，不重复 POST；没有保存 ID 的请求不自动重提。该适配要求提供商支持相应异步协议，
+不自动切换为其他 API 或模型。
+已记录完成的任务直接恢复文件下载；可调整恢复的超时和 HTTP 协议，不改变生成内容、原请求记录或重新提交。
+编辑连接须声明 `image_edit`；位图概念图不是科学测量或分层矢量源文件。
+
+`simple-ar image-review --config models.toml --input figures/v1/image.png --goal "检查标签、箭头和多余文字" --output figures/review-v1`
+通过独立 `vision` 路由检查实际图片；可用 `--model profile:NAME` 选择其他视觉连接，
+重复 `--input` 提供最多四张图。保存源图副本、原始响应、`review.json` 和 `feedback.md`。
+相同完成请求恢复不调用 API；已有原始响应可离线重新解析。输入改变须使用新输出版本，
+未保存响应的中断请求不盲目重发。反馈可用于原代码项目或新 `image --input` 编辑，
+审阅命令本身不改图，也不证明科学正确性。
+
+代码分析/自定义绘图可用：
+`simple-ar start --kind data_analysis --scripted --data-file measurements.csv --goal "比较性能开销并做三面板图"`。
+该路径需要模型和普通执行确认，生成小项目后复用 CodeTask，数据和交付检查器受保护。
+交付脚本、计算 JSON 和解释；无图分析不要求占位图，outputs/中的多张命名图与表格均保留。
+同名 PNG/SVG/PDF 按同图导出登记；不安装依赖。
+文件检查不等于统计正确性，工作区隔离不是 OS/网络沙箱，宜在合适环境运行。
+内部沿用 `bug_fix` 执行路径，不新增运行时；确定性表格路径保持不变。
+对话可为超出预设的自定义统计或组合图提议此路径，经确认后进入；无需用户手选
+`--scripted` 或预填 `value_column`。数据语义不明仍需澄清，原用户回复与单位保留在
+`task.md`。该路径已含解释，不与 `--with-report`、`--material`、`--project` 混用；
+入口路由已实现不等于真实图形交付验收成功。
+新建 scripted 分析 scaffold 使用既有 `large` 补丁档（新文本块最多16000字符），执行前明示；
+普通项目修复额度不变，完整新分析脚本不再套用 normal 的4000字符块上限，不据此宣称真实图已成功。
+
 ## 引导入口
+
+已验证的复现项目可用 `start --kind reproduction --from-session SESSION --reuse code_project
+--document PAPER --goal "检查就绪并重复有限测量"` 生成隔离任务，继承单命令协议、输出指标选择器、
+编辑范围、检查器和解释器，不重新创建已有适配器或安装依赖。执行前确认显示的范围。
+配对或扩展协议继续用原会话恢复；要改变测量条件，应另建任务。
 
 `simple-ar models [--config PATH] [--profile NAME --purpose text|code|vision|image]`
 本地检查命名连接和凭据是否配置，不调用 API、不显示密钥。
@@ -18,6 +84,17 @@ uv run simple-ar start --kind writing --material notes.md --model env
 
 `start` 准备普通任务，再交给 `research-session` 执行。
 
+复现对话在读取项目源码与命令依据后，可提出明确的新 Python 适配文件范围和独立验证命令。
+用户确认后写入原 `allow` / `validate` 配置，不覆盖已明确给出的范围或命令；
+提案本身不执行代码，也不代表适配器已经实现。
+可明确选择任务 venv，在同一隔离工作区先准备授权依赖，再由同一解释器改码、独立验证
+和测量；安装失败即停止。基础解释器只用于创建任务环境，不额外指定 `check-argv`。
+授权准备时才在隔离工作区初始化明确的新文件，再建立索引；任务输出须放在作者项目外。
+没有创建声明的普通 `--allow` 路径仍须已经存在。
+
+在线调研在模型阅读发现明确缺口后，可在自动扩展开启时追加一轮搜索、取得与阅读，
+沿用原有限额和已保存证据。`--fulltext` 仍决定远端原文权限；找到摘要不等于取得原文支持。
+
 | 选项 | 适用范围 | 用途 |
 | --- | --- | --- |
 | `--kind`、`--goal`、`--output-root` | 全部 | 功能、任务、输出位置 |
@@ -26,21 +103,54 @@ uv run simple-ar start --kind writing --material notes.md --model env
 | `--chat`、`--resume-setup PATH` | 模型辅助设置 | 澄清任务或恢复设置草稿 |
 | `--sources materials\|search`、`--document PATH`、`--fulltext`、`--max-cited-sources N` | 调研 | 来源访问、可重复论文、全文与引用上限 |
 | `--material PATH`、`--template` | 写作 | 可重复笔记/结果与报告形式 |
-| `--project`、`--validate`、`--allow PATTERN`、`--project-python PATH` | 改码 | 项目、验证、可重复范围、已有解释器 |
+| `--project`、`--validate`、`--allow PATTERN`、`--project-python PATH` | 改码 / 显式复现 adapter | 项目、独立验证、可重复修改范围、已有解释器 |
 | `--data-path PATH` | 改码/复现 | 可重复数据文件/目录，不是表格分析输入 |
 | `--hypothesis`、`--dataset`、`--expected-outcome`、`--metric` | 复现 | 结论、条件、输出指标 |
 | `--cwd`、`--timeout-sec`、`--output-files JSON` | 复现 | 目录、超时、登记输出文件 |
+| `--metric-sources JSON` | 复现 | 从登记文件按 JSON 路径或 CSV/TSV 唯一行取指标，不隐式汇总 |
 | `--environment current\|venv`、`--requirements PATH`、`--install-project` | 复现 | 明确依赖准备 |
 | `--check-argv JSON` | 复现 | 明确的测量前短检查；不猜测命令，检查指标不进入测量结果 |
 | `--command ARGV...` | 复现 | 实际命令，必须最后提供 |
 | `--with-report` | 数据分析 | 附加写作，需要模型 |
 
-功能为 `survey`、`bug_fix`、`reproduction`、`writing`、`data_analysis`。结构化设置在执行前不调用模型；chat 设置本身需模型和终端，不能与 `--prepare-only` 同用。
+作者输出参数可用字面量 `{output_dir}` 绑定本次运行目录，不经 shell 展开。
+文件指标选择格式见[配置参考](CONFIG_REFERENCE_zh.md)。
+
+功能为 `survey`、`bug_fix`、`reproduction`、`writing`、`data_analysis`、`figure`。结构化设置在执行前不调用模型；chat 设置本身需模型和终端，不能与 `--prepare-only` 同用。
 
 改码对话可只读查看项目文本并提出带原文依据的验证 argv；用户确认后序列化原 CodeTask
 验证命令，保留明确的 `--validate`。设置阶段不运行命令或安装依赖，普通引导仍确认修改范围与执行。
 
-改码默认当前解释器；`--project-python` 保留已有 venv 入口，不创建或安装环境。复现依赖准备是另一项显式选择。
+改码默认当前解释器；`--project-python` 保留已有 venv 入口，不创建或安装环境。复现也可用它选择正式命令与短检的解释器；明确选择 `--environment venv` 时，它指定新任务环境的基础解释器。对话可经确认采用用户原话提供的已有解释器路径，不从源码说明中自行选择。
+
+复现默认仍走固定命令路径。已有 Python 项目可显式组合 `--project`、可重复的
+`--allow PATTERN` 和 `--validate "…"`（已调查的项目检查命令），授权限定范围的结果
+adapter 或入口衔接。验证命令必须不同于最后提供的正式测量 `--command`；验证输出
+不是科学测量。CodeTask 仅在隔离 worktree/copy 的允许范围内修改，保护测试、秘密文件
+和已登记的项目内数据；验证通过后才在该项目中运行正式命令。若给 `--cwd`，须与
+`--project` 相同。可使用 current Python 或已有 `--project-python` 解释器；选择
+`--environment venv` 时，可在同一隔离工作区先安装明确授权的依赖/项目，再由同一解释器
+验证和测量，而非在基础解释器中测量；不能添加额外 `--check-argv`。这不授权改变方法、划分或评价
+条件，工作区隔离也不是 OS 沙箱；不代表任意论文自主准备或真实论文复现已验收。
+
+对话可根据已读论文或项目材料的引文提议取得公开项目/数据/补充材料，每项须独立确认。
+项目支持直接 ZIP 或 GitHub 仓库默认分支快照，不是固定 commit；数据保留单个下载文件，
+不自动展开。最多3项资产，默认每项下载20 MiB，项目 ZIP 展开最多80 MiB、5000项。
+对话启动前可用 `--asset-max-mb N` 显式选择项目/数据下载容量，ZIP展开上限为 `4*N` MiB；
+确认时展示容量，获取记录保存实际采用的上限，恢复不重新下载。ZIP格式按实际归档检查，
+不要求URL以`.zip`结尾。这个选项本身不授权下载、
+安装或执行；补充文档仍使用独立的文档容量限制。
+仅接受不带 query 的公开 HTTPS URL；取得不授权执行或安装依赖，也不是安全沙箱或完整防 SSRF。
+补充材料可为官方说明页或论文，复用文档预览和按问题补读；单次公开GET不跟随重定向，
+PDF许可独立确认，同时计入资产/文档限额，保留出处与下载账本，不作为执行命令授权。
+取得路径已实现，但完整真实复现验收仍未通过。
+
+论文链接可用 `start --kind reproduction --chat --document https://… --goal "…"`。
+先确认取得，再向模型提供带来源的摘录；PDF下载/原文件保留另需许可，或显式 `--fulltext`。
+初次预览最多8000字符、PDF前3页，不代表读懂全文。需要后文方法或说明时，对话可对已提供的
+文档或材料提出按问题只读补查；扩大本地解析须确认，最多40页PDF、每文件20 MiB，只发送
+有界命中片段。恢复复用保存的文档包与取得记录，不重复解析或取得；
+普通 `--prepare-only` 不下载链接。仓库与执行建议仍须已读原文依据和分别确认。
 
 ### 已有数据分析（无需 API）
 
@@ -102,7 +212,7 @@ uv run simple-ar project-info --project ./project --data-path ./data \
 | --- | --- | --- |
 | `--report-document-review` / `--no-report-document-review` | `--document-review` / `--no-document-review` | 开启或关闭整稿审阅 |
 | `--report-review-scope section\|document` | `--review-scope section\|document` | 逐节审阅或正文完成后整稿审阅 |
-| `--report-draft-scope section\|document` | `--draft-scope section\|document` | 分节起草或联合起草 |
+| `--report-draft-scope section\|document\|auto` | `--draft-scope section\|document\|auto` | 分节、联合，或仅在完整定长计划不超过 2,000 词时联合起草 |
 | `--report-outline-strategy auto\|template\|adaptive` | `--outline-strategy auto\|template\|adaptive` | 模板或证据驱动的章节规划 |
 | `--report-data-tables linked\|full` | `--data-tables linked\|full` | 链接数据记录，或同时附摘要表 |
 | `--max-document-review-prompt-chars N` | `--max-document-review-prompt-chars N` | 可选的完整审阅请求字符上限 |
@@ -126,7 +236,8 @@ uv run simple-ar report-export --report-dir 报告attempt目录 --output runs/ac
 
 输入目录须包含保留引用键的 `report_body.md`；有引用时还需 `references.bib`。
 Pandoc 转换已有正文，不调用模型或重跑实验。目录内的图复制到工程，SVG 转换需
-`rsvg-convert`；不抓取远程图片。可用 `--title` 指定面向读者的标题。
+`rsvg-convert`；不抓取远程图片。正文使用 PNG 时仍保留已登记的矢量导出。
+可用 `--title` 指定面向读者的标题。
 每次选新的输出目录，保留已有导出及人工编辑。
 
 `source.md` 与 TeX 使用包内图路径，可搬迁整个目录；可编辑 SVG 与转换后的图一同保留。

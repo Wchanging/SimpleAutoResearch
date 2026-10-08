@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -30,15 +31,16 @@ class SemanticScholarSearchClient:
     """Small Semantic Scholar Graph API search client.
 
     Args:
-        api_key: Optional Semantic Scholar API key.
+        api_key: Explicit key; None reads SEMANTIC_SCHOLAR_API_KEY, empty means anonymous.
         timeout_sec: Request timeout in seconds.
     """
 
-    def __init__(self, *, api_key: str = "", timeout_sec: int = _TIMEOUT_SEC) -> None:
-        self.api_key = api_key
+    def __init__(self, *, api_key: str | None = None, timeout_sec: int = _TIMEOUT_SEC) -> None:
+        self.api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "") if api_key is None else api_key
         self.timeout_sec = timeout_sec
 
-    def search(self, query: str, *, max_results: int = 5) -> list[Paper]:
+    def search(self, query: str, *, max_results: int = 5,
+               year_range: tuple[int, int] | None = None) -> list[Paper]:
         """Search Semantic Scholar and return normalized paper metadata."""
         query = query.strip()
         if not query:
@@ -46,8 +48,8 @@ class SemanticScholarSearchClient:
         if max_results < 1:
             raise SemanticScholarSearchError("max_results must be at least 1")
 
+        url = self._url(query, max_results, year_range=year_range)
         _respect_rate_limit(0.3 if self.api_key else _REQUEST_GAP_SEC)
-        url = self._url(query, max_results)
         headers = {"Accept": "application/json"}
         if self.api_key:
             headers["x-api-key"] = self.api_key
@@ -57,12 +59,18 @@ class SemanticScholarSearchClient:
             raise SemanticScholarSearchError("Semantic Scholar response did not contain a data list")
         return [_paper_from_row(item) for item in results if isinstance(item, dict)]
 
-    def _url(self, query: str, max_results: int) -> str:
+    def _url(self, query: str, max_results: int, *, year_range: tuple[int, int] | None = None) -> str:
         params = {
             "query": query,
             "limit": str(min(max_results, _MAX_RESULTS)),
             "fields": _FIELDS,
         }
+        if year_range is not None:
+            if (not isinstance(year_range, tuple) or len(year_range) != 2 or
+                    any(type(year) is not int for year in year_range) or
+                    not 1 <= year_range[0] <= year_range[1] <= 9999):
+                raise SemanticScholarSearchError("year_range requires ordered integer publication years.")
+            params["year"] = f"{year_range[0]}-{year_range[1]}"
         return f"{_BASE_URL}?{urllib.parse.urlencode(params)}"
 
     def _request_json(self, url: str, headers: dict[str, str]) -> dict[str, Any]:

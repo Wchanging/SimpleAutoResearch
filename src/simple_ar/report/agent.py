@@ -13,7 +13,7 @@ from simple_ar.research.documents.ingest import DocumentBundle
 from simple_ar.report.projection import apply_report_bibliography, bibliography_planning_views
 from simple_ar.report.assembler import assemble_report_sections
 from simple_ar.report.data_delivery import supplied_data_delivery
-from simple_ar.report.document_plan import ARGUMENT_PLAN_SCHEMA, ARGUMENT_PLANNING_RULES, LENGTH_REQUEST_RULE, LENGTH_REQUEST_SCHEMA, normalize_section_heading as _clean_outline_heading, outline_section_keys, resolve_argument_plan, resolve_document_plan, supplied_figure_sources, visual_requirements
+from simple_ar.report.document_plan import ARGUMENT_PLAN_SCHEMA, ARGUMENT_PLANNING_RULES, LENGTH_REQUEST_RULE, LENGTH_REQUEST_SCHEMA, normalize_section_heading as _clean_outline_heading, outline_section_keys, resolve_argument_plan, resolve_document_plan, supplied_figure_sources, validate_length_request, visual_requirements
 from simple_ar.report.templates import drafting_template_guidance, planning_template_guidance, reviewing_template_guidance, is_builtin_template
 from simple_ar.report.editor import (
     DOCUMENT_CONTROL_FINDING_TYPES, document_revision_limit,
@@ -27,7 +27,7 @@ from simple_ar.report.review_evidence import (
 )
 from simple_ar.report.narrative import (
     DERIVED_CONTEXT_STATUS, REVIEW_OPINIONS_STATUS,
-    document_plan_context,
+    document_plan_context, outline_evidence_labels, map_evidence_labels,
     _compact_execution_context,
     _compact_execution_results,
     _compact_experiment_plan,
@@ -299,7 +299,14 @@ def run_report_agent(
             requests=[ReportToolCall.model_validate(row) for row in initial_requests] if initial_requests else None,
             gateway=gateway, iterations=iterations, all_results=all_tool_results, checkpoint=checkpoint)
             if completed_count < len(current.section_plan) and not legacy_reads else [])
-        if (config.draft_scope == "document" and len(current.section_plan) > 1
+        # A planning heuristic, not a token guarantee. Explicit document/section
+        # choices and their historical checkpoints keep their original behavior.
+        # An unsized plan uses recoverable sections rather than guessing its size.
+        joint_draft = config.draft_scope == "document" or (
+            config.draft_scope == "auto" and bool(current.section_plan)
+            and all(row.target_words > 0 for row in current.section_plan)
+            and sum(row.target_words for row in current.section_plan) <= 2000)
+        if (joint_draft and len(current.section_plan) > 1
                 and pending_draft is None and completed_count < len(current.section_plan)):
             remaining = _draft_sequence(current.section_plan)[completed_count:]
             _emit(emit, f"Writer jointly drafting {len(remaining)} remaining section(s).")
@@ -631,6 +638,7 @@ def _edit_whole_document(
         checkpoint()
 
     def checked_document_reviews(label: str, *, historical_findings: list[ReviewerFinding] | None = None,
+                                 complete_candidate: bool = False,
                                  candidate_sections: list[ReportSectionDraft] | None = None) -> list[ReportSectionReview]:
         inspected = sections if candidate_sections is None else candidate_sections
         requested_context = list(pending_contexts.get(label, []))
@@ -702,6 +710,7 @@ def _edit_whole_document(
                         execution_summary=_compact_execution_results(context.results),
                         execution_evidence=report_execution_evidence(context), supplementary_evidence=all_tool_results,
                         requested_context=requested_context, historical_findings=historical_findings,
+                        complete_candidate=complete_candidate,
                         on_invalid_response=retain_rejection, format_correction=correction,
                         on_validated_subset=capture_validated_subset,
                         metric_summary=_prompt_metrics(memory, detail="summary"),
@@ -890,7 +899,7 @@ def _edit_whole_document(
     unsent = coalesce_document_reviews([review for review in reviews if review.section_id not in continuations])
     reviews = [*(request for _, request in continuations.values()),
                *sorted(unsent, key=priority, reverse=True)]
-    if config.draft_scope == "document" and not continuations:
+    if config.draft_scope in {"document", "auto"} and not continuations:
         def joint_draft(event: ReportIterationRecord, baseline: list[ReportSectionDraft]) -> list[ReportSectionDraft]:
             requests = list({call.model_dump_json(): call for review in event.section_reviews
                 for call in review.context_requests[:max(0, config.max_backtracking_calls)]}.values())
@@ -906,8 +915,11 @@ def _edit_whole_document(
                     all_results=all_tool_results, checkpoint=checkpoint))
 
         def joint_inspect(candidate: list[ReportSectionDraft], prior: list[ReviewerFinding] | None) -> list[ReportSectionReview]:
-            return checked_document_reviews("report-document-finding-checker" if prior else "report-document-verifier",
-                historical_findings=prior, candidate_sections=candidate)
+            rows = checked_document_reviews("report-document-verifier",
+                complete_candidate=True, candidate_sections=candidate)
+            if {row.section_id for row in rows} != {row.section_id for row in candidate}:
+                raise LLMResponseError("Candidate inspection is incomplete; retain the draft without adopting it.")
+            return rows
 
         edit_joint_document(memory=memory, config=config, sections=sections, iterations=iterations,
             reviews=reviews, all_findings=all_findings, checkpoint=checkpoint,
@@ -1121,6 +1133,9 @@ def _maybe_adapt_outline(
         except (LLMError, ValidationError, ValueError, TypeError) as exc:
             errors.append(str(exc))
             rejected_response = getattr(exc, "response", None)
+            if isinstance(exc, LLMError) and not isinstance(exc, LLMResponseError):
+                _emit(emit, "Outline provider request failed; transport retries belong to the model connection.")
+                break
             if attempt == 1:
                 _emit(emit, f"Outline planner did not yield a usable plan; retrying once. {exc}")
             else:
@@ -1188,6 +1203,9 @@ def _resolve_document_plan(memory: ReportMemory, *, config: ReportRuntimeConfig,
                        if memory.outline_planning.get("argument_plan") else None),
     )
     planning = dict(memory.outline_planning)
+    if planning.get("rejected_length_request"):
+        plan.notes.append("The planner's length interpretation was rejected, not the original task. "
+                          "Follow and review the original length/conciseness request; no numerical contract was inferred.")
     request = planning.pop("length_request", None)
     if request is not None:
         if context is None:
@@ -1225,13 +1243,16 @@ def _plan_topic_specific_outline(
     if not (memory.survey_contract.get("enabled") and is_survey_report(
         template_name=template.name, style=config.style, report_mode=context.report_mode,
     )):
+        payload, source_labels = outline_evidence_labels(_outline_source_context(
+            evidence_outline_context(context, memory, config, retry=retry, retry_error=retry_error,
+                rejected_response=rejected_response, template=template), front_matter, config=config),
+            memory.source_handles)
         response = client.ask_json(
             OUTLINE_PLANNER_SYSTEM,
-            _json_prompt(_outline_source_context(
-                evidence_outline_context(context, memory, config, retry=retry, retry_error=retry_error,
-                    rejected_response=rejected_response, template=template), front_matter, config=config)),
+            _json_prompt(payload),
             label="report-outline-planner-retry" if retry else "report-outline-planner",
         )
+        response = map_evidence_labels(response, source_labels)
         sections = _evidence_outline_sections(response, memory=memory, config=config)
         return _validated_outline_delivery(response, sections=sections, context=context, memory=memory, config=config)
     response = client.ask_json(
@@ -1388,7 +1409,17 @@ def _validated_outline_delivery(
         if intent.view == "supplied-data" and intent.figure_paths is not None:
             if set(intent.figure_paths) - inventory.get(documents.get(intent.evidence_handles[0]), set()):
                 raise _RejectedOutline(ValueError("figure_paths must come from the registered analysis inventory"), response)
-    budgeted = budget_document_plan(context, memory, config, preview_plan, response.get("length_request"))
+    # Optional model annotations are not authoritative user constraints. Keep
+    # useful organization if this annotation is invalid, without inventing or
+    # silently adopting a quota. Valid but infeasible budgets still fail below.
+    rejected_length = None
+    try:
+        length_request = validate_length_request(response.get("length_request"),
+            objective=report_objective(context, memory))
+    except ValueError as exc:
+        length_request = None
+        rejected_length = {"proposal": response.get("length_request"), "reason": str(exc)}
+    budgeted = budget_document_plan(context, memory, config, preview_plan, length_request or None)
     request = {key: budgeted.length_budget[key] for key in
         ("unit", "scope", "request_quote", "constraint", "min_words", "max_words", "target_words")
         if key in budgeted.length_budget} if budgeted.length_budget else None
@@ -1401,6 +1432,7 @@ def _validated_outline_delivery(
     return sections, {"visual_candidates": bound_visuals, "title": title.strip(),
         **({"argument_plan": argument.model_dump(mode="json")} if argument else {}),
         **({"length_request": request} if request else {}),
+        **({"rejected_length_request": rejected_length} if rejected_length else {}),
         **({"source_notes": notes} if notes else {}),
         **({"context_requests": [row.model_dump(mode="json") for row in reads]} if reads else {})}
 

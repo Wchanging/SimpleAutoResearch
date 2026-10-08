@@ -13,6 +13,7 @@ from simple_ar.core.capabilities import ArtifactRef, ArtifactStore, AttemptManif
 from simple_ar.experiment.execution.backend import RunRequest
 from simple_ar.experiment.execution.outputs import (
     MAX_OUTPUT_BYTES, capture_outputs, output_files, read_output_window,
+    metric_sources, extract_file_metrics,
 )
 from simple_ar.research.experiment import ExperimentRequest, run_experiment_capability
 from simple_ar.report.execution_evidence import report_execution_evidence
@@ -24,6 +25,128 @@ from simple_ar.report.writing import ReportWritingRequest, run_report_writing_ca
 
 
 class ExperimentOutputTests(unittest.TestCase):
+    def test_file_metric_selectors_validate_before_execution(self):
+        schema = {"output_files": {"raw": "raw.json", "table": "raw.csv"}}
+        valid = {"coverage": {"output": "raw", "path": ["rows", 0, "coverage"]},
+                 "error": {"output": "table", "column": "error", "match": {"method": "RCP"}}}
+        self.assertEqual(metric_sources({**schema, "metric_sources": valid}), valid)
+        self.assertEqual(metric_sources(schema), {})
+        invalid = [[], {"output": "missing", "path": ["x"]},
+                   {"output": "raw", "path": []}, {"output": "raw", "path": "coverage"},
+                   {"output": "raw", "path": [True]}, {"output": "raw", "path": [-1]},
+                   {"output": "raw", "path": ["x"], "column": "x"},
+                   {"output": "table", "column": "error"},
+                   {"output": "table", "column": "error", "match": {"x": None}},
+                   {"output": "table", "column": "error", "match": {"x": float("nan")}}]
+        with tempfile.TemporaryDirectory() as directory:
+            context = CapabilityContext(ArtifactStore(Path(directory)), AttemptManifest("a"))
+            for source in invalid:
+                request = ExperimentRequest(RunRequest(["unused"], Path(directory), 5),
+                    result_schema={**schema, "metric_sources": {"coverage": source}})
+                with self.subTest(source=source), patch("simple_ar.research.experiment.run_experiment") as run:
+                    with self.assertRaises(ValueError):
+                        run_experiment_capability(context=context, request=request)
+                    run.assert_not_called()
+
+    def test_file_metric_extraction_is_explicit_finite_and_unambiguous(self):
+        cases = [
+            ("json", '{"rows":[{"coverage":0.9}]}', {"path": ["rows", 0, "coverage"]}, 0.9),
+            ("csv", 'method,error\nother,2\nRCP,0.2\n', {"column": "error", "match": {"method": "RCP"}}, 0.2),
+            ("tsv", 'seed\terror\n1\t0.3\n', {"column": "error", "match": {"seed": 1}}, 0.3),
+            ("json", '{"x":true}', {"path": ["x"]}, None),
+            ("json", '{"x":"0.2"}', {"path": ["x"]}, None),
+            ("json", '{"x":NaN}', {"path": ["x"]}, None),
+            ("json", '{"x":Infinity}', {"path": ["x"]}, None),
+            ("json", '{"x":1e999}', {"path": ["x"]}, None),
+            ("json", '{"x":1,"nested":{"a":1,"a":2}}', {"path": ["x"]}, None),
+            ("json", '{"x":[]}', {"path": ["x", 0]}, None),
+            ("json", '{"x":1}', {"path": ["absent"]}, None),
+            ("csv", 'method,error\nRCP,1\nRCP,2\n', {"column": "error", "match": {"method": "RCP"}}, None),
+            ("csv", 'method,error\nother,1\n', {"column": "error", "match": {"method": "RCP"}}, None),
+            ("csv", 'error,error\n1,2\n', {"column": "error", "match": {}}, None),
+            ("csv", 'error\nInf\n', {"column": "error", "match": {}}, None),
+            ("csv", 'error\nNaN\n', {"column": "error", "match": {}}, None),
+            ("csv", 'error\ntrue\n', {"column": "error", "match": {}}, None),
+            ("csv", 'method,error\nRCP\n', {"column": "error", "match": {}}, None),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory))
+            for suffix, text, selector, expected in cases:
+                with self.subTest(text=text):
+                    filename = f"raw.{suffix}"
+                    (store.root / filename).write_text(text, encoding="utf-8")
+                    schema = {"output_files": {"raw": filename},
+                              "metric_sources": {"metric": {"output": "raw", **selector}}}
+                    rows, _ = capture_outputs(store, store.root, output_files(schema))
+                    metrics, locations, issues = extract_file_metrics(store, rows, metric_sources(schema), {})
+                    if expected is None:
+                        self.assertEqual(metrics, {})
+                        self.assertEqual(issues[0]["severity"], "error")
+                        self.assertEqual(locations["metric"]["status"], "failed")
+                    else:
+                        self.assertEqual(metrics, {"metric": expected})
+                        self.assertEqual(issues, [])
+                        self.assertEqual(locations["metric"]["artifact"], filename)
+                        if suffix != "json":
+                            self.assertGreaterEqual(locations["metric"]["data_row"], 1)
+            sources = {"metric": {"output": "raw", "path": ["x"]}}
+            (store.root / "raw.json").write_text('{"padding":"' + "x" * 3000 + '","x":0.7}')
+            rows, _ = capture_outputs(store, store.root, {"raw": "raw.json"})
+            self.assertTrue(rows[0]["preview"]["truncated"])
+            self.assertEqual(extract_file_metrics(store, rows, sources, {})[0], {"metric": 0.7})
+            self.assertEqual(extract_file_metrics(store, rows, sources, {"metric": 0.7})[2], [])
+            self.assertEqual(extract_file_metrics(store, rows, sources, {"metric": 1})[0], {})
+            self.assertTrue(extract_file_metrics(store, rows, sources, {"metric": 1})[2])
+            for payload in (None, b"x" * (MAX_OUTPUT_BYTES + 1), b"\xff"):
+                path = store.root / "raw.json"
+                path.unlink(missing_ok=True)
+                if payload is not None:
+                    path.write_bytes(payload)
+                rows, _ = capture_outputs(store, store.root, {"raw": "raw.json"})
+                self.assertTrue(extract_file_metrics(store, rows, sources, {})[2])
+
+    def test_native_file_metrics_reach_canonical_guard_without_stdout_or_failure_promotion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "raw.json").write_text('{"coverage":123}')  # Never read cwd/previous output.
+            for label, stdout, exitcode, write, expected in (
+                    ("native", "", 0, True, "completed"),
+                    ("agreement", "coverage=0.9", 0, True, "completed"),
+                    ("conflict", "coverage=0.1", 0, True, "failed"),
+                    ("failed_process", "", 2, True, "failed"),
+                    ("missing_file", "coverage=0.9", 0, False, "failed")):
+                with self.subTest(label=label):
+                    store = ArtifactStore(root / label)
+                    script = ("import os,sys; from pathlib import Path; "
+                              "p=Path(os.environ['SIMPLE_AR_OUTPUT_DIR']); "
+                              "p.mkdir(parents=True,exist_ok=True); "
+                              + ("(p/'raw.json').write_text('{\"coverage\":0.9}'); " if write else "")
+                              + (f"print({stdout!r}); " if stdout else "")
+                              + f"sys.exit({exitcode})")
+                    request = ExperimentRequest(RunRequest([sys.executable, "-c", script], root, 5),
+                        result_schema={"primary_metric": "coverage", "required_metrics": ["coverage"],
+                            "output_files": {"raw": "raw.json"},
+                            "metric_sources": {"coverage": {"output": "raw", "path": ["coverage"]}}})
+                    result = run_experiment_capability(
+                        context=CapabilityContext(store, AttemptManifest(label)), request=request)
+                    self.assertEqual(result.status, expected, result.diagnostics)
+                    canonical = store.read_json(next(ref for ref in result.artifacts if ref.kind == "experiment_result"))
+                    self.assertEqual(result.usage["metric_count"], len(canonical["metrics"]))
+                    self.assertEqual(canonical["measurement"]["metric_count"], len(canonical["metrics"]))
+                    if expected == "completed":
+                        self.assertEqual(canonical["metrics"], {"coverage": 0.9})
+                        self.assertEqual(canonical["guard"]["status"], "passed")
+                        self.assertEqual(canonical["guard"]["summary"]["metric_count"], 1)
+                        self.assertIn("execution/process/", canonical["metric_sources"]["coverage"]["artifact"])
+                        if label == "native":
+                            self.assertEqual(canonical["execution"]["stdout_chars"], 0)
+                    if label == "conflict":
+                        self.assertEqual(canonical["metrics"]["coverage"], 0.1)
+                        self.assertEqual(canonical["guard"]["status"], "failed")
+                    if label == "failed_process":
+                        self.assertEqual(canonical["metrics"], {"coverage": 0.9})
+                        self.assertEqual(canonical["execution_status"], "failed")
+
     def test_small_json_object_overview_preserves_all_fields_including_late_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory))

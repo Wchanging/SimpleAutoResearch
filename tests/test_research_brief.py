@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 import tempfile
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from simple_ar.core.capabilities import CapabilityContext
 from simple_ar.research.brief import (
     ResearchBriefRequest,
     build_research_brief,
+    evidence_pack_from_read,
 )
 from simple_ar.research.contracts import DocumentRecord, PaperCard, TextChunk
 from simple_ar.research.documents.ingest import DocumentBundle
@@ -111,6 +113,16 @@ class ResearchBriefCapabilityTests(unittest.TestCase):
         self.assertEqual(payload["read"]["source_spans"][0]["chunk_id"], "paper-1#chunk-1")
         self.assertNotIn("Method: a validation method", str(payload["read"]["source_spans"]))
         self.assertEqual(payload["synthesis"]["ideas"][0]["idea_id"], "idea-001")
+        observed = replace(result.read, question_assessments=(
+            {"question_id": "q-1", "status": "missing", "reason": "No interval candidate"},
+            {"question_id": "q-1", "status": "direct_candidate", "paper_ids": ["paper-1"]},
+        ))
+        pack = evidence_pack_from_read("reliable agents", observed)
+        from simple_ar.research.synthesis import _bounded_pack_json
+        self.assertEqual(pack["question_assessments"], list(observed.question_assessments))
+        model_view = _bounded_pack_json(pack)
+        self.assertIn("No interval candidate", model_view)
+        self.assertIn("not verified answers", model_view)
 
     def test_read_capability_persists_selected_evidence_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

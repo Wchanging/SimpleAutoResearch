@@ -77,6 +77,8 @@ class LocalExecutionBackend:
             raise ExecutionError(f"Working directory not found: {request.cwd}")
         if not request.command:
             raise ExecutionError("Execution command is empty")
+        if request.output_dir is None and any("{output_dir}" in arg for arg in request.command):
+            raise ExecutionError("Command contains {output_dir} but RunRequest.output_dir is not configured")
 
         spec = ProcessSpec(
             argv=request.command, cwd=request.cwd, timeout_sec=request.timeout_sec,
@@ -85,9 +87,12 @@ class LocalExecutionBackend:
         )
         if spec.output_dir:
             invocation_dir = (spec.output_dir / spec.invocation_id).absolute()
+            outputs_dir = invocation_dir / "outputs"
+            outputs_dir.mkdir(parents=True, exist_ok=True)
             environment = dict(os.environ if request.env is None else request.env)
-            environment["SIMPLE_AR_OUTPUT_DIR"] = str(invocation_dir / "outputs")
-            spec = replace(spec, output_dir=invocation_dir, env=environment)
+            environment["SIMPLE_AR_OUTPUT_DIR"] = str(outputs_dir)
+            spec = replace(spec, output_dir=invocation_dir, env=environment,
+                           argv=[arg.replace("{output_dir}", str(outputs_dir)) for arg in spec.argv])
         if self.message_callback:
             self.message_callback(f"Experiment {request.label}: cwd={request.cwd}; timeout={request.timeout_sec}s")
             if spec.output_dir:
@@ -107,7 +112,7 @@ class LocalExecutionBackend:
             returncode=None if timed_out else result.returncode,
             timed_out=timed_out, stdout=result.stdout, stderr=stderr,
             metrics=parse_metric_lines(result.stdout),
-            command=list(request.command), cwd=str(request.cwd),
+            command=list(spec.argv), cwd=str(request.cwd),
             duration_sec=result.duration_sec, process_record=result.record,
             backend=self.name, label=request.label,
         )

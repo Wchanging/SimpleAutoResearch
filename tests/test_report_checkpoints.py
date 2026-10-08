@@ -179,17 +179,42 @@ class ReportCheckpointTests(unittest.TestCase):
         self.assertEqual(result.report_body, resumed.report_body)
         self.assertEqual(len(labels), before)
 
-    def test_document_review_rejects_duplicate_sections_even_within_document_count(self):
+    def test_document_review_groups_valid_observations_without_erasing_defects(self):
         config = ReportRuntimeConfig(document_review=True)
         class Client:
             def ask_json(self, *args, **kwargs):
-                return {"section_reviews": [{"section_id": "scope", "verdict": "pass"}] * 2}
-        with self.assertRaisesRegex(LLMResponseError, "repeated section"):
-            review_document(client=Client(), config=config,
+                return {"section_reviews": [
+                    {"section_id": "scope", "verdict": "revise_required", "findings": [{
+                        "finding_id": "scope", "type": "style", "severity": "minor",
+                        "section_id": "scope", "message": "Clarify the sentence.",
+                        "draft_quotes": [{"section_id": "scope", "quote": "Original."}]}]},
+                    {"section_id": "scope", "verdict": "pass"},
+                    {"section_id": "scope", "verdict": "pass"}]}
+        reviews = review_document(client=Client(), config=config,
                 template=load_report_template_bundle(report_mode="survey", config=config),
                 memory=ReportMemory(), sections=[ReportSectionDraft(section_id=sid, heading=sid,
                     draft_markdown="Original.") for sid in ("scope", "method")],
                 execution_summary={}, metric_summary={})
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0].verdict, "revise_required")
+        self.assertEqual(len(reviews[0].findings), 1)
+        # Grouping is not permission to accept unknown targets or false quotes.
+        from simple_ar.report.editor import _validate_document_reviews
+        from simple_ar.report.schema import ReviewerFinding
+        sections = [ReportSectionDraft(section_id="scope", heading="Scope", draft_markdown="Original.")]
+        response = Client().ask_json()
+        for defect in ("target", "quotation"):
+            invalid = copy.deepcopy(response)
+            if defect == "target":
+                invalid["section_reviews"][-1]["section_id"] = "unknown"
+            else:
+                invalid["section_reviews"][0]["findings"][0]["draft_quotes"][0]["quote"] = "Not in draft."
+            with self.subTest(defect=defect), self.assertRaises(LLMResponseError):
+                _validate_document_reviews(invalid, sections=sections, prior_by_key={})
+        opinion = ReviewerFinding(finding_id="old", section_id="scope", type="style", message="Old opinion.")
+        with self.assertRaisesRegex(LLMResponseError, "more reviews|repeated section"):
+            _validate_document_reviews({"section_reviews": [{"section_id": "scope", "verdict": "pass"}] * 2},
+                sections=sections, prior_by_key={("scope", "old"): opinion})
 
     def test_final_checkpoint_matches_reconciled_memory_without_document_review(self):
         # A single section cannot enter whole-document review, even when enabled.

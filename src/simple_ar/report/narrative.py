@@ -163,6 +163,41 @@ def review_source_evidence(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return projected
 
 
+def map_evidence_labels(value: Any, replacements: Mapping[str, str], *, field: str = "") -> Any:
+    """Translate exact structured source references, never quotes or prose.
+
+    Request-local labels are an interface projection; persisted source identity
+    and the existing validators remain authoritative. Unknown labels survive so
+    validation can reject them rather than guessing a source.
+    """
+    if isinstance(value, Mapping):
+        return {key: map_evidence_labels(item, replacements, field=key) for key, item in value.items()}
+    if isinstance(value, list):
+        return [map_evidence_labels(item, replacements, field=field) for item in value]
+    if isinstance(value, str) and field in {
+        "handle", "source_handle", "source_handles", "evidence_handles",
+        "counterevidence_handles", "evidence_handle_choices",
+    }:
+        return replacements.get(value, value)
+    return value
+
+
+def outline_evidence_labels(payload: dict[str, Any], handles: Sequence[SourceHandle]) -> tuple[dict[str, Any], dict[str, str]]:
+    """Use short unambiguous labels within one outline request only."""
+    originals = list(dict.fromkeys(row.handle for row in handles))
+    aliases: dict[str, str] = {}
+    index = 1
+    for handle in originals:
+        while f"source_{index}" in originals:
+            index += 1
+        aliases[handle] = f"source_{index}"
+        index += 1
+    projected = map_evidence_labels(payload, aliases)
+    projected["planning_rules"] = [*projected["planning_rules"],
+        "Use the short source_N labels shown in evidence_handle_choices for structured source references, including context_requests arguments.handle. Labels identify sources in this request only; do not infer or construct internal source identifiers. They do not replace citation keys, document IDs, chunk IDs or metric IDs."]
+    return projected, {label: handle for handle, label in aliases.items()}
+
+
 def evidence_outline_context(
     context: ReportContext, memory: ReportMemory, config: ReportRuntimeConfig, *, retry: bool = False, retry_error: str = "",
     rejected_response: Mapping[str, Any] | None = None,
@@ -665,9 +700,16 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
     if isinstance(analyses, list):
         from simple_ar.result_analysis.table import table_input_handling
         compact["supplied_analyses"] = [{"document_id": row["document_id"], "evidence_role": row["evidence_role"],
-            "spec": row["spec"], "records": row["records"][:12], "records_truncated": len(row["records"]) > 12}
+            **({"schema_version": "code_analysis.v1", "artifact": row.get("artifact", ""),
+                "results_scope": "Saved script results are retained in source chunks; not independently recomputed in writing."}
+               if row.get("schema_version") == "code_analysis.v1" else
+               {"spec": row["spec"], "records": row["records"][:12], "records_truncated": len(row["records"]) > 12})}
             for row in analyses[:6]]
         for projected, original in zip(compact["supplied_analyses"], analyses):
+            if original.get("schema_version") == "code_analysis.v1":
+                projected["figures"] = original["figures"][:12]
+                projected["figures_omitted"] = max(0, len(original["figures"]) - 12)
+                continue
             handling = table_input_handling(original)
             if isinstance(handling["observed_use"], list):
                 handling["observed_use_omitted"] = max(0, len(handling["observed_use"]) - 24)

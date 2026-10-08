@@ -73,9 +73,9 @@ paper is a clear milestone.
 Compare how the papers evaluate their systems. Discuss benchmark type, task
 scale, metrics, and evidence strength. Distinguish the actual evaluation settings,
 data splits, baselines, and generalization boundaries reported by the sources. Avoid
-fabricating results. Include a compact evidence-quality map when enough
-information is available, for example columns such as method family, benchmark
-scale, baseline comparison, cost/budget control, and evidence strength.
+fabricating results. Explain evidence strength in prose or, where it improves
+comparison, a compact table. Choose dimensions from the user's question and
+available evidence; a separate evidence-quality map is optional.
 
 ## Design Patterns And Failure Modes
 

@@ -7,6 +7,7 @@ import stat
 import csv
 import io
 import json
+import math
 
 from simple_ar.core.capabilities import ArtifactStore
 
@@ -29,6 +30,133 @@ def output_files(schema: Mapping) -> dict[str, str]:
     return dict(files)
 
 
+def _read_output_text(root: Path, path: Path) -> tuple[str, int]:
+    """Shared bounded read for previews and declared metric extraction."""
+    relative = path.absolute().relative_to(root.absolute())
+    if ".." in relative.parts:
+        raise ValueError("Output attachment cannot escape its store.")
+    current = root.absolute()
+    if current.is_symlink():
+        raise ValueError("Output root cannot be a symlink.")
+    for component in relative.parts:
+        current = current / component
+        if current.is_symlink():
+            raise ValueError("Output attachments cannot traverse symlinks.")
+    if not stat.S_ISREG(path.stat().st_mode):
+        raise ValueError("Output attachment must be a regular file.")
+    with path.open("rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_OUTPUT_BYTES:
+            raise ValueError("Output must be a regular text file within 2 MiB.")
+        raw = stream.read(MAX_OUTPUT_BYTES + 1)
+    if len(raw) > MAX_OUTPUT_BYTES:
+        raise ValueError("Output grew beyond the text attachment limit.")
+    text = raw.decode("utf-8-sig")
+    if "\x00" in text:
+        raise ValueError("Output attachment is not UTF-8 text.")
+    return text, len(raw)
+
+
+def metric_sources(schema: Mapping) -> dict:
+    """Validate metric -> {output: alias, path: [str/int]} or column + match.
+
+    CSV/TSV match values are exact cell strings (scalar values stringify).
+    An empty match is valid only when the file contains exactly one data row.
+    """
+    files = output_files(schema)
+    sources = schema.get("metric_sources", {})
+    if not isinstance(sources, Mapping):
+        raise ValueError("metric_sources must map metric names to explicit file selectors.")
+    for name, source in sources.items():
+        if not isinstance(name, str) or not name.strip() or len(name) > 80 or not isinstance(source, Mapping):
+            raise ValueError("Metric sources need named mapping selectors.")
+        alias = source.get("output")
+        if not isinstance(alias, str) or alias not in files:
+            raise ValueError("Metric source output must name a registered output_files alias.")
+        suffix = Path(files[alias]).suffix.lower()
+        if set(source) == {"output", "path"} and suffix == ".json":
+            path = source["path"]
+            if not isinstance(path, list) or not path or any(type(key) not in (str, int) or
+                    (type(key) is int and key < 0) for key in path):
+                raise ValueError("JSON metric path must be a nonempty list of string keys/nonnegative integer indices.")
+        elif set(source) == {"output", "column", "match"} and suffix in {".csv", ".tsv"}:
+            match = source["match"]
+            if not isinstance(source["column"], str) or not source["column"] or not isinstance(match, Mapping):
+                raise ValueError("CSV metric sources require a column and exact match mapping.")
+            if len(match) > 4 or any(not isinstance(key, str) or not key or
+                    type(value) not in (str, int, float, bool) or
+                    (type(value) is float and not math.isfinite(value)) for key, value in match.items()):
+                raise ValueError("CSV match accepts at most four finite scalar conditions.")
+        else:
+            raise ValueError("Metric selector must be JSON path or CSV/TSV column + match, without extra fields.")
+    return {name: dict(source) for name, source in sources.items()}
+
+
+def extract_file_metrics(store: ArtifactStore, evidence: list[dict], sources: Mapping,
+                         stdout_metrics: Mapping) -> tuple[dict, dict, list[dict]]:
+    """Read only available registered attempt outputs; return values, locations, errors."""
+    available = {row["name"]: row for row in evidence if row.get("status") == "available"}
+    metrics, locations, issues = {}, {}, []
+    def unique_object(pairs):
+        result = dict(pairs)
+        if len(result) != len(pairs):
+            raise ValueError("Duplicate JSON keys are not valid metric evidence.")
+        return result
+    def reject_constant(value):
+        raise ValueError("Nonfinite JSON constants are not valid metric evidence.")
+    for name, source in sources.items():
+        location = dict(source)
+        try:
+            row = available.get(source["output"])
+            if row is None:
+                raise ValueError("Registered metric output is unavailable for this attempt.")
+            location["artifact"] = row["artifact"]
+            text, _ = _read_output_text(store.root, store.resolve(row["artifact"]))
+            if "path" in source:
+                value = json.loads(text, object_pairs_hook=unique_object, parse_constant=reject_constant)
+                for key in source["path"]:
+                    if not (type(key) is str and isinstance(value, dict) or
+                            type(key) is int and isinstance(value, list)):
+                        raise ValueError("JSON metric path does not match the value structure.")
+                    value = value[key]
+                if type(value) not in (int, float):
+                    raise ValueError("JSON metric must be a number, not boolean or text.")
+            else:
+                reader = csv.DictReader(io.StringIO(text), delimiter="\t" if
+                    Path(row["declared_file"]).suffix.lower() == ".tsv" else ",", strict=True)
+                headers = reader.fieldnames or []
+                if not headers or len(set(headers)) != len(headers) or any(not h for h in headers):
+                    raise ValueError("CSV metric requires unique nonempty headers.")
+                if not {source["column"], *source["match"]}.issubset(headers):
+                    raise ValueError("CSV metric column or match field is missing.")
+                chosen = []
+                for index, record in enumerate(reader, 1):
+                    if None in record or any(value is None for value in record.values()):
+                        raise ValueError("CSV metric rows must match the header width.")
+                    if all(record[key] == str(value) for key, value in source["match"].items()):
+                        chosen.append((index, record[source["column"]]))
+                if len(chosen) != 1:
+                    raise ValueError("CSV metric match must select exactly one data row.")
+                location["data_row"] = chosen[0][0]
+                value = float(chosen[0][1])
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("File metric must be finite.")
+            if name in stdout_metrics and (type(stdout_metrics[name]) not in (int, float) or
+                    stdout_metrics[name] != value):
+                raise ValueError("File metric conflicts with stdout metric; stdout was not overwritten.")
+        except (OSError, ValueError, UnicodeError, KeyError, IndexError, OverflowError, RecursionError, csv.Error) as exc:
+            locations[name] = {**location, "status": "failed", "reason": str(exc)}
+            issues.append({"severity": "error", "code": "file_metric_invalid",
+                           "message": f"Metric `{name}`: {exc}"})
+        else:
+            metrics[name] = value
+            locations[name] = {**location, "status": "extracted",
+                               "stdout_agrees": name in stdout_metrics,
+                               "verification": "producer_output_not_independently_verified"}
+    return metrics, locations, issues
+
+
 def read_output_window(root: Path, path: Path, *, offset: int = 0,
                        limit: int = WINDOW_CHARACTERS, query: str = "",
                        record_match: Mapping | None = None, overview: bool = False) -> dict:
@@ -48,30 +176,7 @@ def read_output_window(root: Path, path: Path, *, offset: int = 0,
         raise ValueError("Record selection accepts at most four scalar field/value conditions.")
     if query and selector:
         raise ValueError("Choose literal query or exact record selection, not both.")
-    relative = path.absolute().relative_to(root.absolute())
-    if ".." in relative.parts:
-        raise ValueError("Output attachment cannot escape its store.")
-    current = root.absolute()
-    # Reject links in the authorized subtree, including its root. The outer
-    # workspace may itself live on a mount or symlink chosen by the user.
-    if current.is_symlink():
-        raise ValueError("Output root cannot be a symlink.")
-    for component in relative.parts:
-        current = current / component
-        if current.is_symlink():
-            raise ValueError("Output attachments cannot traverse symlinks.")
-    if not stat.S_ISREG(path.stat().st_mode):
-        raise ValueError("Output attachment must be a regular file.")
-    with path.open("rb") as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_OUTPUT_BYTES:
-            raise ValueError("Output must be a regular text file within 2 MiB.")
-        raw = stream.read(MAX_OUTPUT_BYTES + 1)
-    if len(raw) > MAX_OUTPUT_BYTES:
-        raise ValueError("Output grew beyond the text attachment limit.")
-    text = raw.decode("utf-8-sig")
-    if "\x00" in text:
-        raise ValueError("Output attachment is not UTF-8 text.")
+    text, byte_count = _read_output_text(root, path)
     overview_structure = {}
     if overview and not offset and not query and not selector and path.suffix.lower() == ".json":
         # Small producer objects often place runtime/protocol after a long
@@ -94,7 +199,7 @@ def read_output_window(root: Path, path: Path, *, offset: int = 0,
                     "structure_scope": "top_level_keys_only_not_field_contents"}
             if isinstance(value, dict) and len(compact) <= WINDOW_CHARACTERS:
                 return {"text": compact, "offset": 0, "next_offset": len(text),
-                        "total_characters": len(text), "bytes": len(raw),
+                        "total_characters": len(text), "bytes": byte_count,
                         "rendered_characters": len(compact), "truncated": False, "has_more": False,
                         "query": "", "query_matched": None, "search_scope": "registered_utf8_file",
                         "view_kind": "complete_json_object_whitespace_compacted",
@@ -125,7 +230,7 @@ def read_output_window(root: Path, path: Path, *, offset: int = 0,
         offset = max(0, match.start() - limit // 5)
     end = min(len(text), offset + limit)
     return {"text": "" if query and not match else text[offset:end], "offset": offset, "next_offset": end,
-            "total_characters": len(text), "bytes": len(raw),
+            "total_characters": len(text), "bytes": byte_count,
             "truncated": offset > 0 or end < len(text),
             "has_more": end < len(text), "query": query,
             "query_matched": bool(match) if query else None,

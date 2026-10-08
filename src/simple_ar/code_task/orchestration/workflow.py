@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from glob import escape
 from pathlib import Path
+import stat
 from typing import Any
 
 from simple_ar.core.artifacts import write_json, write_text
 from simple_ar.code_task.generation.task_contract import build_greenfield_task_contract, save_task_contract
 from simple_ar.code_task.execution.comparison import normalize_metric_directions
-from simple_ar.code_task.editing.scope import default_edit_scope
+from simple_ar.code_task.editing.scope import default_edit_scope, is_edit_allowed_path
 from simple_ar.code_task.execution.environment import build_code_task_environment_policy
 from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.analysis.repo_map import build_repo_map
@@ -20,6 +21,12 @@ from simple_ar.code_task.workspace.modes import (
     suggested_python_executable,
 )
 from simple_ar.code_task.runtime.state import utcnow_iso as _utcnow_iso
+
+
+INITIAL_ADAPTER_SOURCE = (
+    "# Confirmed reproduction adapter: implement without changing author methods/data.\n"
+    'raise NotImplementedError("Reproduction adapter requires implementation")\n'
+)
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,7 @@ def initialize_code_task(
     edit_scope_allowed_patterns: tuple[str, ...] = (),
     edit_scope_protected_patterns: tuple[str, ...] = (),
     data_inputs: tuple[str, ...] = (),
+    initial_files: tuple[str, ...] = (),
 ) -> CodeTaskInitResult:
     """Initialize a local code-task run without modifying the source project.
 
@@ -118,6 +126,8 @@ def initialize_code_task(
         data_inputs: Explicit project-relative data files/directories. Independent
             copies retain their runtime paths and become protected edit inputs;
             incidental file-size limits do not apply to this selection.
+        initial_files: Explicit new Python adapters, never inferred from edit scope.
+            Fail-closed placeholders are created only in the isolated workspace.
 
     Returns:
         Paths and metadata for the initialized code-task run.
@@ -131,6 +141,8 @@ def initialize_code_task(
     source_root = Path(code_root).resolve() if code_root is not None else None
     task_source = Path(task_file).resolve()
     root = Path(run_dir)
+    if initial_files and source_root is not None and root.resolve().is_relative_to(source_root):
+        raise ValueError("Adapter preparation artifacts must be outside the author project")
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"Run directory already contains files: {root}")
     if not task_source.exists():
@@ -161,8 +173,6 @@ def initialize_code_task(
     )
     workspace_dir = workspace.project_root
     copy_report = workspace.copy_report
-    codebase_index_path = meta_dir / "codebase_index.json"
-    codebase_index = build_codebase_index(workspace_dir, output_path=codebase_index_path)
     edit_scope = default_edit_scope(
         mode=edit_scope_mode,
         allowed_patterns=edit_scope_allowed_patterns,
@@ -172,6 +182,44 @@ def initialize_code_task(
     )
     allowed_patterns = tuple(str(item) for item in edit_scope["allowed_patterns"])
     protected_patterns = tuple(str(item) for item in edit_scope["protected_patterns"])
+    if not isinstance(initial_files, (list, tuple)):
+        raise ValueError("initial_files must be an explicit list of new Python paths")
+    if initial_files:
+        if (normalized_kind != "existing_project" or source_root is None
+                or workspace.selected_mode not in {"copy", "git_worktree"}
+                or workspace_dir.resolve() == source_root):
+            raise ValueError("Adapter creation requires an isolated existing project")
+        targets = []
+        seen = set()
+        for name in initial_files:
+            if (not isinstance(name, str) or not name or name != name.strip() or "\\" in name
+                    or any(c in name for c in ":*?[]") or Path(name).is_absolute()
+                    or any(part in {"", ".", ".."} for part in name.split("/"))
+                    or Path(name).suffix != ".py" or name.casefold() in seen
+                    or name not in edit_scope_allowed_patterns
+                    or not is_edit_allowed_path(name, allowed_patterns=allowed_patterns,
+                        protected_patterns=(*protected_patterns, "data/**", "**/data/**", ".git/**"))):
+                raise ValueError("initial_files requires distinct exact allowed, unprotected new Python paths")
+            seen.add(name.casefold())
+            for base in (source_root, workspace_dir.resolve()):
+                target = base / name
+                for part in (target, *target.parents):
+                    if part == base:
+                        break
+                    reparse = part.exists() and (getattr(part.lstat(), "st_file_attributes", 0)
+                        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+                    if part.is_symlink() or reparse:
+                        raise ValueError("Adapter creation cannot traverse links")
+                if not target.resolve().is_relative_to(base) or target.exists():
+                    raise ValueError("Adapter must not replace an author or workspace path")
+            targets.append(workspace_dir / name)
+        # Validate the whole declaration before creating any file; no author writes.
+        for target in targets:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("x", encoding="utf-8") as handle:
+                handle.write(INITIAL_ADAPTER_SOURCE)
+    codebase_index_path = meta_dir / "codebase_index.json"
+    codebase_index = build_codebase_index(workspace_dir, output_path=codebase_index_path)
     repo_map_path = meta_dir / "repo_map.json"
     repo_map_summary_path = meta_dir / "repo_map_summary.md"
     repo_map = build_repo_map(

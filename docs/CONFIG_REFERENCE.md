@@ -49,11 +49,69 @@ Supported optional fields: `request_timeout_sec`, `max_output_tokens`, `retry_at
 `input_price_per_million`, and `output_price_per_million`.
 Timeouts/delays and supplied token caps are positive; retry count includes the first request.
 Per-call output limits still apply. Provider support for reasoning/JSON parameters must be checked.
+For finite-timeout SDK Chat streaming, the timeout also bounds submission and
+stream consumption by elapsed time, followed by at most two seconds of local
+cleanup. A deadline without a completion marker retains unknown usage. Capped
+text requests may retry on the same API within `retry_attempts`, retaining the
+full failed-attempt reservation; uncapped and visual requests stop. This does
+not prove provider cancellation or no charge, and insufficient budget stops retries.
+Nonstreaming, Responses and LiteLLM retain their transport timeout semantics.
+Synchronous finite-timeout streaming inside an existing asyncio loop requires
+`await asyncio.to_thread(client.ask, ...)`, rather than nesting another loop.
 
-Capabilities are declarations, not probe results. `openai_images` profiles and `vision`/`image`
-routes can be registered, but image generation/editing and multimodal inspection executors are
-not implemented by this configuration change. An Images profile cannot be used as a text client.
+`json_response_format="off"` omits the provider-native JSON parameter; `ask_json`
+still parses and validates JSON. Use it for a gateway that does not support the
+parameter, not as a cure for overload. A stream can carry an upstream error even
+after HTTP connection success. Increasing the timeout does not cure an immediate
+`overloaded` response. Bounded retries consume separate physical attempts and retain
+unknown usage; they do not reset a saved task's allowance. Compare SDK and framework
+requests on the execution host, including a longer response, before changing routes.
+Timeout, output cap and retry tuning can be changed when resuming a saved task;
+model, endpoint and code-route identity remain pinned. Old snapshots are not rewritten.
+
+Capabilities are declarations, not probe results. `simple-ar image` uses an `openai_images`
+profile for generation/editing; optional `image_size` and `image_quality` are passed to the
+provider. Provider support must be verified.
+An Images profile cannot be used as a text client.
 Image profiles do not accept text stream/token/JSON or token-price settings.
+
+`simple-ar image-review` uses a separate `vision` route with an explicit
+`openai_chat` or `openai_responses` profile and `vision` capability. It sends
+actual image pixels, not filenames; automatic API-mode fallback is disabled.
+Inspection accepts up to four static PNG/JPEG/WebP images, at most 20 MiB combined
+and 4,194,304 pixels per image. Provider usage is recorded when supplied; absent
+usage remains unknown, not zero. Feedback describes visible issues, not scientific validity.
+
+For cctq's documented asynchronous image-task protocol, explicitly select
+`api = "cctq_images_async"`; `openai_images` remains the generic synchronous API.
+The async path uses the configured origin, saves one task ID, polls that task and
+authenticates its same-origin `files/0` download. It does not switch hosts/providers
+or fall back to another API. Saved-task recovery and one feedback edit were
+verified through a caller-configured proxy route; direct server transport remains
+unreliable. The prior synchronous timeout remains a failed request, not a success.
+
+Optional `proxy_env = "RESEARCH_API_PROXY"` references an HTTP(S) proxy URL in
+that environment variable. It affects only this SDK/image connection, not source
+search or other profiles, and is not a provider fallback. The current option
+rejects URL userinfo, query and fragment; missing/invalid values fail before a
+paid call. Proxy values are not saved in task snapshots or provider payloads.
+Without this option, standard client environment routing remains unchanged.
+
+Linked public-document downloads can use an explicit deployment route without
+changing model connections. Set `SIMPLE_AR_DOCUMENT_ROUTE_HOSTS` to comma-separated
+exact hostnames, `SIMPLE_AR_DOCUMENT_PROXY_ENV` to the name of an environment
+variable containing an HTTP(S) proxy URL, and optionally
+`SIMPLE_AR_DOCUMENT_CA_BUNDLE` to an existing trusted CA file. For example, route
+`github.com` only; wildcards are not accepted. Unlisted hosts remain direct.
+TLS verification stays enabled. These options apply to linked supporting-material
+downloads, not literature search, model calls, paper-PDF transport or ZIP acquisition.
+Without them, this downloader ignores ambient proxies. Configure the execution
+host explicitly; a model proxy alone does not make author repositories accessible.
+
+Literature connectors use their own optional `OPENALEX_API_KEY` and
+`SEMANTIC_SCHOLAR_API_KEY` environment variables, not model-profile credentials.
+They send keys in authorization headers; absent keys retain anonymous access with
+provider quotas. Supplying a key does not certify source coverage or remove rate limits.
 
 With a catalog, legacy model/URL/key environment settings do not override profile values.
 Missing profiles, credentials or incompatible capabilities fail without switching providers.
@@ -61,8 +119,9 @@ A different bare model override is rejected: define another profile instead of m
 Without a catalog, existing environment configuration works unchanged; no `.env` is deleted or migrated.
 
 New research sessions and chat drafts save non-secret connection bindings in their existing snapshots.
-Resume rejects changes to the selected connection or nested code route; rotate the value behind the
-same credential variable freely. Restore the old connection or start a new task to change providers.
+Resume pins the model, endpoint and nested code route; timeout, output cap and retry
+settings may be retuned. Rotate the value behind the same credential variable freely.
+Restore the old connection or start a new task to change providers.
 Adding an unrelated image profile does not invalidate a text session. Legacy sessions and standalone
 CodeTask operations do not gain retrospective connection pinning. Keep their catalog fixed during a run.
 
@@ -72,7 +131,17 @@ There is no interactive registration wizard or automatic migration command yet.
 
 For repair, `--project-python PATH` writes `[environment] mode="external"` and `python="..."` in CodeTask TOML. Omission keeps current. This selects an existing interpreter, without installing dependencies.
 
-For reproduction, `--project` supplies read-only preparation and the default command cwd. `--data-path` registers data; `--output-files JSON` maps producer files to `execution.output_files`. Neither authorizes edits or infers results from arbitrary paths.
+By default, reproduction `--project` supplies read-only preparation and the command cwd. `--data-path` registers data; `--output-files JSON` maps producer files to `execution.output_files`. These alone do not authorize edits or infer results from arbitrary paths.
+
+Explicit `--project` + `--allow` + independent `--validate` additionally opts into
+scoped CodeTask adapter preparation. Current/external CodeTask Python applies to
+validation and formal measurement; `--project-python` selects an existing interpreter.
+Explicit task-venv preparation may precede adaptation in the same isolated workspace:
+approved requirements/project installation uses the shared process budget, then the
+prepared interpreter serves CodeTask, its independent validator and formal measurement.
+Do not combine this with an external interpreter or a second `check_command`.
+Installation failure stops implementation and measurement; completed recovery does not
+reinstall. See the reproduction contract below.
 
 Optional dependency preparation for a single Python command uses:
 
@@ -166,26 +235,33 @@ The same checkpoint, evidence tools and per-section revision limits apply; saved
 drafts are not certified as individually reviewed. Change saved report settings
 through the supported explicit report-refresh path, not by editing a checkpoint.
 Joint drafting is independent of review timing. Newly guided data reports
-(`start --kind data_analysis --with-report`, also via chat) explicitly generate
-both scopes below. Other guided task kinds and existing configs retain their
-defaults; expert configs can choose the same settings:
+(`start --kind data_analysis --with-report`, also via chat) explicitly select
+joint drafting and complete inspection. New guided surveys and finite reproductions
+use the same established defaults. Automatic draft granularity remains an explicit
+experimental choice, not a new entry default. Existing configs and custom writing templates
+retain their choices; expert configs can choose the same settings:
 
 ```toml
 [report]
 document_review = true
 review_scope = "document"
-draft_scope = "document"
+draft_scope = "document" # Explicit experimental alternative: "auto"
 ```
 
-This composes all remaining sections together using the frozen plan and shared
-evidence, then runs the existing independent document review. The default source
+`auto` drafts jointly when every section has a positive planned word count and
+the full plan totals at most 2,000 words. Longer or unsized plans save sections
+individually before the same complete-document review. This is a drafting heuristic,
+not a token guarantee or a change to output limits. Choose `document` to always
+compose remaining sections together using the frozen plan and shared evidence.
+The default source
 strategy `full` is required; `batch_refine` is not compatible. Default
 `draft_scope = "section"` preserves separate draft calls and historical checkpoint
 identity. The existing `max_section_tokens` is a per-call cap, so a positive value
 bounds the whole joint answer. A validated complete section set is saved in the
 same checkpoint; resuming a saved body does not regenerate it. In this explicit
-mode, cross-section corrections also form one complete candidate. Historical
-opinion checks and an independent complete-manuscript inspection precede joint
+mode and in `auto`, cross-section corrections still form one complete candidate;
+automatic initial drafting does not split a large joint revision. One complete
+candidate inspection checks outstanding issues and the current manuscript before
 adoption; unsuccessful corrections retain the original sections. The existing
 `max_review_iterations` bounds joint candidate rounds. Previously consumed
 per-section rounds and pending legacy corrections are retained on recovery;
@@ -198,8 +274,7 @@ upgrading does not grant fresh correction or model budgets. Candidate drafts and
   before and after reading; recovery does not replay allocated reads. Setting the
   option to false also disables these Writer requests. No live search, arbitrary
   path reads or new execution authority is introduced.
-This is not an
-automatic long-document strategy or a claim of scientific quality.
+This does not certify scientific quality or eliminate provider failures.
 This explains supplied material without requiring an experiment or a failed objective.
 `analysis_report` remains available for unmet/uncertain experiment goals. Explicit saved
 templates are retained; a started writing task with an automatic default reuses its
@@ -371,9 +446,18 @@ reuse the saved choice).
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
 | `[research]` | `providers`, `queries`, `max_results`, `max_chunks`, `max_pdf_pages`, `read_max_shortlist`, `idea_limit`, `cache_dir` | Lists are optional; CLI defaults are `max_results = 10`, `max_chunks = 300`, `idea_limit = 3`. Omit `max_pdf_pages` to extract all PDF pages; a supplied positive integer explicitly limits extraction and records truncation. Changing it requires a new session because existing extracted evidence is frozen. `read_max_shortlist` is optional (default: all papers up to 24); explicitly supplied papers are retained within this reading limit, and an over-limit request fails visibly. `cache_dir` is optional and is not a safe resume-change because it is not persisted. |
-| `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `max_fulltext_documents`, `max_pdf_mb`, `materials_only` | These switches default false and optional caps are unset. `materials_only = true` consumes supplied local inputs (`assets.papers`, or writing `assets.materials`) and disables search; it does not disable model reading. Writing always uses local-only scope. Guided `start --fulltext --sources search` enables PDF cache retention with a 4-document, 20 MiB-per-PDF limit; expert TOML may adjust the positive caps. Remote PDFs require both PDF permission and cache retention. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
+| `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `max_fulltext_documents`, `max_pdf_mb`, `materials_only` | These switches default false and optional caps are unset. `materials_only = true` consumes supplied local inputs (`assets.papers`, or writing `assets.materials`) and disables search; it does not disable model reading. Writing always uses local-only scope. Guided `start --fulltext --sources search` enables PDF cache retention with a 6-document, 20 MiB-per-resource limit; expert TOML may adjust the positive caps. Automatic evidence followup reserves initial acquisition slots within these totals, not extra downloads. Remote PDFs require both PDF permission and cache retention. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
 | `[research]` | `max_iterations`, `interaction` | `max_iterations` defaults to `1`; `0` stops after the first analysis. `interaction` defaults to `checkpoints` for a new CLI session and accepts `assisted`, `checkpoints`, or `autonomous`. Critical facts and permissions block every mode. |
 | `[assets]` | `papers`, `materials`, `data` | Paths resolve from the TOML directory. `papers` identifies bibliographic sources; `materials` is for `writing` drafts, notes, result descriptions or completed `table_analysis.v1` packages with copied data, not independently measured experiment metrics. Writing requires at least one input and rejects duplicate/dual-role files. `data` names execution inputs; isolated CodeTask preparation copies declared project data, while direct/external inputs remain in place. No split verification or automatic argv substitution. |
+
+In model-planned searches, explicit configured queries remain seeds; otherwise
+the planner supplies focused topic queries rather than searching the full task
+description. Supporting abstract conditions guide screening and reading, not a
+mandatory conjunction of every condition. The arXiv connector joins plain
+keywords with `AND`; an explicitly supplied advanced connector expression is
+passed through. Retrieval is not semantic confirmation of relevance or coverage.
+The document limit covers different focused queries as well as required facets,
+before remaining slots are filled by lexical rank.
 
 Explicitly supplied local PDFs are parsed best-effort (all pages by default,
 or the explicitly configured `max_pdf_pages`) even when `use_fulltext = false`; that flag governs remote
@@ -391,7 +475,7 @@ external parsers must declare their own observed coverage.
 
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
-| `[execution]` | `command`, `cwd`, `timeout_sec`, `code_task_config` | Choose one execution boundary: literal argv `command` plus an existing absolute `cwd`, or a CodeTask TOML reference. Omit both for literature-only work. `timeout_sec` is optional and defaults at the CLI/application boundary. |
+| `[execution]` | `command`, `cwd`, `timeout_sec`, `code_task_config` | Normally choose literal argv `command` plus an existing absolute `cwd`, or a CodeTask TOML reference. Reproduction permits both for explicitly authorized adapter preparation followed by the separate formal command. Omit both for literature-only work. `timeout_sec` is optional and defaults at the CLI/application boundary. |
 | `[execution.environment]` | `mode`, `requirements`, `install_project`, `python_executable`, `timeout_sec`, `check_command` | Optional single-command preparation: `venv` creates a task environment; `current` requires an explicit check argv and does not install or override Python. Requirements default empty, project installation false, base venv Python this runtime, per-step timeout 300. Optional check executes after setup. Omission keeps ordinary current execution. Expert TOML budgets preparation explicitly; guided start includes it. |
 | `[execution]` | `primary_metric`, `metrics`, `metric_directions` | Optional measurement schema; directions use `higher`, `lower`, `resource`, or `ignore`. |
 | `[execution]` | `output_files` | Optional mapping of at most eight attachment names to relative POSIX files under the process-owned `SIMPLE_AR_OUTPUT_DIR`. Only declared UTF-8 regular files up to 2 MiB each receive bounded previews and registered read handles; missing/unreadable attachments are recorded separately from execution success. |
@@ -432,6 +516,9 @@ runtime = "runtime.json"
 
 The child command writes these files below the existing `SIMPLE_AR_OUTPUT_DIR`
 environment variable supplied **for that invocation**. Do not set it in `.env`.
+Author programs accepting an output argument can instead use literal
+`{output_dir}` in `execution.command`, e.g. `--output={output_dir}/runtime.json`;
+the existing local backend binds it to this invocation, without a shell.
 For example, Python code can create `Path(os.environ["SIMPLE_AR_OUTPUT_DIR"])`
 and write its declared files there. Existing commands need not use this option;
 no cwd scan, stdout path discovery or arbitrary external file copying occurs.
@@ -449,15 +536,47 @@ claim. Check the saved `output_evidence` in `results.json`. Changing this contra
 on resume is an execution-input revision, not a report-only refresh; completed
 historical runs are not silently enriched or rerun.
 
+To use native JSON/CSV results as measured metrics rather than only attachments:
+
+```toml
+[execution.metric_sources]
+elapsed = { output = "runtime", path = ["elapsed_seconds"] }
+coverage = { output = "paired_observations", column = "coverage", match = { method = "candidate" } }
+```
+
+JSON paths select explicit keys/indices; CSV/TSV conditions must select one row.
+Values must be finite numbers. Missing, ambiguous or conflicting stdout/file
+values fail extraction; there is no implicit aggregation or column guessing.
+Source file and selected location remain in the canonical result. A process
+failure or timeout cannot become a successful measurement through a result file.
+
 `task.kind = "reproduction"` is a **prepared, fixed-protocol** path: read supplied local
 papers, synthesize the source evidence, execute the declared command, analyze its
 measurements, and optionally write a reproduction report. Set `research.materials_only = true`,
 provide `assets.papers`, `execution.command`, and `execution.protocol` with at least
 `hypothesis`, `dataset`, and `expected_outcome`. Use `baseline_policy = "skip"`
-and a finite process timeout. This mode does not propose innovations, edit code,
-expand seeds, or discover a missing environment. Dependency installation requires the
-explicit `execution.environment` venv profile described above. Paired comparisons and
-CodeTask use the ordinary research path. Report `template = "reproduction"` preserves
+and a finite process timeout. By default this mode does not edit code; it does not
+propose innovations, expand seeds, or discover a missing environment. Optional
+existing-project adapter preparation requires explicit `execution.code_task_config`
+alongside the formal command. The referenced `[benchmark].command` becomes the
+independent `validation_command`, and `[execute].timeout_sec` its positive
+`validation_timeout_sec`; `execution.command` and `execution.timeout_sec` remain the
+formal measurement. Validation argv must differ from measurement argv, including
+after interpreter resolution. Preparation and scoped implementation/validation
+precede measurement in the isolated project. Only approved adapter/entry edits are
+allowed; protected paths apply, and authorization excludes changes to the declared
+scientific protocol. Validation success alone does not verify scientific equivalence.
+For a new adapter, `execution.initial_files = ["adapters/export.py"]` explicitly
+authorizes creation; each path must be an exact allowed, absent, unprotected Python
+file. Initialization creates fail-closed placeholders only in the isolated project,
+then uses the ordinary index/edit/check path. `--allow` alone never creates files.
+Preparation consumes this declaration; recovery does not overwrite implemented files.
+CodeTask uses prepared `current`/`external` Python. Explicit task-venv preparation through
+`execution.environment` can run first in the isolated workspace and bind its interpreter
+to subsequent CodeTask validation and measurement. Do not combine it with an external
+interpreter, current/check preparation or another check command. Paired comparisons still use the
+ordinary research path. This is not arbitrary-paper preparation, an OS sandbox or
+completed real-paper acceptance. Report `template = "reproduction"` preserves
 the distinction between a published result, an adapted check, and local observations.
 See [the complete CPU-only case](../examples/conformal_reproduction/README.md).
 
@@ -519,7 +638,8 @@ path = "evaluate.py"
 No seed interpolation or extra scheduler is introduced. Grant process budgets
 for every matrix run.
 Use either literal `execution.command` plus `cwd`, or `execution.code_task_config`
-for one prepared code boundary; the two descriptions are mutually exclusive.
+for one prepared code boundary; they are mutually exclusive except for the
+explicit reproduction adapter contract above.
 Direct command argv uses the process `PATH`. A referenced CodeTask config applies
 its `current`/`external` interpreter policy to a leading bare `python`/`python3`.
 
@@ -673,7 +793,7 @@ baselines remain errors; this is not a test-folder exemption or runtime success.
 | `[models.code_task].reviewer` | Model used for code-task patch review and greenfield generated-project review. |
 | `[models.code_task].editor` | Model used for edit proposal generation. |
 | `[models.code_task].repair` | Model used for repair proposals after failures. |
-| `[budget].profile` | Active edit budget profile. `normal` is conservative; `large` is for reviewed multi-file changes. |
+| `[budget].profile` | Active edit budget profile. `normal` permits compact changes in up to four allowed files (12,000 total edit characters); `large` permits larger reviewed changes with explicit approval. |
 | `[budget].max_batches` | Maximum number of implementation batches the executor may create for one code task. |
 | `[budget].cost_cap_usd` | Optional cost cap when provider usage includes cost estimates. |
 | `[budget.*].max_files` | Max files a single edit proposal may touch. |

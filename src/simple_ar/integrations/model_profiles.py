@@ -15,13 +15,32 @@ class ModelConfigError(ValueError):
     pass
 
 
+def model_connections_compatible(saved: dict, current: dict) -> bool:
+    """Keep model/endpoint identity pinned, but allow operational retuning.
+
+    Full settings remain in snapshots; comparison also handles older snapshots
+    without rewriting their history. Output caps may change completion length,
+    never the identity of the model used for the saved scientific task.
+    """
+    operational = {"request_timeout_sec", "max_output_tokens", "retry_attempts",
+                   "retry_base_delay_sec", "retry_max_delay_sec"}
+
+    def identity(value):
+        if isinstance(value, dict):
+            return {key: identity(item) for key, item in value.items() if key not in operational}
+        return value
+
+    return identity(saved) == identity(current)
+
+
 class ModelProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    api: Literal["openai_chat", "openai_responses", "openai_images"]
+    api: Literal["openai_chat", "openai_responses", "openai_images", "cctq_images_async"]
     base_url: str
     model: str = Field(min_length=1)
     api_key_env: str
+    proxy_env: str = ""
     capabilities: list[Literal["text", "code", "vision", "image_generate", "image_edit"]]
     stream: bool = False
     http2: bool = False
@@ -37,6 +56,8 @@ class ModelProfile(BaseModel):
     chat_token_limit_param: Literal["auto", "max_tokens", "max_completion_tokens"] = "auto"
     input_price_per_million: float | None = Field(default=None, ge=0)
     output_price_per_million: float | None = Field(default=None, ge=0)
+    image_size: Literal["auto", "256x256", "512x512", "1024x1024", "1024x1536", "1536x1024", "1792x1024", "1024x1792"] | None = None
+    image_quality: Literal["auto", "standard", "hd", "low", "medium", "high"] | None = None
 
     @field_validator("base_url")
     @classmethod
@@ -54,12 +75,17 @@ class ModelProfile(BaseModel):
             raise ValueError("api_key_env must name an environment variable, not contain a key")
         return value
 
+    @field_validator("proxy_env")
+    @classmethod
+    def proxy_reference(cls, value: str) -> str:
+        return cls.key_reference(value) if value else value
+
     @model_validator(mode="after")
     def compatible(self) -> "ModelProfile":
         caps = set(self.capabilities)
         if not caps:
             raise ValueError("Declare at least one capability")
-        if self.api == "openai_images":
+        if self.api in {"openai_images", "cctq_images_async"}:
             if caps - {"image_generate", "image_edit"}:
                 raise ValueError("Images profiles only declare image capabilities")
             text_options = {"stream", "max_output_tokens", "reasoning_effort", "json_response_format",
@@ -69,6 +95,8 @@ class ModelProfile(BaseModel):
                 raise ValueError("Do not put text-generation options in an Images profile")
         elif caps & {"image_generate", "image_edit"}:
             raise ValueError("Image generation requires an Images profile")
+        elif self.model_fields_set & {"image_size", "image_quality"}:
+            raise ValueError("Image size/quality require an Images profile")
         elif self.api == "openai_responses" and self.stream:
             raise ValueError("This client currently streams Chat only; use stream=false for Responses")
         return self
@@ -79,12 +107,39 @@ class ModelProfile(BaseModel):
             raise ModelConfigError(f"Missing credential environment variable: {self.api_key_env}")
         return value
 
+    def resolve_proxy(self) -> str | None:
+        """Resolve transport-only configuration; never persist or echo its value."""
+        return resolve_proxy_env(self.proxy_env)
+
     def text_settings(self) -> dict:
-        if self.api == "openai_images":
+        if self.api in {"openai_images", "cctq_images_async"}:
             raise ModelConfigError("An Images connection cannot be used by the text client")
-        values = self.model_dump(exclude={"api", "api_key_env", "capabilities"})
+        values = self.model_dump(exclude={"api", "api_key_env", "capabilities", "image_size", "image_quality"})
         return {**values, "api_key": self.credential(),
                 "api_mode": "chat" if self.api == "openai_chat" else "responses"}
+
+
+def resolve_proxy_env(reference: str) -> str | None:
+    if not reference:
+        return None
+    try:
+        ModelProfile.key_reference(reference)
+    except (TypeError, ValueError):
+        raise ModelConfigError("Invalid proxy environment variable reference") from None
+    value = os.environ.get(reference, "")
+    if not value.strip():
+        raise ModelConfigError(f"Missing proxy environment variable: {reference}")
+    try:
+        parsed = urlsplit(value)
+        parsed.port  # Validate malformed/out-of-range ports without exposing input.
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or "?" in value or "#" in value or "\\" in value
+                or any(ord(char) <= 32 for char in value)):
+            raise ValueError
+    except ValueError:
+        raise ModelConfigError("Proxy must be an HTTP(S) URL without userinfo, query or fragment") from None
+    return value
 
 
 class ModelCatalog(BaseModel):

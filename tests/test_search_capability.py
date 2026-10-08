@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from simple_ar.core import CapabilityRegistry, SessionController
+from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
 from simple_ar.literature.cache import put_cache
 from simple_ar.literature.models import Paper
 from simple_ar.research.contracts import QueryPlan, ResearchQuestion
@@ -21,6 +22,80 @@ from simple_ar.research.sources.base import SearchQuery, SearchResponse
 
 
 class SearchCapabilityTests(unittest.TestCase):
+    def test_temporal_eligibility_precedes_topk_even_when_provider_ignores_filters(self) -> None:
+        scope = {"start_year": 2010, "end_year": 2014, "basis_quote": "2010 through 2014"}
+        def paper(identifier, published, strong=False):
+            return Paper(id=identifier, title=f"interval method coverage {identifier}" if strong else f"interval {identifier}",
+                         authors=[], abstract="interval method coverage" if strong else "",
+                         url="https://example.test/" + identifier, published=published, source="fixture")
+        papers = [paper("old", "2009", True), paper("future", "2015", True),
+                  paper("unknown", None, True), paper("invalid", "2012-99-01", True),
+                  paper("first", "2010"), paper("last", "2014-12-31")]
+        class Connector:
+            source_name = "fixture"
+            def search(self, request):
+                return SearchResponse("fixture", request.query, list(papers))  # Ignores filters.
+        query = "interval method coverage"
+        policy = SearchSelectionPolicy(topic="Survey 2010 through 2014", questions=(
+            ResearchQuestion("RQ1", "Which methods?", facet="method"),),
+            query_plan=QueryPlan(topic="interval", seed_queries=[query], queries=[query],
+                query_specs=[{"query": query, "facet": "method"}], required_facets=["method"],
+                max_rounds=1, auto_expansion=False), max_documents=2)
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory))
+            result = run_search_capability(
+                context=CapabilityContext(store, AttemptManifest("search")),
+                request=SearchRequest(queries=(query,), providers=("fixture",), cache_enabled=False,
+                                      filters={"temporal_scope": scope}),
+                registry=SearchProviderRegistry({"fixture": Connector}), selection_policy=policy)
+            saved = store.read_json(next(ref for ref in result.artifacts if ref.kind == "search_result"))
+            self.assertEqual(set(saved["selected_paper_ids"]), {"first", "last"})
+            restored = SearchResult.from_handoff_dict(saved)
+            self.assertEqual({p.id for p in restored.selected_papers}, {"first", "last"})
+            self.assertEqual(len(restored.papers), 6)
+            reasons = {row["paper_id"]: row["reason"] for row in restored.selection_rows}
+            self.assertEqual(reasons["old"], "outside_temporal_scope")
+            self.assertEqual(reasons["future"], "outside_temporal_scope")
+            self.assertEqual(reasons["unknown"], "publication_year_unknown")
+            self.assertEqual(reasons["invalid"], "publication_year_unknown")
+            self.assertEqual(set(restored.coverage_report["questions"][0]["supporting_papers"]),
+                             {"first", "last"})
+            # Reading-driven followups have no metadata selection policy, but
+            # must not reintroduce dates excluded by the original user scope.
+            followup_store = ArtifactStore(Path(directory) / "followup")
+            followup = run_search_capability(
+                context=CapabilityContext(followup_store, AttemptManifest("search")),
+                request=SearchRequest(queries=(query,), providers=("fixture",), cache_enabled=False,
+                                      filters={"temporal_scope": scope}),
+                registry=SearchProviderRegistry({"fixture": Connector}))
+            handoff = followup_store.read_json(next(ref for ref in followup.artifacts if ref.kind == "search_result"))
+            self.assertEqual(set(handoff["selected_paper_ids"]), {"first", "last"})
+            self.assertEqual(len(handoff["papers"]), 6)
+        raw = search_sources(SearchRequest(queries=(query,), providers=("fixture",), cache_enabled=False),
+                             registry=SearchProviderRegistry({"fixture": Connector}))
+        legacy = select_search_result(raw, policy=policy)
+        self.assertTrue(any(p.id in {"old", "future", "unknown", "invalid"} for p in legacy.selected_papers))
+        # All excluded, including high lexical scores: no automatic quota filling or coverage.
+        papers[:] = papers[:4]
+        raw = search_sources(SearchRequest(queries=(query,), providers=("fixture",), cache_enabled=False),
+                             registry=SearchProviderRegistry({"fixture": Connector}))
+        empty = select_search_result(raw, policy=policy, filters={"temporal_scope": scope})
+        self.assertEqual(empty.selected_papers, ())
+        self.assertEqual(len(empty.papers), 4)
+        self.assertEqual(empty.coverage_report["covered_facets"], [])
+        self.assertEqual(empty.coverage_report["questions"][0]["status"], "missing")
+        # Native-filter responses cannot pollute or recover an unrestricted cache key.
+        cached_queries = []
+        with tempfile.TemporaryDirectory() as directory:
+            scoped_request = SearchRequest(queries=(query,), providers=("fixture",),
+                filters={"temporal_scope": scope}, cache_dir=Path(directory),
+                cache_put=lambda cache_query, *args, **kwargs: cached_queries.append(cache_query))
+            search_sources(scoped_request, registry=SearchProviderRegistry({"fixture": Connector}))
+            self.assertEqual(cached_queries, [query + " [publication_year:2010-2014]"])
+        with self.assertRaises(ValueError):
+            SearchRequest(queries=(query,), providers=("fixture",),
+                          filters={"temporal_scope": {**scope, "start_year": True}})
+
     def test_successful_multi_provider_search_preserves_call_order(self) -> None:
         calls: list[tuple[str, str, int]] = []
 
@@ -426,6 +501,108 @@ class SearchCapabilityTests(unittest.TestCase):
 
         self.assertEqual([paper.id for paper in restored.papers], [raw.id])
         self.assertEqual(restored.selected_papers, ())
+
+    def test_search_rounds_accumulate_candidates_and_stop_within_limits(self) -> None:
+        for mode, max_rounds, query_limit, expansion, expected_rounds, reason in (
+            ("new", 4, 1, True, 2, "follow_up_query_limit_reached"),
+            ("new", 2, 3, True, 2, "round_limit_reached"),
+            ("duplicate", 4, 3, True, 2, "no_new_candidates"),
+            ("failed", 4, 3, True, 2, "providers_failed"),
+            ("new", 4, 0, True, 1, "follow_up_query_limit_reached"),
+            ("new", 4, 3, False, 1, "query_expansion_disabled"),
+        ):
+            with self.subTest(mode=mode, reason=reason), tempfile.TemporaryDirectory() as tmp:
+                calls = []
+
+                class Connector:
+                    source_name = "fixture"
+
+                    def search(self, request: SearchQuery) -> SearchResponse:
+                        calls.append(request.query)
+                        if mode == "failed" and len(calls) > 1:
+                            raise RuntimeError("follow-up unavailable")
+                        duplicate = mode == "duplicate" or len(calls) == 1
+                        paper = Paper(
+                            id=f"paper-{len(calls)}", authors=[], source="fixture",
+                            title="Reliable method" if duplicate else "Reliable benchmark",
+                            abstract="A reliable method." if duplicate else "A benchmark evaluation.",
+                            doi="10.fixture/method" if duplicate else "10.fixture/benchmark",
+                            url="https://example.test/paper",
+                        )
+                        return SearchResponse(source=self.source_name, query=request.query, papers=[paper])
+
+                capabilities = CapabilityRegistry()
+                capabilities.register("search", run_search_capability)
+                controller = SessionController.create(
+                    Path(tmp), session_id="search-rounds", topic="reliable", registry=capabilities,
+                )
+                result = controller.execute_attempt(
+                    "search", attempt_id="attempt-001",
+                    request=SearchRequest(queries=("method", " METHOD "), providers=("fixture", "fixture")),
+                    registry=SearchProviderRegistry({"fixture": Connector}),
+                    selection_policy=SearchSelectionPolicy(
+                        topic="reliable", questions=(), max_documents=3, next_query_limit=query_limit,
+                        query_plan=QueryPlan(
+                            topic="reliable", seed_queries=["method"], queries=["method"],
+                            query_specs=[{"query": "method", "facet": "method"}],
+                            required_facets=["method", "benchmark", "dataset"],
+                            max_rounds=max_rounds, auto_expansion=expansion,
+                        ),
+                    ),
+                )
+                handoff = controller.store.read_json("attempts/attempt-001/search_result.json")
+                restored = SearchResult.from_handoff_dict(handoff)
+                coverage = restored.coverage_report
+                expected_queries = 1 + (min(query_limit, 2) if expected_rounds == 2 else 0)
+                response_rounds = (1,) + (2,) * (expected_queries - 1)
+                self.assertEqual(len(calls), expected_queries)
+                self.assertEqual(len({query.casefold() for query in calls}), len(calls))
+                self.assertEqual(restored.response_rounds, response_rounds)
+                self.assertEqual(result.usage["query_count"], expected_queries)
+                self.assertEqual(result.usage["round_count"], expected_rounds)
+                self.assertEqual(coverage["retrieval"]["executed_rounds"], expected_rounds)
+                self.assertEqual([row["round"] for row in coverage["retrieval"]["attempts"]], list(restored.response_rounds))
+                self.assertEqual(coverage["stop_reason"], reason)
+                self.assertEqual(coverage["scope"], "search_metadata_only")
+                self.assertEqual(coverage["semantic_verification"], "not_performed")
+                self.assertIn("paper-1", [paper.id for paper in restored.selected_papers])
+                if mode == "new" and expected_rounds == 2:
+                    self.assertEqual(len(restored.selected_papers), 2)
+                    self.assertEqual({row["round"] for row in restored.selection_rows if row["decision"] == "keep"}, {1, 2})
+                elif mode == "duplicate":
+                    self.assertEqual(len(restored.papers), expected_queries)
+                    self.assertEqual(len(restored.selected_papers), 1)
+                elif mode == "failed":
+                    self.assertEqual(result.status, "partial")
+                    self.assertEqual(restored.responses[-1].status, "failed")
+                    self.assertIn("follow-up unavailable", restored.diagnostics[-1])
+
+    def test_search_rounds_do_not_repeat_executed_fallback_query(self) -> None:
+        class Connector:
+            source_name = "fixture"
+
+            def search(self, request: SearchQuery) -> SearchResponse:
+                return SearchResponse(source=self.source_name, query=request.query, papers=[Paper(
+                    id="paper-1", title="Reliable method", authors=[], abstract="A method.",
+                    url="https://example.test/paper", source=self.source_name,
+                )])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            capabilities = CapabilityRegistry()
+            capabilities.register("search", run_search_capability)
+            controller = SessionController.create(Path(tmp), session_id="no-repeat", topic="reliable", registry=capabilities)
+            result = controller.execute_attempt(
+                "search", attempt_id="attempt-001",
+                request=SearchRequest(queries=("reliable benchmark evaluation metric",), providers=("fixture",)),
+                registry=SearchProviderRegistry({"fixture": Connector}),
+                selection_policy=SearchSelectionPolicy(
+                    topic="reliable", questions=(), max_documents=1, next_query_limit=3,
+                    query_plan=QueryPlan(topic="reliable", seed_queries=[], required_facets=["benchmark"], max_rounds=4),
+                ),
+            )
+            handoff = controller.store.read_json("attempts/attempt-001/search_result.json")
+            self.assertEqual(result.usage["query_count"], 1)
+            self.assertEqual(handoff["coverage"]["stop_reason"], "no_new_queries")
 
     def test_request_rejects_empty_queries_providers_and_limits(self) -> None:
         with self.assertRaises(ValueError):

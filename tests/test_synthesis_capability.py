@@ -142,7 +142,9 @@ class SynthesisCapabilityTests(unittest.TestCase):
                 "prior_note": {"key_claims": ["SUPERSEDED: every subgroup was compared."],
                                "reading_followup": {"prior_note": {"method": "old " * 1000}}}}
             pack["paper_notes"] = [{"paper_id": "paper-1", "key_claims": ["Only subgroup A was compared."],
-                "claim_scopes": [{"object": "subgroup A", "conditions": ["Under the recorded budget"]}],
+                "claim_scopes": [{"claim_id": "paper-1#note-claim-006", "object": "subgroup A",
+                                  "conditions": ["Under the recorded budget"],
+                                  "evidence_refs": ["paper-1#chunk-1"]}],
                 "limitations": ["No supported conclusion for subgroup B."], "reading_followup": followup}]
             before = copy.deepcopy(pack)
             notes = _evidence_notes_markdown(pack)
@@ -155,6 +157,8 @@ class SynthesisCapabilityTests(unittest.TestCase):
             self.assertIn("The comparison concerns subgroup A.", payload)
             self.assertNotIn("SUPERSEDED", payload)
             self.assertNotIn("prior_note", payload)
+            self.assertNotIn("paper-1#note-claim-006", payload)
+            self.assertIn("paper-1#chunk-1", payload)
             from simple_ar.research.evidence.reader import reading_followup_context
             self.assertNotIn("passages", reading_followup_context(followup))
             self.assertEqual(reading_followup_context(followup, include_passages=True)["passages"], followup["passages"])
@@ -308,10 +312,16 @@ class SynthesisCapabilityTests(unittest.TestCase):
         self.assertNotIn("## Prepared Experiment Boundary (hard)", client.user)
 
     def test_llm_synthesis_context_exposes_closed_evidence_allowlist(self) -> None:
-        context = _bounded_pack_json(_pack())
+        import json
+        pack = _pack()
+        pack["method_cards"][0]["method_id"] = "external-source-id#method-001"
+        context = _bounded_pack_json(pack)
 
         self.assertIn('"allowed_motivation_refs"', context)
         self.assertIn("paper-1#chunk-1", context)
+        self.assertNotIn("external-source-id#method-001", context)
+        self.assertNotIn("claim-1", json.loads(context)["allowed_motivation_refs"])
+        self.assertEqual(pack["method_cards"][0]["method_id"], "external-source-id#method-001")
 
     def test_llm_accepts_actual_source_chunk_not_repeated_on_a_card(self) -> None:
         class FakeClient:

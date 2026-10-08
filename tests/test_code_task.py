@@ -75,6 +75,13 @@ class CodeTaskTests(unittest.TestCase):
                 "        self.assertEqual(predict('prize for you'), 'spam')\n"
             ))
             write_text(task, "Repair prize-message classification without changing tests.")
+            # A successfully revised analysis is portable even without a plot;
+            # publication must not impose the legacy figure.png output shape.
+            write_text(project / "analysis.py", "# Retained analysis source\n")
+            write_text(project / "README.md", "Retained analysis project.")
+            write_text(project / "tests/verify_delivery.py", "# Retained delivery checker\n")
+            write_text(project / "outputs/report.md", "Recorded classification observations.")
+            write_json(project / "outputs/results.json", {"observations": [1]})
             initialize_code_task(run_dir=run_dir, code_root=project, task_file=task)
             workspace = code_task_paths(run_dir).workspace_dir
             inputs = ArtifactStore(root / "inputs")
@@ -117,6 +124,10 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(read_json(failed)["status"], "failed")
             self.assertEqual(read_json(run_dir / "code_task" / "run" / "patched" / "execution_report.json")["status"], "passed")
             refs = payload["artifact_refs"]
+            delivery = read_json(store.root / refs["code_analysis"]["path"])
+            self.assertEqual(delivery["figures"], [])
+            self.assertIn("analysis.py", delivery["files"])
+            self.assertEqual(delivery["results"], {"observations": [1]})
             self.assertNotEqual(refs["edit_proposal"]["path"], refs["repair_proposal"]["path"])
             self.assertIn("post_repair", refs["review"]["path"])
             self.assertEqual(read_json(store.root / refs["validation_failure_1"]["path"])["status"], "failed")
@@ -2783,6 +2794,7 @@ protected_patterns = ["pyproject.toml"]
             code_root = root / "project"
             _write_toy_project(code_root)
             original = read_text(code_root / "spam_model.py")
+            write_text(code_root / "config" / "calibration.py", "# calibration padding\n" * 50 + "FACTOR = 2\n")
             write_text(code_root / "spam_model.py", "import example_embeddings\n" + "# padding\n" * 12 + original)
             write_text(root / "task.md", "Improve spam prediction using example_embeddings.")
             run_dir = root / "run"
@@ -2798,6 +2810,8 @@ protected_patterns = ["pyproject.toml"]
                     {"module": "example_embeddings", "symbols": ["compute_bins"]},
                 ]}},
                 {"edits": [], "summary": "Need the remainder of the selected source."},
+                {"edits": [], "context_request": {"files": ["config/calibration.py"],
+                    "query": "FACTOR", "reason": "The newly read implementation depends on calibration."}},
                 {"edits": [{
                     "path": "spam_model.py",
                     "old": "return 'spam' if 'win' in text.lower() else 'ham'",
@@ -2814,12 +2828,14 @@ protected_patterns = ["pyproject.toml"]
             ):
                 result = propose_patch_edits(run_dir, use_llm=True, max_source_chars_per_file=180)
             self.assertEqual(result.edit_count, 1)
-            self.assertEqual(client.ask_json.call_count, 3)
+            self.assertEqual(client.ask_json.call_count, 4)
             self.assertIn("def predict", client.ask_json.call_args_list[2].args[1])
+            self.assertIn("FACTOR = 2", client.ask_json.call_args_list[3].args[1])
             followup = read_json(run_dir / "code_task/meta/edit_context_followup.json")
-            self.assertEqual(len(followup["rounds"]), 2)
+            self.assertEqual(len(followup["rounds"]), 3)
             self.assertEqual(followup["rounds"][0]["snippets"], [])
             self.assertTrue(followup["rounds"][1]["snippets"])
+            self.assertEqual(followup["rounds"][2]["snippets"][0]["path"], "config/calibration.py")
 
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
@@ -2943,7 +2959,7 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("latest_batch", manifest["attempts"])
             self.assertNotIn("items", manifest["attempts"])
 
-    def test_work_plan_escalates_budget_for_a_three_file_cohesive_item(self) -> None:
+    def test_work_plan_budget_tracks_cohesive_file_scope(self) -> None:
         items = _normalize_work_items(
             [
                 {
@@ -2959,9 +2975,16 @@ protected_patterns = ["pyproject.toml"]
             protected_patterns=(),
         )
 
-        self.assertEqual(items[0]["budget_profile"], "large")
-        self.assertTrue(items[0]["requires_budget_override"])
-        self.assertIn("more files than the normal", items[0]["suggested_budget_override"])
+        self.assertEqual(items[0]["budget_profile"], "normal")
+        self.assertFalse(items[0]["requires_budget_override"])
+        paths = ["a.py", "b.py", "c.py", "d.py", "e.py"]
+        oversized = _normalize_work_items(
+            [{"id": "W1", "target_files": paths, "budget_profile": "normal"}],
+            set(paths), selected_files=paths, allowed_patterns=(), protected_patterns=(),
+        )
+        self.assertEqual(oversized[0]["budget_profile"], "large")
+        self.assertTrue(oversized[0]["requires_budget_override"])
+        self.assertIn("more files than the normal", oversized[0]["suggested_budget_override"])
 
     def test_create_code_task_batch_reuses_existing_item_batch(self) -> None:
         with _temporary_root() as root:
@@ -3298,6 +3321,84 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(result[0]["access_role"], "read_only")
             self.assertGreater(result[0]["source_offset"], 0)
 
+            # A middle observation leaves a small header and a large unseen
+            # definition body. The header must not consume the only window,
+            # even when a constructor call precedes the requested definition.
+            source = ("def factory():\n    return Settings()\n\n"
+                      "class Settings:\n    field = 1\n"
+                      + "    # author configuration\n" * 12
+                      + "    def record(self):\n        return {'result': self.field}\n")
+            write_text(root / "settings.py", source)
+            index = build_codebase_index(root)
+            begin = source.index("class Settings")
+            middle = source.index("    field")
+            stop = middle + len("    field = 1\n")
+            supplied = [{"path": "settings.py", "text": source[middle:stop],
+                         "source_offset": middle}]
+            for symbols in (["Settings"], []):
+                with self.subTest(symbols=symbols):
+                    result = _requested_source_context(
+                        root, index, {"files": ["settings.py"], "symbols": symbols,
+                                      "query": "Settings record"},
+                        supplied=supplied, max_files=1, max_chars=len(source),
+                        max_total_chars=len(source),
+                    )
+                    self.assertEqual(len(result), 1)
+                    window = result[0]
+                    self.assertEqual(window["source_offset"], stop)
+                    self.assertIn("def record", window["text"])
+                    self.assertEqual(window["text"], source[stop:])
+                    self.assertLessEqual(len(window["text"]), len(source))
+
+            # A seen declaration plus a later overlapping observation must
+            # still expose the unobserved body, without returning seen bytes.
+            supplied.extend([
+                {"path": "settings.py", "text": source[begin:middle], "source_offset": begin},
+                {"path": "settings.py", "text": source[middle - 3:stop], "source_offset": middle - 3},
+            ])
+            result = _requested_source_context(
+                root, index, {"files": ["settings.py"], "symbols": ["Settings"]},
+                supplied=supplied, max_files=1, max_chars=80, max_total_chars=80,
+            )
+            self.assertEqual(result[0]["source_offset"], stop)
+            self.assertEqual(result[0]["text"], source[stop:stop + 80])
+            self.assertEqual(result[0]["start_line"], source.count("\n", 0, stop) + 1)
+
+            from simple_ar.code_task.analysis.context import _named_definition_offset, clip_source_snippet
+            for declaration, name in (
+                ("class Options:\n    field: int = 0\n", "Options"),
+                ("def adapt():\n    return 1\n", "adapt"),
+                ("async def adapt_async():\n    return 1\n", "adapt_async"),
+            ):
+                with self.subTest(declaration=declaration):
+                    prefix = "from dataclasses import dataclass\n\n"
+                    decorators = "@dataclass\n@registered(\n    enabled=True,\n)\n"
+                    text = prefix + decorators + declaration
+                    write_text(root / "decorated.py", text)
+                    declaration_offset = len(prefix + decorators)
+                    declaration_line = text.count("\n", 0, declaration_offset) + 1
+                    anchor = _named_definition_offset(text, "decorated.py", name, [{
+                        "path": "decorated.py", "name": name, "qualified_name": name,
+                        "line_start": declaration_line}])
+                    self.assertEqual(anchor, len(prefix))
+                    initial = clip_source_snippet({"path": "decorated.py", "text": text[anchor:],
+                        "source_offset": anchor, "source_chars": len(text), "start_line": 3}, max_chars=64)
+                    self.assertTrue(initial["text"].startswith("@dataclass\n@registered("))
+                    self.assertLessEqual(len(initial["text"]), 64)
+                    old = {"path": "decorated.py", "text": text[declaration_offset:],
+                           "source_offset": declaration_offset}
+                    result = _requested_source_context(root, build_codebase_index(root),
+                        {"files": ["decorated.py"], "symbols": [name]}, supplied=[old],
+                        max_files=1, max_chars=64, max_total_chars=64)
+                    self.assertEqual(len(result), 1)
+                    self.assertEqual(result[0]["source_offset"], len(prefix))
+                    self.assertEqual(result[0]["text"], decorators)
+                    self.assertEqual(result[0]["start_line"], 3)
+                    self.assertLessEqual(len(result[0]["text"]), 64)
+                    self.assertEqual(_requested_source_context(root, build_codebase_index(root),
+                        {"files": ["decorated.py"], "symbols": [name]}, supplied=[old, *result],
+                        max_files=1, max_chars=64, max_total_chars=64), [])
+
     def test_truncated_editable_file_can_be_read_again_without_expanding_scope(self) -> None:
         with _temporary_root() as root:
             code_root = root / "project"
@@ -3314,7 +3415,7 @@ protected_patterns = ["pyproject.toml"]
             record_plan_decision(run_dir, decision="approve")
             client = Mock()
             client.ask_json.side_effect = [
-                {"edits": [], "summary": "The prediction function is beyond the visible prefix.",
+                {"edits": [], "summary": "The required behavior is beyond the visible prefix; its interface is missing.",
                  "validation": ["Source excerpt is truncated."],
                  "context_request": {"files": ["spam_model.py:tail"]},
                  "implementation_feedback": {"kind": "source_gap", "reason": "Need the rest of the file."}},
@@ -5335,6 +5436,29 @@ protected_patterns = ["pyproject.toml"]
                     execute_code_task(run_dir, use_llm=False, timeout_sec=10, apply_proposed_edits=True)
 
     def test_execute_regenerates_one_invalid_proposal_with_failure_context(self) -> None:
+        with _temporary_root() as root:
+            code_root, task_file = root / "project", root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "Improve the classifier within its existing edit budget.")
+            run_dir = root / "run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file,
+                                 benchmark_command="python -m unittest discover -s tests")
+            execute_code_task(run_dir, use_llm=False, timeout_sec=10)
+            record_plan_decision(run_dir, decision="approve")
+            proposal_path = run_dir / "code_task/meta/proposed_edits.json"
+            write_json(proposal_path, {"edits": [], "budget": {"status": "rejected_absolute"},
+                                      "warnings": ["Rejected suspected whole-file rewrite for spam_model.py."]})
+            original = (run_dir / "code_task/workspace/spam_model.py").read_bytes()
+            proposal = SimpleNamespace(mode="llm", edit_count=0, proposal_path=proposal_path,
+                                       selected_files=("spam_model.py",))
+            with patch("simple_ar.code_task.orchestration.execute.propose_patch_edits", return_value=proposal):
+                rejected = execute_code_task(run_dir, use_llm=True, timeout_sec=10,
+                    approval_note="approved isolated edits", apply_proposed_edits=True)
+            self.assertEqual(rejected.stop_reason, "edit_budget_rejected")
+            self.assertIn("whole-file rewrite", rejected.next_action)
+            self.assertEqual((run_dir / "code_task/workspace/spam_model.py").read_bytes(), original)
+            findings = read_jsonl(run_dir / "code_task/memory/review_findings.jsonl")
+            self.assertTrue(any(row.get("key") == "edit-proposal-budget-rejected" for row in findings))
         with _temporary_root() as root:
             code_root = root / "toy_project"
             task_file = root / "task.md"

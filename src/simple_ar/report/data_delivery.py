@@ -36,14 +36,20 @@ def analysis_delivery_block(
     from simple_ar.result_analysis.table import data_attribution_markdown, table_values_markdown
 
     prefix = f"analyses/analysis-{index:03d}"
-    blocks = [f"Supplied data ({result['row_count']} rows): "
-              f"[analysis and editable figures]({prefix}/analysis.md), "
-              f"[numerical records]({prefix}/analysis.json). "
-              "Arithmetic was rechecked; data collection and scientific validity were not independently verified."]
-    if attribution := data_attribution_markdown(dict(result)):
-        blocks.append(attribution)
-    if config.data_tables == "full":
-        blocks.extend(["", table_values_markdown(dict(result))])
+    code = result.get("schema_version") == "code_analysis.v1"
+    if code:
+        blocks = [f"Supplied code analysis: [explanation]({prefix}/outputs/report.md), "
+                  f"[editable script]({prefix}/analysis.py), [recorded results]({prefix}/outputs/results.json). "
+                  "The source task validated execution; this writing task did not independently recompute its results."]
+    else:
+        blocks = [f"Supplied data ({result['row_count']} rows): "
+                  f"[analysis and editable figures]({prefix}/analysis.md), "
+                  f"[numerical records]({prefix}/analysis.json). "
+                  "Arithmetic was rechecked; data collection and scientific validity were not independently verified."]
+        if attribution := data_attribution_markdown(dict(result)):
+            blocks.append(attribution)
+        if config.data_tables == "full":
+            blocks.extend(["", table_values_markdown(dict(result))])
     intents = [row for row in plan.visual_intents
                   if handle and row.kind == "figure" and row.view == "supplied-data"
                   and row.evidence_handles == [handle]] if plan else []
@@ -62,7 +68,8 @@ def analysis_delivery_block(
                 continue
             path = f"{prefix}/{figure['path']}"
             blocks.extend(["", f"![Descriptive data]({path})", "", figure["caption"]])
-            figures.append({"path": path, "caption": figure["caption"]})
+            figures.append({"path": path, "caption": figure["caption"],
+                            "exports": {key: f"{prefix}/{value}" for key, value in figure.get("exports", {}).items()}})
     markdown = "\n".join(blocks)
     return {"section_id": owner or f"supplied_analysis_{index}",
             "heading": "" if owner else f"Supplied Descriptive Data {index}",

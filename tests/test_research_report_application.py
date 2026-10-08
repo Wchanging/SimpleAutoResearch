@@ -112,9 +112,43 @@ class ResearchReportApplicationTests(unittest.TestCase):
             fulltext_manifest={}, fulltext_extraction={}, sections=[], chunks=[])
         read = ReadResult(status="completed", bundle=documents, paper_notes=tuple(
             {"paper_id": f"doc-{key}", "method": f"Method for {key}", "limitations": ["Abstract only"],
-             "evidence_refs": [f"doc-{key}#abstract"]} for key in ("p2", "p1")))
+             "evidence_refs": [f"doc-{key}#abstract"]} for key in ("p2", "p1")),
+            question_assessments=({"question_id": "q-intervals", "status": "missing",
+                                   "reason": "Only point-prediction candidates"},))
+        documents.records.append(DocumentRecord(document_id="doc-p1#linked", source="supporting_material",
+            title="Author code page", url="https://example.test/code", metadata={
+                "kind": "supporting_material", "parent_document_id": "doc-p1"}))
         projected, memory = attach_report_read_evidence(context, ReportMemory(), documents=documents, read=read,
-                                                       read_ref=ArtifactRef("read/result.json"))
+            read_ref=ArtifactRef("read/result.json"), documents_ref=ArtifactRef("read/documents.json"))
+        material = next(h for h in projected.source_handles if h.handle == "material:doc-p1#linked")
+        self.assertEqual(material.kind, "material")
+        self.assertEqual(material.artifact, "read/documents.json")
+        self.assertEqual(material.metadata["parent_document_id"], "doc-p1")
+        self.assertEqual(material.metadata["evidence_role"], "linked_material_not_paper_or_measured_result")
+        citation_id = projected.citation_key_map[material.citation_key]
+        entry = next(row for row in projected.papers if row["id"] == citation_id)
+        self.assertEqual(entry["url"], "https://example.test/code")
+        self.assertEqual(entry["authors"], [])
+        self.assertEqual(entry["source"], "supporting_material")
+        self.assertNotIn("#", citation_id)
+        from simple_ar.report.citations import references_markdown
+        from simple_ar.literature.models import Paper
+        self.assertIn("https://example.test/code", references_markdown([Paper.from_row(entry)]))
+        repeated, _ = attach_report_read_evidence(projected, memory, documents=documents, read=read,
+            read_ref=ArtifactRef("read/result.json"), documents_ref=ArtifactRef("read/documents.json"))
+        self.assertEqual(repeated.citation_key_map, projected.citation_key_map)
+        self.assertEqual(sum(row["id"] == citation_id for row in repeated.papers), 1)
+        result = ReportToolGateway(projected).call(ReportToolCall(tool_name="get_paper_brief",
+            arguments={"citation_key": material.citation_key}))
+        self.assertEqual(result.source_handles, [material.handle])
+        from simple_ar.report.projection import build_material_report_inputs
+        from simple_ar.research.contracts import TextChunk
+        supplied = DocumentBundle(records=[documents.records[-1]], fulltext_manifest={}, fulltext_extraction={},
+            sections=[], chunks=[TextChunk("linked-text", "doc-p1#linked", "Recorded implementation conditions.")])
+        reused, _ = build_material_report_inputs(topic="Implementation conditions", documents=supplied,
+            documents_ref=ArtifactRef("sources/bundle.json"), assets=[])
+        self.assertEqual(reused.papers[0]["url"], "https://example.test/code")
+        self.assertEqual(reused.source_handles[0].citation_key, "P1")
         for key in ("p1", "p2"):
             result = ReportToolGateway(projected).call(ReportToolCall(tool_name="get_paper_brief", arguments={"paper_id": key}))
             evidence = result.content["handles"][0]
@@ -124,7 +158,9 @@ class ResearchReportApplicationTests(unittest.TestCase):
             self.assertEqual(evidence["metadata"]["reading_artifact"], "read/result.json")
         self.assertEqual(memory.source_handles, projected.source_handles)
         self.assertEqual(context.source_handles[0].summary, "")
-        self.assertIn("2 metadata/abstract-only", projected.evidence_summary)
+        self.assertIn("3 metadata/abstract-only", projected.evidence_summary)
+        self.assertIn("Only point-prediction candidates", projected.evidence_summary)
+        self.assertIn("not verified answers", projected.evidence_summary)
         self.assertTrue(any("Do not describe metadata/abstract-only sources" in line
                             for line in memory.limitations))
 
@@ -270,6 +306,14 @@ class ResearchReportApplicationTests(unittest.TestCase):
         self.assertEqual(context.citation_key_map, {"P1": "openalex-W1"})
         self.assertEqual(context.source_handles[1].citation_key, "P1")
         self.assertEqual(memory.source_handles[1].citation_key, "P1")
+        direct, direct_memory = build_literature_report_inputs(
+            topic="A topic", brief=None, search=search, documents=documents, brief_ref=None)
+        self.assertEqual(direct.citation_key_map, context.citation_key_map)
+        self.assertEqual(direct.report_mode, "research_only")
+        self.assertEqual(direct.source_handles[0].citation_key, "P1")
+        self.assertEqual(direct_memory.source_handles, direct.source_handles)
+        self.assertEqual(direct.synthesis_markdown, "")
+        self.assertIn("No experiment", direct_memory.limitations[0])
 
 
 if __name__ == "__main__":

@@ -24,14 +24,17 @@ class SourceEncodingTests(unittest.TestCase):
     def test_valid_bom_and_encoding_cookie_are_not_false_syntax_errors(self):
         for raw in (b'\xef\xbb\xbfimport json\nVALUE = 1\n',
                     b'# coding: latin-1\nVALUE = "caf\xe9"\n',
-                    b'\xef\xbb\xbf# coding: utf-8\nVALUE = "\xe6\xb5\x8b"\n'):
+                    b'\xef\xbb\xbf# coding: utf-8\nVALUE = "\xe6\xb5\x8b"\n',
+                    b'from __future__ import annotations\nraise RuntimeError("must not execute")\n'):
             with self.subTest(raw=raw):
                 self.assertFalse([row for row in self.inspect(raw) if row['severity'] == 'error'])
 
     def test_invalid_encoding_and_true_syntax_errors_still_fail(self):
         for raw in (b'\xef\xbb\xbf# coding: latin-1\nVALUE = 1\n',
                     b'VALUE = "\xff"\n', b'if True print(1)\n',
-                    b'# coding: imaginary_encoding\nVALUE = 1\n'):
+                    b'# coding: imaginary_encoding\nVALUE = 1\n',
+                    b'VALUE = 1\nfrom __future__ import annotations\n',
+                    b'return 1\n', b'break\n', b'nonlocal missing\n'):
             with self.subTest(raw=raw):
                 errors = [row for row in self.inspect(raw) if row['severity'] == 'error']
                 self.assertEqual(errors[0]['code'], 'syntax_error')
@@ -149,11 +152,13 @@ class SourceEncodingTests(unittest.TestCase):
             (root / 'bom.py').write_bytes(b'\xef\xbb\xbfVALUE = 1\n')
             (root / 'latin.py').write_bytes(b'# coding: latin-1\ndef caf\xe9():\n    return 1\n')
             (root / 'unknown.py').write_bytes(b'# coding: imaginary_codec\nVALUE = 1\n')
+            (root / 'compiler_error.py').write_bytes(b'VALUE = 1\nfrom __future__ import annotations\n')
             rows = {row['path']: row['python'] for row in build_codebase_index(root)['files']}
             self.assertTrue(rows['bom.py']['syntax_ok'])
             self.assertTrue(rows['latin.py']['syntax_ok'])
             self.assertEqual(rows['latin.py']['functions'][0]['name'], 'café')
             self.assertFalse(rows['unknown.py']['syntax_ok'])
+            self.assertFalse(rows['compiler_error.py']['syntax_ok'])
 
 if __name__ == '__main__':
     unittest.main()

@@ -532,6 +532,17 @@ def _normalize_plan_data(
     return normalized
 
 
+def patch_plan_context(patch_plan: str, task_text: str) -> str:
+    """Do not resend the renderer's exact Task copy beside the full task.
+
+    Keep stored/approved Markdown intact. Custom plans and nonidentical task
+    sections remain verbatim; this is deduplication, not summarization.
+    """
+    task = task_text.strip()
+    repeated = f"## Task\n\n{task}\n\n## Run Context"
+    return patch_plan.replace(repeated, "## Task\n\nComplete task supplied separately.\n\n## Run Context", 1) if task else patch_plan
+
+
 def _render_patch_plan(
     plan: dict[str, Any],
     *,

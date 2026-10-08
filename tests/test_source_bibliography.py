@@ -207,6 +207,30 @@ class MaterialBibliographyTests(unittest.TestCase):
         self.assertEqual(paper.authors, [])
         self.assertIsNone(paper.published)
         self.assertIsNone(bundle.records[0].url)
+        # Reusing a draft's citation identities must not promote it to primary
+        # source evidence or require parsing arbitrary BibTeX with ad-hoc regex.
+        import tempfile
+        from pathlib import Path
+        from simple_ar.report.citations import citation_map_artifact
+        from simple_ar.research.documents.ingest import build_document_bundle
+        from simple_ar.research.contracts import SourcePlan
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recorded-identities.json"
+            source = Paper("study-2025", "Recorded study", ["Ada"], "", "https://example.org/study", published="2025")
+            path.write_text(json.dumps(citation_map_artifact({source.id: 1}, [source], {"P8": source.id})), encoding="utf-8")
+            bundle = build_document_bundle(papers=[], source_plan=SourcePlan([], local_documents=[str(path)]),
+                cache_dir=None, extraction_dir=Path(directory))
+            context, memory = build_material_report_inputs(topic="Revise the supplied draft", documents=bundle,
+                documents_ref=ArtifactRef("documents.json"), assets=[SimpleNamespace(locator=str(path), role="material")])
+            self.assertEqual([p["id"] for p in context.papers], [source.id])
+            retained = Paper.from_row(context.papers[0])
+            self.assertEqual(retained.authors, ["Ada"])
+            self.assertEqual(retained.abstract, "")
+            self.assertEqual(context.citation_key_map, {"P8": source.id})
+            self.assertEqual(memory.source_handles[-1].citation_key, "P8")
+            self.assertIn("primary text was not rechecked", retained.bibliographic_notes[0])
+            self.assertEqual(memory.source_handles[-1].metadata["document_chunk_count"], 0)
+            self.assertEqual(memory.source_handles[-1].metadata["evidence_role"], "reused_reference_metadata_not_primary_text")
 
     def test_projection_assembly_and_bibtex_use_the_same_accepted_fields(self):
         context, memory, bundle, note, _ = self.inputs()

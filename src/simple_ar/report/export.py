@@ -47,7 +47,7 @@ def _asset_path(root: Path, target: str) -> Path:
     return path
 
 
-def _copy_image(source: Path, output: Path, index: int) -> str:
+def _copy_image(source: Path, output: Path, index: int | str, *, convert_svg: bool = True) -> str:
     assets = output / "figures"
     assets.mkdir(exist_ok=True)
     target = assets / f"figure-{index}{source.suffix.lower()}"
@@ -57,10 +57,27 @@ def _copy_image(source: Path, output: Path, index: int) -> str:
         # stylesheet references while converting a supplied SVG.
         text = source.read_text(encoding="utf-8")
         references = re.findall(r"(?:href\s*=\s*['\"]([^'\"]*)['\"])|(?:url\(([^)]*)\))", text, re.I)
-        if re.search(r"<!DOCTYPE|<!ENTITY|@import", text, re.I) or any(
+        if re.search(r"<!DOCTYPE[^>]*\[|<!ENTITY|@import", text, re.I) or any(
             not (href or css).strip().strip("'\"").startswith("#") for href, css in references
         ):
             raise ReportExportError("SVG contains external resource references; use a self-contained figure.")
+        # Plotting libraries can emit an external DTD declaration even when
+        # every rendered element is self-contained. Remove that declaration
+        # before parsing/conversion; do not fetch it or allow internal entities.
+        normalized = re.sub(r"<!DOCTYPE[^>]*>", "", text, flags=re.I)
+        import xml.etree.ElementTree as ET
+        try:
+            svg = ET.fromstring(normalized)
+        except ET.ParseError as exc:
+            raise ReportExportError("Malformed SVG image.") from exc
+        if svg.tag not in {"svg", "{http://www.w3.org/2000/svg}svg"} or any(
+            element.tag.rsplit("}", 1)[-1] in {"script", "foreignObject"} for element in svg.iter()
+        ):
+            raise ReportExportError("Export requires a static SVG figure.")
+        if normalized != text:
+            target.write_text(normalized, encoding="utf-8")
+        if not convert_svg:
+            return target.relative_to(output).as_posix()
         converter = shutil.which("rsvg-convert")
         if not converter:
             raise ReportExportError("SVG export needs rsvg-convert (librsvg); the original report is unchanged.")
@@ -192,9 +209,12 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
     ast = json.loads(_run([pandoc, "--from=markdown-raw_tex-raw_html+tex_math_single_backslash", "--to=json"], cwd=root, text=source))
     ast["meta"] = {}  # Input metadata must not supply a TeX preamble or includes.
     captions = {}
+    figure_variants = {}
     figure_manifest = root / "figures/figures_manifest.json"
     if figure_manifest.is_file():
         for row in json.loads(figure_manifest.read_text(encoding="utf-8")).get("figures", []):
+            if row.get("exports"):
+                figure_variants[row["path"]] = row["exports"]
             if not row.get("caption"):
                 continue
             parsed = json.loads(_run([pandoc, "--from=markdown-raw_tex-raw_html+tex_math_single_backslash", "--to=json"],
@@ -244,6 +264,22 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
     try:
         image_targets = {url: _copy_image(path, output, index)
                          for index, (url, path) in enumerate(image_sources.items(), start=1)}
+        # The body may prefer a PNG preview while its registered figure has
+        # editable vector exports. Preserve those variants without changing
+        # the chosen display image or copying unrelated source directories.
+        manifest["figure_exports"] = {}
+        for index, url in enumerate(image_sources, start=1):
+            variants = figure_variants.get(url, {})
+            if not isinstance(variants, dict):
+                raise ReportExportError("Recorded figure exports must be a format-to-path map.")
+            for format_name, target in variants.items():
+                if format_name not in {"png", "svg", "pdf", "jpg", "jpeg"} or not isinstance(target, str):
+                    raise ReportExportError("Unsupported recorded figure export.")
+                source_asset = _asset_path(root, target)
+                if source_asset.suffix.lower().lstrip(".") != format_name:
+                    raise ReportExportError("Recorded figure export format does not match its file.")
+                copied = _copy_image(source_asset, output, f"{index}-source-{format_name}", convert_svg=False)
+                manifest["figure_exports"].setdefault(url, {})[format_name] = copied
         recorded_links = {node["c"][-1][0] for node in _nodes([blocks, abstract]) if node.get("t") == "Link"}
         copied_records = _copy_experiment_records(root, output) if recorded_links & {
             "experiment_evidence.md", "experiment_evidence.json"} else []

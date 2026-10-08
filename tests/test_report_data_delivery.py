@@ -97,6 +97,106 @@ class DataDeliveryTests(unittest.TestCase):
             supplied_data_delivery(context, config=config, plan=memory.document_plan, section_ids=[section.section_id])
         self.assertEqual(result, original)
 
+        # A validated script package uses the same placement/delivery path,
+        # but must never inherit table arithmetic certification.
+        import tempfile
+        from pathlib import Path
+        from simple_ar.core.artifacts import write_text, write_json
+        from simple_ar.result_analysis.script_project import copy_code_analysis_package
+        from simple_ar.core.capabilities import CapabilityRegistry
+        from simple_ar.core.session import SessionController
+        from simple_ar.report.capability import ReportAssemblyRequest, run_report_capability
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            for name, text in {"analysis.py": "import json\nfrom pathlib import Path\nfrom src.panels import total\nroot = Path(__file__).parent\nvalue = total(root / 'data/input.csv')\n(root / 'outputs/results.json').write_text(json.dumps({'observations': [value]}))\nprint(value)\n", "README.md": "Supplied project",
+                               "src/panels/__init__.py": "import csv\ndef total(path):\n    with path.open() as stream:\n        return sum(int(row['value']) for row in csv.DictReader(stream))\n",
+                               "src/layout.dot": "digraph { input -> output }",
+                               "outputs/report.md": "Recorded values, not a fresh experiment.",
+                               "data/input.csv": "value\n2\n", "tests/verify_delivery.py": "# retained verifier",
+                               "outputs/figure.png": "PNG fixture", "outputs/figure.svg": "<svg/>"}.items():
+                write_text(project / name, text)
+            write_json(project / "outputs/results.json", {"observations": [2]})
+            package = root / "package"
+            recorded = copy_code_analysis_package(project, package, workspace=True)
+            # Output shape follows the task, including tables without a plot
+            # and several separately named figures. Legacy figure.* stays valid.
+            (project / "outputs/figure.png").unlink()
+            (project / "outputs/figure.svg").unlink()
+            write_text(project / "outputs/summary.csv", "count\n2\n")
+            tabular = copy_code_analysis_package(project, root / "tabular", workspace=True)
+            self.assertEqual(tabular["figures"], [])
+            self.assertIn("outputs/summary.csv", tabular["files"])
+            copy_code_analysis_package(root / "tabular/analysis.json", root / "tabular-moved")
+            for name in ("left.svg", "right.png", "right.pdf"):
+                write_text(project / "outputs" / name, "attachment fixture")
+            multi = copy_code_analysis_package(project, None, workspace=True)
+            self.assertEqual({row["path"] for row in multi["figures"]},
+                             {"outputs/left.svg", "outputs/right.png"})
+            self.assertEqual(next(row for row in multi["figures"] if row["path"].endswith("right.png"))["exports"],
+                             {"pdf": "outputs/right.pdf"})
+            import shutil
+            shutil.rmtree(project)
+            moved = root / "moved"
+            copy_code_analysis_package(package / "analysis.json", moved)
+            import subprocess
+            import sys
+            (moved / 'outputs/results.json').unlink()
+            rebuilt = subprocess.run([sys.executable, str(moved / "analysis.py")], cwd=root,
+                capture_output=True, text=True, timeout=10, check=True)
+            self.assertEqual(rebuilt.stdout.strip(), "2")
+            self.assertEqual(json.loads((moved / 'outputs/results.json').read_text()), {'observations': [2]})
+            self.assertEqual((moved / "src/layout.dot").read_text(), "digraph { input -> output }")
+            self.assertEqual((moved / "data/input.csv").read_text(), "value\n2\n")
+            context.results["supplied_analyses"] = [{**recorded, "document_id": "data"}]
+            intent.figure_paths = ["outputs/figure.png"]
+            block = supplied_data_delivery(context, config=config, plan=memory.document_plan,
+                                           section_ids=[section.section_id])[0]
+            self.assertIn("did not independently recompute", block["markdown"])
+            self.assertNotIn("Arithmetic was rechecked", block["markdown"])
+            self.assertIn("outputs/figure.png", block["markdown"])
+            registry = CapabilityRegistry()
+            registry.register("report", run_report_capability)
+            controller = SessionController.create(root / "session", session_id="script-report", topic="Supplied results",
+                                                  profile="survey", registry=registry)
+            supplied = controller.store.write_json("input/analysis.json", recorded, kind="analysis_package", schema="code_analysis.v1")
+            copy_code_analysis_package(moved / "analysis.json", controller.store.root / "input")
+            from simple_ar.research.documents.ingest import DocumentIngestRequest, DocumentBundle, run_document_ingest_capability
+            from simple_ar.research.contracts import SourcePlan
+            from simple_ar.report.projection import build_material_report_inputs
+            registry.register("document_ingest", run_document_ingest_capability)
+            acquired = controller.execute_attempt("document_ingest", attempt_id="ingest-1", request=DocumentIngestRequest(
+                papers=(), source_plan=SourcePlan(queries=["supplied results"], sources=["local_files"],
+                    local_documents=[str(moved / "analysis.json")]), extraction_dir=root / "extract",
+                analysis_paths=(moved / "analysis.json",)))
+            self.assertEqual(acquired.status, "completed", acquired.diagnostics)
+            document_ref = next(row for row in acquired.artifacts if row.schema == "document_bundle.v1")
+            document_ref = controller.store.ref(Path("attempts/ingest-1") / document_ref.path,
+                                                kind=document_ref.kind, schema=document_ref.schema)
+            documents = DocumentBundle.from_handoff_dict(controller.store.read_json(document_ref))
+            projected, _ = build_material_report_inputs(topic="Interpret existing results", documents=documents,
+                                                        documents_ref=document_ref, assets=[])
+            self.assertEqual(projected.results["supplied_analyses"][0]["schema_version"], "code_analysis.v1")
+            self.assertIn("observations", " ".join(row.text for row in documents.chunks))
+            compact = _compact_execution_results(projected.results)
+            self.assertEqual(compact["supplied_analyses"][0]["evidence_role"],
+                             "validated_script_output_not_independently_recomputed")
+            self.assertNotIn("records_scope", compact["supplied_analyses"][0])
+            result_delivery = controller.execute_attempt("report", attempt_id="report-1",
+                request=ReportAssemblyRequest(title="Supplied results", sections=(ReportSectionDraft(
+                    section_id=section.section_id, heading=section.heading, draft_markdown="The supplied result is 2."),),
+                    config=config, document_plan=memory.document_plan, table_analyses=(supplied,),
+                    analysis_handles={supplied.path: "material:data"}), inputs=(supplied,))
+            self.assertEqual(result_delivery.status, "completed", result_delivery.diagnostics)
+            figure_paths = [row.path for row in result_delivery.artifacts if row.kind == "figure"]
+            self.assertEqual({Path(path).suffix for path in figure_paths}, {".png", ".svg"})
+            attachments = [row for row in result_delivery.artifacts if row.kind == "analysis_attachment"]
+            self.assertTrue(any(row.path.endswith("data/input.csv") for row in attachments))
+            malformed = {**recorded, "files": [*recorded["files"], "../outside.py"]}
+            write_json(moved / "analysis.json", malformed)
+            with self.assertRaisesRegex(ValueError, "package-local"):
+                copy_code_analysis_package(moved / "analysis.json", root / "rejected")
+
     def test_unselected_figures_remain_linked_instead_of_filling_the_body(self):
         from simple_ar.report.data_delivery import supplied_data_delivery
         context, memory, section, config = self.objects()

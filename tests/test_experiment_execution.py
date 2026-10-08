@@ -5,11 +5,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from simple_ar.code_task import execute_code_task, initialize_code_task
 from simple_ar.code_task.generation.architecture import fallback_architecture_plan
 from simple_ar.code_task.generation.task_contract import build_greenfield_task_contract
-from simple_ar.experiment.execution.backend import LocalExecutionBackend, RunRequest
+from simple_ar.experiment.execution.backend import ExecutionError, LocalExecutionBackend, RunRequest
 from simple_ar.experiment.execution.diagnosis import diagnose_experiment_run, render_diagnosis_markdown
 from simple_ar.experiment.execution.guards import evaluate_result_guard
 from simple_ar.experiment.execution.results import build_canonical_results
@@ -21,11 +22,57 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class ExperimentExecutionTests(unittest.TestCase):
+    def test_output_dir_placeholders_write_only_current_invocation_and_record_actual_argv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "result.json").write_text('{"value": -1}', encoding="utf-8")
+            (root / "metrics.csv").write_text("value\n-1\n", encoding="utf-8")
+            script = (
+                "import sys,json; from pathlib import Path; "
+                "target=Path(sys.argv[1].removeprefix('--out=')); directory=Path(sys.argv[2]); "
+                "assert target.parent == directory and directory.is_dir(); "
+                "target.write_text(json.dumps({'value': 7}), encoding='utf-8'); "
+                "(directory/'metrics.csv').write_text('value\\n7\\n', encoding='utf-8'); print(directory)"
+            )
+            command = [sys.executable, "-c", script, "--out={output_dir}/result.json", "{output_dir}"]
+            request = RunRequest(command, root, 5, output_dir=root / "process logs")
+            backend = LocalExecutionBackend()
+            first, second = backend.run(request), backend.run(request)
+            self.assertNotEqual(first.process_record["invocation_id"], second.process_record["invocation_id"])
+            for result in (first, second):
+                invocation = root / "process logs" / result.process_record["invocation_id"]
+                outputs = invocation / "outputs"
+                actual = command[:-2] + [f"--out={outputs}/result.json", str(outputs)]
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.command, actual)
+                self.assertEqual(result.to_json()["command"], actual)
+                self.assertEqual(result.process_record["argv"], actual)
+                self.assertEqual(read_json(invocation / "invocation.json")["argv"], actual)
+                self.assertEqual(read_json(outputs / "result.json"), {"value": 7})
+                self.assertEqual((outputs / "metrics.csv").read_text(encoding="utf-8"), "value\n7\n")
+                self.assertEqual(Path(result.stdout.strip()), outputs)
+            self.assertEqual(request.command[-2:], ["--out={output_dir}/result.json", "{output_dir}"])
+            self.assertEqual(read_json(root / "result.json"), {"value": -1})
+            self.assertEqual((root / "metrics.csv").read_text(encoding="utf-8"), "value\n-1\n")
+
+    def test_output_dir_placeholder_without_directory_is_rejected_before_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for arg in ("{output_dir}", "--out={output_dir}/result.json"):
+                with self.subTest(arg=arg), patch("simple_ar.experiment.execution.backend.run_process") as run:
+                    with self.assertRaisesRegex(ExecutionError, r"\{output_dir\}.*output_dir"):
+                        LocalExecutionBackend().run(RunRequest(
+                            [sys.executable, "-c", "raise AssertionError('must not launch')", arg], root, 5,
+                            env={"SIMPLE_AR_OUTPUT_DIR": str(root)},
+                        ))
+                    run.assert_not_called()
+            self.assertFalse(list(root.iterdir()))
+
     def test_local_invocations_get_distinct_output_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             command = [sys.executable, "-c", "import os; from pathlib import Path; "
-                "p=Path(os.environ['SIMPLE_AR_OUTPUT_DIR']); p.mkdir(); "
+                "p=Path(os.environ['SIMPLE_AR_OUTPUT_DIR']); assert p.is_dir(); "
                 "(p/'metrics.json').write_text('measured'); print(p)"]
             request = RunRequest(command, root, 5, output_dir=root / "processes")
             first, second = LocalExecutionBackend().run(request), LocalExecutionBackend().run(request)
@@ -34,6 +81,8 @@ class ExperimentExecutionTests(unittest.TestCase):
                      for result in (first, second)]
             self.assertNotEqual(paths[0], paths[1])
             for path, result in zip(paths, (first, second)):
+                self.assertEqual(result.command, command)
+                self.assertEqual(result.process_record["argv"], command)
                 self.assertEqual((path / "metrics.json").read_text(), "measured")
                 self.assertEqual(Path(result.stdout.strip()), path)
 

@@ -64,6 +64,11 @@ requirements 的安装指令、包含文件或截断行仍未解析，版本匹�
 预览版不会自动下载字体；出现缺字警告时应检查 PNG/PDF 标签，分析成功不等于视觉质量通过。
 详见 [Matplotlib 字体回退说明](https://matplotlib.org/stable/users/explain/text/fonts.html)。
 
+图结构的方法图可在执行机器选装 [Graphviz](https://graphviz.org/download/)，确保 `PATH`
+中有 `dot`（Debian/Ubuntu：`sudo apt install graphviz`）。绘图工程会提供可用性信息，
+让生成代码可使用成熟布局工具，不必逐个手摆节点。数据图不要求此工具，任务设置不会自动
+安装；渲染后的标签和反馈箭头仍需视觉检查。
+
 克隆当前预览分支，与 [README](../README_zh.md) 一致：
 
 ```bash

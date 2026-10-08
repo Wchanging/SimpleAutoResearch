@@ -71,7 +71,9 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for line in read_text(path).splitlines():
+    # JSONL records are LF-delimited. Unicode separators are legal inside JSON
+    # strings and must not be interpreted as additional record boundaries.
+    for line in read_text(path).split("\n"):
         stripped = line.strip()
         if stripped:
             rows.append(json.loads(stripped))

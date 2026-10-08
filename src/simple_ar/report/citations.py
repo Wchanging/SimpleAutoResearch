@@ -147,6 +147,29 @@ def citation_map_artifact(
     }
 
 
+def references_from_citation_map(payload: dict[str, Any]) -> tuple[list[Paper], dict[str, str]]:
+    """Reuse recorded identities, not primary text or verified research claims."""
+    if payload.get("schema_version") != "citation_map.v1":
+        return [], {}
+    papers = []
+    keys = {}
+    for entry in payload["entries"]:
+        bibliography = entry.get("bibliography", {})
+        papers.append(Paper(
+            id=entry["paper_id"], title=entry["title"],
+            authors=list(bibliography.get("authors", [])), abstract="",
+            url=entry.get("url", ""), published=bibliography.get("published") or bibliography.get("year") or None,
+            doi=bibliography.get("doi") or None, source="reused_reference_metadata",
+            bibliographic_notes=["Identity retained from supplied citation map; primary text was not rechecked in this task."],
+        ))
+        key = entry.get("model_key", "")
+        if key:
+            if key in keys and keys[key] != entry["paper_id"]:
+                raise ValueError("Conflicting citation identities in supplied citation map.")
+            keys[key] = entry["paper_id"]
+    return papers, keys
+
+
 def display_citation_numbers(markdown_body: str, citation_map: dict[str, int]) -> str:
     """Convert internal ``[@paper-id]`` citations to readable ``[1]`` labels."""
     if not citation_map:

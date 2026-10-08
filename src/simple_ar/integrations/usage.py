@@ -46,9 +46,10 @@ def summarize_usage(records: list[dict[str, Any]]) -> dict[str, Any]:
     Returns:
         JSON-serializable summary with token totals and optional cost totals.
     """
-    prompt_tokens = sum(_int_value(row.get("prompt_tokens")) for row in records)
-    completion_tokens = sum(_int_value(row.get("completion_tokens")) for row in records)
-    total_tokens = sum(_int_value(row.get("total_tokens")) for row in records)
+    unknown = [row for row in records if row.get("source") == "unknown"]
+    prompt_tokens = None if unknown else sum(_int_value(row.get("prompt_tokens")) for row in records)
+    completion_tokens = None if unknown else sum(_int_value(row.get("completion_tokens")) for row in records)
+    total_tokens = None if unknown else sum(_int_value(row.get("total_tokens")) for row in records)
     provider_attempts = sum(
         max(1, _int_value(row.get("provider_attempts")) or 1)
         for row in records
@@ -59,10 +60,13 @@ def summarize_usage(records: list[dict[str, Any]]) -> dict[str, Any]:
         if isinstance(row.get("estimated_cost_usd"), (int, float))
     ]
     cost_total = round(sum(costs), 8) if len(costs) == len(records) and records else None
-    by_stage: dict[str, int] = {}
+    by_stage: dict[str, int | None] = {}
     for row in records:
         stage = str(row.get("stage", "unknown"))
-        by_stage[stage] = by_stage.get(stage, 0) + _int_value(row.get("total_tokens"))
+        if row.get("source") == "unknown" or by_stage.get(stage, 0) is None:
+            by_stage[stage] = None
+        else:
+            by_stage[stage] = by_stage.get(stage, 0) + _int_value(row.get("total_tokens"))
 
     return {
         "requests": len(records),
@@ -73,6 +77,7 @@ def summarize_usage(records: list[dict[str, Any]]) -> dict[str, Any]:
         "retry_count": max(0, provider_attempts - len(records)),
         "estimated_cost_usd": cost_total,
         "by_stage_total_tokens": by_stage,
+        **({"unknown_usage_requests": len(unknown)} if unknown else {}),
     }
 
 

@@ -6,17 +6,13 @@ import re
 from pathlib import Path
 from typing import Any, Sequence
 
-from simple_ar.code_task.analysis.index import IGNORED_DIR_NAMES, is_python_environment
-from simple_ar.code_task.analysis.context import clip_source_snippet
+from simple_ar.code_task.analysis.index import IGNORED_DIR_NAMES, SOURCE_SUFFIXES, is_python_environment, read_code_task_text
+from simple_ar.code_task.analysis.context import clip_source_snippet, definition_start_line
 from simple_ar.code_task.analysis.interfaces import source_snippet_views
 from simple_ar.code_task.editing.planning import select_relevant_files
 from simple_ar.code_task.runtime.state import workspace_file
 
 
-SOURCE_SUFFIXES = {
-    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs",
-    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".r", ".jl", ".sh",
-}
 CONTEXT_SUFFIXES = SOURCE_SUFFIXES | {".toml", ".yaml", ".yml", ".md", ".txt", ".json", ".ini", ".cfg"}
 
 
@@ -91,7 +87,9 @@ def source_context_for_files(
             continue
         lines = list(dict.fromkeys(line for anchor, line in anchors
             if anchor == rel_path or anchor.endswith("/" + rel_path)))[:2]
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = read_code_task_text(path)
+        if text is None:
+            continue
         if len(text) <= limit:
             lines = []
         observed: list[dict[str, Any]] = []
@@ -155,9 +153,26 @@ def _construction_call_positions(text: str, symbols: list[str], query: str) -> l
     return [position for name in names for position in sorted(calls[name])]
 
 
+def _unseen_intervals(start: int, end: int, seen: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Subtract all observed spans, including overlapping observations."""
+    intervals = []
+    for lo, hi in sorted(seen):
+        if hi <= start:
+            continue
+        if lo >= end:
+            break
+        if start < lo:
+            intervals.append((start, lo))
+        start = max(start, hi)
+        if start >= end:
+            break
+    if start < end:
+        intervals.append((start, end))
+    return intervals
+
+
 def _python_symbol_starts(
     text: str, symbols: list[str], seen: list[tuple[int, int]],
-    *, include_new: bool = True,
 ) -> list[int]:
     """Locate a named definition or continue its clipped body.
 
@@ -183,13 +198,12 @@ def _python_symbol_starts(
                 continue
             qualified = ".".join((*parents, node.name))
             if qualified in wanted or (not parents and node.name in wanted):
-                begin = offsets[node.lineno - 1]
+                begin = offsets[definition_start_line(node) - 1]
                 end = offsets[min(node.end_lineno or node.lineno, len(offsets) - 1)]
-                if include_new and not any(lo <= begin < hi for lo, hi in seen):
-                    starts.append(begin)
-                for lo, hi in seen:
-                    if lo <= begin < hi < end and not any(a <= hi < b for a, b in seen):
-                        starts.append(hi)
+                # A supplied middle fragment must not hide the remaining
+                # body or let a tiny prefix consume the sole window.
+                gaps = _unseen_intervals(begin, end, seen)
+                starts.extend(lo for lo, hi in sorted(gaps, key=lambda gap: -(gap[1] - gap[0])))
             visit(node.body, (*parents, node.name))
 
     visit(tree.body)
@@ -301,7 +315,9 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
                 or any(is_python_environment(workspace.joinpath(*rel.parts[:depth]))
                        for depth in range(1, len(rel.parts)))):
             continue
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = read_code_task_text(path)
+        if text is None:
+            continue
         size = min(max_chars, remaining)
         seen = previous.get(relative, [])
         if line_range is not None:
@@ -310,13 +326,9 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
                 continue
             start = sum(len(line) for line in lines[:line_range["start"] - 1])
             end = sum(len(line) for line in lines[:min(line_range["end"], len(lines))])
-            for lo, hi in sorted(seen):
-                if lo <= start < hi:
-                    start = hi
-                elif lo > start:
-                    end = min(end, lo)
-                    break
-            if start < end and size > 0:
+            gaps = _unseen_intervals(start, end, seen)
+            if gaps and size > 0:
+                start, end = max(gaps, key=lambda gap: min(size, gap[1] - gap[0]))
                 excerpt = text[start:min(end, start + size)]
                 result.append({"path": relative, "access_role": "read_only", "text": excerpt,
                                "source_chars": len(text),
@@ -346,10 +358,15 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
         # Exact matches often name a use site; include its preceding setup and
         # call arguments as well as the continuation after it.
         starts = [max(0, min(pos - size // 2, len(text) - size)) for pos in unseen(literal_positions)]
+        call_starts = [max(0, min(pos - size // 2, len(text) - size)) for pos in unseen(call_positions)]
+        # An initial construction question still needs its call setup; once
+        # source is observed, complete the requested unseen definition first.
+        if not seen:
+            starts += call_starts
         if not literal and path.suffix == ".py":
-            starts += _python_symbol_starts(text, request.get("symbols", []), seen,
-                                           include_new=not call_positions)
-        starts += [max(0, min(pos - size // 2, len(text) - size)) for pos in unseen(call_positions)]
+            starts += _python_symbol_starts(text, request.get("symbols", []), seen)
+        if seen:
+            starts += call_starts
         starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(query_positions)]
         starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(symbol_positions)]
         if not positions and not symbols and not query_terms:
@@ -380,14 +397,10 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
             # Return one exact unseen interval. Adjacent observations can be
             # joined by the existing source-view owner; repeated bytes must
             # not spend the remaining read allowance again.
-            for lo, hi in sorted(seen):
-                if lo <= start < hi:
-                    start = hi
-                elif start < lo < end:
-                    end = lo
-                    break
-            if start >= end:
+            gaps = _unseen_intervals(start, end, seen)
+            if not gaps:
                 continue
+            start, end = max(gaps, key=lambda gap: gap[1] - gap[0])
             # The interval subtraction above already guarantees unseen bytes;
             # do not rescan every character or impose a second novelty quota.
             excerpt = text[start:end]

@@ -11,6 +11,7 @@ entry point.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import json
 from pathlib import Path, PurePosixPath
 from posixpath import relpath
 from typing import TYPE_CHECKING, Any
@@ -316,7 +317,9 @@ def build_material_report_inputs(
 
     roles = {str(Path(asset.locator).resolve()): asset.role for asset in assets}
     paper_records = [record for record in documents.records
-                     if roles.get(str(Path(record.source_id).resolve())) in {"paper", "reference"}]
+                     if (record.source_id and roles.get(str(Path(record.source_id).resolve())) in {"paper", "reference"})
+                     or (record.metadata.get("retained_source_role") == "paper"
+                         and roles.get(record.metadata.get("retained_bundle")) == "material")]
     # Old bundles may still have stored a front-matter prefix as "abstract".
     # Prefer the retained abstract section without changing the old artifact
     # or inferring authors, publication date or any external identity.
@@ -343,7 +346,7 @@ def build_material_report_inputs(
         metadata = {**handle.metadata, "document_id": record.document_id,
                     "extraction_status": record.extraction_status,
                     "extraction_coverage": dict(record.metadata.get("fulltext_extraction", {}).get("coverage", {})),
-                    "evidence_role": record.metadata.get("evidence_role") or ("bibliographic_source_not_independently_verified" if record.document_id in paper_handles else "user_supplied_unverified"),
+                    "evidence_role": record.metadata.get("evidence_role") or ("linked_material_not_paper_or_measured_result" if record.metadata.get("kind") == "supporting_material" else "bibliographic_source_not_independently_verified" if record.document_id in paper_handles else "user_supplied_unverified"),
                     "document_chunk_count": len(chunks),
                     "evidence_passages": passages,
                     "evidence_passages_truncated": (len({row["chunk_id"] for row in passages}) < len(chunks)
@@ -369,34 +372,78 @@ def build_material_report_inputs(
         citation_key_map=_citation_key_map(search.selected_papers),
         evidence_summary=f"Retained source passages from {sum(bool(chunks_by_document.get(record.document_id)) for record in documents.records)} of {len(documents.records)} supplied materials. Method and result assertions remain source-reported.",
         results={"evidence_origin": "user_supplied_unverified", "session_execution": "not_requested"})
+    # Reused drafts need their recorded reference identities, not a BibTeX file
+    # treated as prose. Keep this separate from original-source evidence.
+    from simple_ar.core.artifacts import read_json
+    from simple_ar.report.citations import references_from_citation_map
+    known_ids = {row["id"] for row in context.papers}
+    retained_keys = {}
+    for record in documents.records:
+        if not record.local_path or Path(record.local_path).suffix.lower() != ".json":
+            continue
+        payload = read_json(Path(record.local_path))
+        if not isinstance(payload, dict):
+            continue
+        references, keys = references_from_citation_map(payload)
+        for key, paper_id in keys.items():
+            if key in retained_keys and retained_keys[key] != paper_id:
+                raise ReportProjectionError("Reused citation maps have conflicting short keys; use stable paper identities before combining drafts.")
+            retained_keys[key] = paper_id
+        for paper in references:
+            if paper.id in known_ids:
+                continue
+            known_ids.add(paper.id)
+            context.papers.append(paper.to_row())
+            handles.append(SourceHandle(handle=f"reference:{paper.id}", kind="paper",
+                paper_id=paper.id, title=paper.title, artifact=documents_ref.path,
+                metadata={"document_id": record.document_id,
+                          "evidence_role": "reused_reference_metadata_not_primary_text",
+                          "document_chunk_count": 0, "evidence_passages": []}))
+    # Do not renumber old aliases while their original map is visible to the
+    # writer. Assign only unused keys to newly supplied references.
+    for row in context.papers:
+        if row["id"] not in retained_keys.values():
+            index = 1
+            while f"P{index}" in retained_keys:
+                index += 1
+            retained_keys[f"P{index}"] = row["id"]
+    context.citation_key_map = retained_keys
+    by_id = {paper_id: key for key, paper_id in retained_keys.items()}
+    handles = [handle.model_copy(update={"citation_key": by_id.get(handle.paper_id, handle.citation_key)})
+               for handle in handles]
     analyses = []
     for record in documents.records:
         table = record.metadata.get("table_analysis")
         if table is not None:
             analyses.append({**table, "artifact": (Path(documents_ref.path).parent / table["artifact"]).as_posix(),
                              "document_id": record.document_id, "evidence_role": "recomputed_from_user_supplied_data"})
+        code = record.metadata.get("code_analysis")
+        if code is not None:
+            analyses.append({**code, "artifact": (Path(documents_ref.path).parent / code["artifact"]).as_posix(),
+                             "document_id": record.document_id})
     if analyses:
         context.results["supplied_analyses"] = analyses
-        limitations.append("Descriptive values were recomputed from the copied input. This checks arithmetic, not data collection, semantics, significance or an independently repeated experiment.")
-        context.evidence_summary += f" {len(analyses)} supplied analysis package(s) were recomputed from copied inputs; recorded values, input-use counts and figure encodings are available in results."
+        limitations.append("Table packages are arithmetically recomputed; code-analysis packages preserve validated script outputs without independent recomputation. Neither certifies data collection, semantics or scientific validity.")
+        context.evidence_summary += f" {len(analyses)} supplied analysis package(s) retain results, source inputs and figure encodings. Check each package's evidence_role before describing verification."
+    context = context.model_copy(update={"source_handles": handles})
+    _attach_linked_document_references(context, documents)
     return apply_report_bibliography(context, ReportMemory(objective=topic, report_mode=context.report_mode,
-                                 source_handles=handles, limitations=limitations), documents=documents, notes=[])
+                                 source_handles=context.source_handles, limitations=limitations), documents=documents, notes=[])
 
 
 def build_literature_report_inputs(
     *,
     topic: str,
-    brief: SynthesisResult,
+    brief: SynthesisResult | None,
     search: SearchResult,
     documents: DocumentBundle,
-    brief_ref: ArtifactRef,
+    brief_ref: ArtifactRef | None,
 ) -> tuple[ReportContext, ReportMemory]:
     """Project literature evidence without inventing measurements."""
 
-    handles = [
-        SourceHandle(handle="artifact:synthesis", kind="synthesis", artifact=brief_ref.path),
-        *_paper_source_handles(search),
-    ]
+    handles = _paper_source_handles(search)
+    if brief_ref is not None:
+        handles.insert(0, SourceHandle(handle="artifact:synthesis", kind="synthesis", artifact=brief_ref.path))
     citation_key_map = _citation_key_map(search.selected_papers)
     limitation = (
         "No experiment was requested or executed; cited results describe "
@@ -405,7 +452,7 @@ def build_literature_report_inputs(
     context = ReportContext(
         topic=topic,
         report_mode="research_only",
-        synthesis_markdown=_synthesis_markdown(brief),
+        synthesis_markdown=_synthesis_markdown(brief) if brief is not None else "",
         source_comparisons=[dict(row) for row in getattr(brief, "comparisons", ())],
         evidence_summary=(
             f"Search retained {len(search.selected_papers)} selected papers; "
@@ -665,6 +712,29 @@ def bibliography_planning_views(context: ReportContext, documents: DocumentBundl
     return views
 
 
+def _attach_linked_document_references(context: ReportContext, documents: DocumentBundle) -> None:
+    """Keep linked-document identity separate in fresh and reused reports."""
+    for record in documents.records:
+        handle = f"material:{record.document_id}"
+        if record.metadata.get("kind") != "supporting_material" or not record.url:
+            continue
+        # Reversible encoding keeps arbitrary document IDs BibTeX-safe; source
+        # access still uses metadata.document_id, not this bibliography ID.
+        citation_id = "material-" + record.document_id.encode("utf-8").hex()
+        if not any(row["id"] == citation_id for row in context.papers):
+            context.papers.append(Paper(id=citation_id, title=record.title,
+                authors=[], abstract="", url=record.url, source="supporting_material",
+                bibliographic_notes=["Linked documentation snapshot; not parent-paper results, a frozen release, or independently verified execution."]).to_row())
+        citation_key = next((key for key, value in context.citation_key_map.items() if value == citation_id), "")
+        if not citation_key:
+            number = max((int(key[1:]) for key in context.citation_key_map
+                          if key.startswith("P") and key[1:].isdigit()), default=0) + 1
+            citation_key = f"P{number}"
+            context.citation_key_map[citation_key] = citation_id
+        context.source_handles = [row.model_copy(update={"citation_key": citation_key, "paper_id": citation_id})
+            if row.handle == handle else row for row in context.source_handles]
+
+
 def attach_report_read_evidence(
     context: ReportContext,
     memory: ReportMemory,
@@ -672,10 +742,22 @@ def attach_report_read_evidence(
     documents: DocumentBundle,
     read: "ReadResult",
     read_ref: ArtifactRef,
+    documents_ref: ArtifactRef | None = None,
 ) -> tuple[ReportContext, ReportMemory]:
     """Join reading notes by document identity, not title or position."""
 
     from simple_ar.research.documents.extractors import document_extraction_limitations
+    if documents_ref is not None:
+        registered = {handle.handle for handle in context.source_handles}
+        for record in documents.records:
+            handle = f"material:{record.document_id}"
+            if record.metadata.get("kind") == "supporting_material" and handle not in registered:
+                context.source_handles.append(SourceHandle(handle=handle, kind="material",
+                    title=record.title, paper_id=record.document_id, artifact=documents_ref.path,
+                    metadata={**record.metadata, "document_id": record.document_id, "url": record.url,
+                              "evidence_role": "linked_material_not_paper_or_measured_result"}))
+                registered.add(handle)
+    _attach_linked_document_references(context, documents)
     for limitation in document_extraction_limitations(documents.records):
         if limitation not in memory.limitations:
             memory.limitations.append(limitation)
@@ -709,9 +791,17 @@ def attach_report_read_evidence(
         f"Bounded model reading notes: {noted_count}/{len(documents.records)} source records. "
         "Parsed access and model notes do not certify full-document comprehension or semantic support."
     )
+    if read.question_assessments:
+        coverage_note += (
+            " Candidate-screening observations in chronological order (not verified answers): "
+            + json.dumps(list(read.question_assessments), ensure_ascii=False)
+            + ". Reconcile earlier search gaps with later reading and original passages; "
+            "a direct candidate does not establish its claims, and a missing candidate does not "
+            "prove that no relevant method exists."
+        )
     handles: list[SourceHandle] = []
     for handle in context.source_handles:
-        record = by_paper.get(handle.paper_id)
+        record = by_paper.get(handle.metadata.get("document_id") or handle.paper_id)
         if record is None:
             handles.append(handle)
             continue

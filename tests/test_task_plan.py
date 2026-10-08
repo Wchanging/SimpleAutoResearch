@@ -4,6 +4,7 @@ import unittest
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from simple_ar.app.research_application import (
@@ -15,6 +16,8 @@ from simple_ar.app.research_execution import (
     execution_protocol,
     merge_execution_protocol,
     normalize_execution_config,
+    code_task_validation,
+    implementation_request,
 )
 from simple_ar.integrations.llm import LLMClient, LLMSettings
 from simple_ar.research.task_plan import (
@@ -24,18 +27,226 @@ from simple_ar.research.task_plan import (
     append_research_followup,
     build_task_plan,
     default_task_steps,
+    insert_evidence_followup,
     _llm_prompt,
 )
 from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class TaskPlanTests(unittest.TestCase):
+    def test_reproduction_code_task_requires_independent_prepared_validation(self):
+        execution = {"command": ["python", "formal.py"], "protocol": {
+            "hypothesis": "One author claim", "dataset": "Fixed author data",
+            "expected_outcome": "The declared metric criterion"}, "code_task": {
+            "code_root": str(Path.cwd()), "approval_note": "Adapt results only",
+            "validation_command": ["python", "tests/check.py"], "validation_timeout_sec": 10}}
+        request = TaskPlanRequest(task_kind="reproduction", goal="Check a fixed claim",
+            request_text="Check a fixed claim", requested_outputs=("experiments",),
+            config={"research_materials_only": True, "research_local_documents": ["paper.md"]},
+            execution=execution)
+        plan = build_task_plan(request)
+        self.assertEqual([step.action for step in plan.steps],
+            ["document_ingest", "read", "synthesize", "prepare_execution", "implement", "experiment", "analysis"])
+        self.assertEqual(TaskPlanResult.from_handoff_dict(plan.to_handoff_dict()), plan)
+        argv, timeout = code_task_validation(execution, required=True)
+        self.assertEqual(argv, (sys.executable, "tests/check.py"))
+        self.assertEqual(timeout, 10)
+        for changes in ({"validation_command": None}, {"validation_timeout_sec": True},
+                        {"validation_command": ["python", "formal.py"]}, {"env_mode": "venv"},
+                        {"approval_note": ""}):
+            invalid = {**execution, "code_task": {**execution["code_task"], **changes}}
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                build_task_plan(replace(request, execution=invalid))
+        for invalid in ({**execution, "environment": {}}, {**execution, "protocol": {}}):
+            with self.assertRaises(ValueError):
+                code_task_validation(invalid, required=True)
+        alias = {**execution, "command": [sys.executable, "tests/check.py"]}
+        with self.assertRaisesRegex(ValueError, "differ"):
+            code_task_validation(alias, required=True)
+
+    def test_native_reproduction_prepares_checker_edits_then_gates_measurement(self):
+        from tests.test_code_task import _FakeCodeTaskClient
+        from simple_ar.code_task.runtime.state import load_code_task_manifest
+        from simple_ar.code_task.orchestration.workflow import INITIAL_ADAPTER_SOURCE
+        adapter_source = (
+            "from spam_model import predict as author_predict\n"
+            "def predict(text):\n    return author_predict(text)\n"
+        )
+        class AdapterClient(_FakeCodeTaskClient):
+            saw_placeholder = False
+            def ask_json(self, system, user, *, label=""):
+                response = super().ask_json(system, user, label=label)
+                response = json.loads(json.dumps(response).replace("spam_model.py", "adapter.py"))
+                if label == "code-task-propose-edits":
+                    self.saw_placeholder = "Reproduction adapter requires implementation" in user
+                    response["edits"] = [{"path": "adapter.py", "old": INITIAL_ADAPTER_SOURCE,
+                        "new": adapter_source, "reason": "Delegate unchanged author results."}]
+                return response
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            project.mkdir()
+            (project / "spam_model.py").write_text(
+                "def predict(text):\n    return 'spam' if any(k in text.lower() for k in ('win', 'prize')) else 'ham'\n")
+            (project / "check.py").write_text(
+                "from adapter import predict\nfrom spam_model import predict as original\n"
+                "for text in ('prize', 'ordinary'):\n    assert predict(text) == original(text)\n"
+                "assert predict('prize') == 'spam'\nprint('accuracy: 1.0')\n")
+            (project / "formal.py").write_text(
+                "import json, sys\nfrom pathlib import Path\nfrom adapter import predict\n"
+                "Path(sys.argv[1]).write_text(json.dumps({'accuracy': float(predict('prize') == 'spam')}))\n")
+            paper = root / "paper.md"
+            paper.write_text("A fixed supplied fixture, not a scientific reproduction claim.")
+            execution = {"command": ["python", "formal.py", "{output_dir}/raw.json"], "cwd": str(project), "timeout_sec": 10,
+                "result_schema": {"primary_metric": "accuracy", "output_files": {"raw": "raw.json"},
+                    "metric_sources": {"accuracy": {"output": "raw", "path": ["accuracy"]}}},
+                "protocol": {"hypothesis": "Fixture adapter behaves correctly", "dataset": "Fixture only",
+                             "expected_outcome": "accuracy = 1"},
+                "code_task": {"code_root": str(project), "workspace_mode": "copy",
+                    "allowed_patterns": ["adapter.py"], "initial_files": ["adapter.py"],
+                    "protected_patterns": ["check.py", "formal.py"],
+                    "approval_note": "Authorize isolated fixture adaptation", "env_mode": "current",
+                    "validation_command": ["python", "check.py"], "validation_timeout_sec": 10}}
+            app = create_session(ResearchBrief(request_text="Connect the fixture output without changing conditions.",
+                requested_outputs=("experiments",)), root=root / "session",
+                services=ResearchApplicationServices(llm_client=LLMClient(LLMSettings(api_key="test-key", api_mode="chat")),
+                    config={"research_task_kind": "reproduction", "research_plan_mode": "deterministic",
+                            "research_materials_only": True, "research_local_documents": [str(paper)], "execution": execution},
+                    budget_limits={"llm_requests": 12, "total_tokens": 50000,
+                                   "process_invocations": 2, "process_wall_seconds": 30}))
+            app.advance(max_actions=1)
+            # Isolate the execution connector from the already-tested Reader/Synthesizer.
+            for name in ("read", "synthesis"):
+                app.controller.manifest.state_refs[name] = app.controller.store.write_json(
+                    f"inputs/{name}-fixture.json", {}, kind=name)
+            self.assertTrue(app._run_prepare_execution_action())
+            prepared = app._effective_config()["execution"]
+            run_dir = Path(prepared["code_task"]["run_dir"])
+            workspace = Path(prepared["cwd"])
+            self.assertEqual((workspace / "adapter.py").read_text(), INITIAL_ADAPTER_SOURCE)
+            index = json.loads((run_dir / "code_task/meta/codebase_index.json").read_text())
+            self.assertIn("adapter.py", [row["path"] for row in index["files"]])
+            self.assertNotIn("initial_files", prepared["code_task"])
+            self.assertFalse((project / "adapter.py").exists())
+            author_source = (project / "spam_model.py").read_text()
+            self.assertEqual(prepared["command"], execution["command"])
+            self.assertEqual(prepared["code_task"]["validation_command"], ["python", "check.py"])
+            manifest = load_code_task_manifest(run_dir)
+            self.assertIn("check.py", manifest["benchmark"]["command"])
+            self.assertNotIn("formal.py", manifest["benchmark"]["command"])
+            contract = json.loads((run_dir / "code_task/meta/task_contract.json").read_text())
+            self.assertIn("check.py", json.dumps(contract))
+            from simple_ar.app.research_application import load_session
+            recovered = load_session(root / "session", services=app.services)
+            self.assertEqual(recovered._effective_config()["execution"]["code_task"], prepared["code_task"])
+            self.assertNotIn("initial_files", recovered._effective_config()["execution"]["code_task"])
+            self.assertEqual((workspace / "adapter.py").read_text(), INITIAL_ADAPTER_SOURCE)
+            independent = implementation_request(prepared, None, require_validation=True)
+            self.assertEqual(independent.validation_command, (sys.executable, "check.py"))
+            with patch.object(app, "_pause_action", return_value=False), patch.object(app, "_execute") as execute:
+                self.assertFalse(app._run_measurement_action("experiment"))
+                execute.assert_not_called()
+            failed_app = create_session(app.brief, root=root / "failed-session", services=replace(
+                app.services, budget_limits={"llm_requests": 12, "total_tokens": 50000,
+                    "process_invocations": 2, "process_wall_seconds": 30}))
+            failed_app.advance(max_actions=1)
+            for name in ("read", "synthesis"):
+                failed_app.controller.manifest.state_refs[name] = failed_app.controller.store.write_json(
+                    f"inputs/{name}-fixture.json", {}, kind=name)
+            self.assertTrue(failed_app._run_prepare_execution_action())
+            self.assertEqual(failed_app.budget_ledger.remaining("process_invocations"), 2)
+            self.assertEqual(failed_app.budget_ledger.remaining("process_wall_seconds"), 30)
+            # Static stop_point alone cannot pass: the untouched adapter fails
+            # the real independent subprocess assertion, with evidence retained.
+            previous_attempt_ids = {attempt.attempt_id for attempt in failed_app.controller.list_attempts()}
+            with patch("simple_ar.research.implementation.implement_code_task",
+                       return_value=SimpleNamespace(stop_reason="stop_point", next_action="Validate", steps=())):
+                self.assertFalse(failed_app._run_implement_action("implement"))
+            new_implement_attempts = [attempt for attempt in failed_app.controller.list_attempts()
+                if attempt.capability == "implement" and attempt.attempt_id not in previous_attempt_ids]
+            self.assertEqual(len(new_implement_attempts), 1,
+                f"Expected one new implement attempt; found={[attempt.attempt_id for attempt in new_implement_attempts]}, "
+                f"reason={failed_app.controller.manifest.status_reason}")
+            failed_attempt = new_implement_attempts[0]
+            failed_ref = failed_app.controller.attempt_output_ref(failed_attempt.attempt_id,
+                kind="implementation_result", schema="research_implementation.v1")
+            failed_result = failed_app.controller.store.read_json(failed_ref)
+            self.assertEqual(failed_result["status"], "incomplete")
+            self.assertEqual(failed_result["validation"]["status"], "failed")
+            self.assertNotEqual(failed_result["validation"]["returncode"], 0)
+            self.assertFalse(failed_result["validation"]["timed_out"])
+            self.assertEqual(failed_result["validation"]["command"], [sys.executable, "check.py"])
+            self.assertNotIn("experiment", failed_app.controller.manifest.state_refs)
+            fake = AdapterClient()
+            with patch.object(LLMClient, "ask_json", side_effect=fake.ask_json), patch.object(LLMClient, "for_task", return_value=fake):
+                self.assertTrue(app._run_implement_action("implement"))
+            self.assertTrue(fake.saw_placeholder)
+            self.assertEqual((workspace / "adapter.py").read_text(), adapter_source)
+            self.assertFalse((project / "adapter.py").exists())
+            self.assertEqual((workspace / "spam_model.py").read_text(), author_source)
+            self.assertEqual((project / "spam_model.py").read_text(), author_source)
+            payload = app._state_payload("implementation")
+            self.assertEqual(payload["validation"]["status"], "passed")
+            self.assertEqual(payload["validation"]["command"], [sys.executable, "check.py"])
+            self.assertEqual(payload["validation"]["timeout_sec"], 10)
+            self.assertEqual((Path(prepared["cwd"]) / "check.py").read_text(), (project / "check.py").read_text())
+            for changes in ({"validation": None}, {"status": "incomplete"},
+                            {"validation": {**payload["validation"], "status": "failed"}},
+                            {"validation": {**payload["validation"], "command": [sys.executable, "formal.py"]}},
+                            {"workspace_dir": str(project)}):
+                with self.subTest(changes=changes), patch.object(app, "_pause_action", return_value=False), patch.object(app, "_state_payload", return_value={**payload, **changes}), patch.object(app, "_execute") as execute:
+                    self.assertFalse(app._run_measurement_action("experiment"))
+                    execute.assert_not_called()
+            self.assertTrue(app._run_measurement_action("experiment"))
+            if app._state_payload("experiment")["status"] != "passed":
+                experiment_ref = app.controller.manifest.state_refs["experiment"]
+                self.fail((root / "session" / Path(experiment_ref.path).parent /
+                    "execution/stderr.txt").read_text())
+            self.assertEqual(app._state_payload("experiment")["status"], "passed",
+                app._state_payload("experiment"))
+            self.assertEqual(app._state_payload("experiment")["metrics"]["accuracy"], 1.0)
+            self.assertEqual(prepared["protocol"], execution["protocol"])
+
     def test_default_delivery_omits_unrequested_summary_but_keeps_saved_plans(self):
         request = TaskPlanRequest(task_kind="survey", goal="Compare sources", request_text="Compare sources",
             requested_outputs=("report",), config={"research_materials_only": True, "research_local_documents": ["notes.md"]})
         report_plan = build_task_plan(request)
         self.assertEqual([step.action for step in report_plan.steps],
             ["document_ingest", "report_write", "report", "report_audit"])
+        open_plan = build_task_plan(replace(request, config={}))
+        extended = insert_evidence_followup(open_plan, round_index=1, read_state="read", queries=["missing comparison"])
+        index = next(i for i, step in enumerate(open_plan.steps) if step.action == "read") + 1
+        cycle = extended.steps[index:index + 3]
+        self.assertEqual([step.action for step in cycle], ["search_evidence:1", "ingest_evidence:1", "read_evidence:1"])
+        self.assertEqual([step.step_id for step in cycle], [step.action for step in cycle])
+        self.assertEqual([step.capability for step in cycle], ["search", "document_ingest", "read"])
+        self.assertEqual([step.state_name for step in cycle], ["search_evidence_1", "documents_evidence_1", "read_evidence_1"])
+        self.assertEqual([step.condition for step in cycle],
+            ["after_success:read", "after_success:search_evidence_1", "after_success:documents_evidence_1"])
+        self.assertEqual(extended.steps[:index] + extended.steps[index + 3:], open_plan.steps)
+        self.assertEqual(TaskPlanResult.from_handoff_dict(extended.to_handoff_dict()), extended)
+        self.assertNotIn("missing comparison", json.dumps([step.to_dict() for step in cycle]))
+        from simple_ar.research.task_plan import _validate_sequence
+        with self.assertRaisesRegex(ValueError, "recorded reading feedback"):
+            _validate_sequence(replace(request, config={}), extended.steps)
+        self.assertIs(insert_evidence_followup(extended, round_index=1, read_state="read", queries=["missing comparison"]), extended)
+        for changes in ({"round_index": 0}, {"round_index": 2}, {"round_index": True},
+                        {"read_state": "read_evidence_1"}, {"queries": []}, {"queries": ["new", " NEW "]}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                insert_evidence_followup(open_plan, **{"round_index": 1, "read_state": "read", "queries": ["new"], **changes})
+        with self.assertRaisesRegex(ValueError, "search-authorized"):
+            insert_evidence_followup(report_plan, round_index=1, read_state="read", queries=["new"])
+        for field, value in (("capability", "read"), ("state_name", "read"),
+                             ("step_id", "read"), ("condition", "after_success:missing"), ("action", "search_evidence:2")):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                handoff = extended.to_handoff_dict()
+                handoff["steps"][index][field] = value
+                TaskPlanResult.from_handoff_dict(handoff)
+        for removed in (index + 1, index - 1):  # Reject an incomplete cycle or missing base read.
+            with self.subTest(removed=removed), self.assertRaises(ValueError):
+                handoff = extended.to_handoff_dict()
+                del handoff["steps"][removed]
+                TaskPlanResult.from_handoff_dict(handoff)
         for outputs in ((), ("research_summary",), ("report", "summary")):
             with self.subTest(outputs=outputs):
                 old_plan = build_task_plan(replace(request, requested_outputs=outputs))
@@ -628,6 +839,17 @@ class TaskPlanTests(unittest.TestCase):
                                 ["document_ingest", "read", "report_write", "synthesize", "report", "report_audit"]):
                     with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "missing prerequisite"):
                         build_task_plan(replace(report, use_llm=True, llm_client=ReportClient(invalid)))
+                discovered = replace(report, config={})
+                direct = build_task_plan(discovered)
+                self.assertEqual([step.action for step in direct.steps],
+                    ["search", "document_ingest", "read", "report_write", "report", "report_audit"])
+                compiled = build_task_plan(replace(discovered, use_llm=True,
+                    llm_client=ReportClient(["report_audit"])))
+                self.assertEqual([step.action for step in compiled.steps], [step.action for step in direct.steps])
+                self.assertEqual(TaskPlanResult.from_handoff_dict(direct.to_handoff_dict()), direct)
+                with self.assertRaisesRegex(ValueError, 'missing prerequisite'):
+                    build_task_plan(replace(discovered, use_llm=True,
+                        llm_client=ReportClient(["search", "document_ingest", "report_write", "read", "report", "report_audit"])))
 
     def test_compiler_does_not_reorder_explicit_steps_or_deliver_before_design(self) -> None:
         request = TaskPlanRequest(
@@ -856,7 +1078,7 @@ class TaskPlanTests(unittest.TestCase):
                 root=root / "session",
                 services=ResearchApplicationServices(
                     llm_client=LLMClient(LLMSettings(api_key="test-key", api_mode="chat")),
-                    config={"research_plan_mode": "deterministic", "execution": execution},
+                    config={"execution": execution},
                     budget_limits={
                         "llm_requests": 12,
                         "total_tokens": 50_000,
@@ -866,7 +1088,9 @@ class TaskPlanTests(unittest.TestCase):
                 ),
             )
 
-            planned = app.advance()
+            with patch("simple_ar.integrations.llm._call_openai_sdk",
+                       side_effect=AssertionError("Fixed bug-fix dispatch must not call a model")):
+                planned = app.advance()
             self.assertEqual(planned.next_action, "prepare_execution")
             planned = app.advance(max_actions=1)
             self.assertEqual(planned.next_action, "implement")

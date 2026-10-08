@@ -64,6 +64,70 @@ LIST_FLAGS = {"providers": "--provider", "queries": "--query", "local_document":
               "metric": "--metric", "metric_direction": "--metric-direction", "value_column": "--value-column", "data_path": "--data-path"}
 
 
+def setup_option_contract(kind: str | None = None) -> dict:
+    """Semantic setup fields: one owner for model exposure and conversion.
+
+    Defaults stay on parsed CLI arguments. Paths, execution proposals and their
+    authorization are deliberately not part of this value-conversion contract.
+    """
+    from simple_ar.report.templates import BUILTIN_TEMPLATE_NAMES
+    from simple_ar.result_analysis.table import TABLE_CHOICES, TABLE_MODE_DESCRIPTIONS, TABLE_PLOT_DESCRIPTIONS
+    options = {}
+    for field, (destination, value_type) in FIELDS["analysis"].items():
+        if field in {"file", "width", "max_mb", "max_figures", "max_points"}:
+            continue
+        options[destination] = {"type": "list of names" if value_type is list else "string", "kinds": ["data_analysis"]}
+        if field in TABLE_CHOICES:
+            options[destination]["allowed_values"] = list(TABLE_CHOICES[field])
+    options["data_mode"]["operations"] = TABLE_MODE_DESCRIPTIONS
+    options["data_plot"]["operations"] = TABLE_PLOT_DESCRIPTIONS
+    options.update({
+        "sources": {"type": "string", "kinds": ["survey", "writing", "reproduction", "data_analysis"],
+                    "allowed_values": ["materials", "search"] if kind in {None, "survey"} else ["materials"]},
+        "template": {"type": "string", "kinds": ["writing"], "allowed_values": sorted(BUILTIN_TEMPLATE_NAMES)},
+        "environment": {"type": "string", "kinds": ["reproduction"], "allowed_values": ["current", "venv"]},
+        "requirements": {"type": "list of names", "kinds": ["reproduction"],
+                         "description": "Inspected requirements.txt/requirements-dev.txt only; packaging declarations use install_project."},
+        "install_project": {"type": "boolean", "kinds": ["reproduction"], "description": "Inspected root packaging declaration; requires venv and confirmation."},
+        "with_report": {"type": "boolean", "kinds": ["data_analysis"], "description": "Add a model-written report to preset analysis."},
+        "scripted": {"type": "boolean", "kinds": ["data_analysis"], "description": "Generate analysis/plot code when presets do not cover the goal."},
+    })
+    return {key: value for key, value in options.items() if kind is None or kind in value["kinds"]}
+
+
+def normalize_setup_options(value: object, args: argparse.Namespace, locked: set[str], kind: str) -> dict:
+    """Convert optional model values without erasing CLI defaults or explicit choices."""
+    if not isinstance(value, dict):
+        raise ValueError("Setup options must be an object; no paths or commands")
+    contract = setup_option_contract()
+    if unknown := set(value) - contract.keys():
+        raise ValueError(f"Unsupported option keys: {sorted(unknown)}. Allowed option keys: {sorted(setup_option_contract(kind))}")
+    options = {key: item for key, item in value.items() if item is not None}
+    if kind == "reproduction" and options.get("template") == "reproduction" and "template" not in locked:
+        options.pop("template")  # Restating the fixed task template is not a customization.
+    for key, item in options.items():
+        spec = contract[key]
+        expected = {"string": str, "boolean": bool, "list of names": list}[spec["type"]]
+        if type(item) is not expected:
+            if expected is str:
+                raise ValueError(f"{key} must be one string, not {type(item).__name__}; allowed values: {spec.get('allowed_values', 'text')}")
+            raise ValueError(f"{key} must be a {spec['type']}")
+        if expected is list and ((key == "value_column" and not item) or any(not isinstance(v, str) or not v.strip() for v in item)):
+            raise ValueError(f"{key} must be a {'nonempty ' if key == 'value_column' else ''}list of names")
+        if "allowed_values" in spec and item not in spec["allowed_values"]:
+            raise ValueError(f"{key} allowed values: {spec['allowed_values']}")
+        if key in locked and item != getattr(args, key):
+            raise ValueError(f"Do not override explicit {key}; ask the user about a conflict")
+        if kind not in spec["kinds"]:
+            raise ValueError(f"Data semantics or option {key} requires {', '.join(spec['kinds'])}")
+    if "sources" in options:
+        if kind == "data_analysis" and not options.get("with_report", args.with_report):
+            raise ValueError("Source scope requires a literature/material task")
+        if kind != "survey" and options["sources"] != "materials":
+            raise ValueError("Native writing/reproduction preparation here uses supplied material only")
+    return options
+
+
 def report_settings(args: argparse.Namespace, *, explicit_destinations: set[str] | None = None) -> dict:
     """Project report options from the existing TOML/CLI field owner.
 
@@ -122,9 +186,9 @@ def data_settings(args: argparse.Namespace) -> dict:
 def validate_session_arguments(args: argparse.Namespace) -> SessionArguments:
     """Validate merged arguments before model setup or session writes."""
     if (not getattr(args, "session_root", None)
-            and getattr(args, "report_draft_scope", None) == "document"
+            and getattr(args, "report_draft_scope", None) in {"document", "auto"}
             and getattr(args, "report_review_scope", None) != "document"):
-        raise SystemExit('report.draft_scope="document" requires report.review_scope="document".')
+        raise SystemExit('report.draft_scope="document" or "auto" requires report.review_scope="document".')
     if (not getattr(args, "session_root", None)
             and getattr(args, "report_review_scope", None) == "document"
             and getattr(args, "report_document_review", None) is not True):
@@ -154,6 +218,8 @@ def validate_session_arguments(args: argparse.Namespace) -> SessionArguments:
         raise SystemExit("--task-kind must be auto, survey, bug_fix, measurement, reproduction, writing or data_analysis.")
     command = tuple(args.command_argv or ())
     execution_details = getattr(args, "execution_details", {})
+    if "initial_files" in execution_details and (task_kind != "reproduction" or not getattr(args, "code_task_config", None)):
+        raise SystemExit("execution.initial_files requires reproduction with explicit CodeTask preparation.")
     if command and execution_details.get("pairs"):
         raise SystemExit("Use execution.pairs or a single command, not both; paired argv must be explicit.")
     outputs = getattr(args, "outputs", None)
@@ -211,8 +277,12 @@ def validate_session_arguments(args: argparse.Namespace) -> SessionArguments:
     if task_kind == "reproduction":
         if not outputs or "experiments" not in outputs or set(outputs) - {"experiments", "report"}:
             raise SystemExit("--task-kind reproduction requires outputs experiments and optionally report.")
-        if not command or getattr(args, "code_task_config", None) or execution_details.get("pairs") or execution_details.get("baseline_policy") in {"run", "reuse"}:
-            raise SystemExit("Prepared reproduction requires one explicit command without CodeTask or paired runs.")
+        if not command or execution_details.get("pairs") or execution_details.get("baseline_policy") in {"run", "reuse"}:
+            raise SystemExit("Reproduction requires one explicit measurement command without paired runs or baseline training.")
+        if getattr(args, "code_task_config", None) and execution_details.get("environment"):
+            profile = execution_details["environment"]
+            if profile["mode"] != "venv" or profile.get("check_command"):
+                raise SystemExit("CodeTask preparation permits explicit venv installation, with its own independent validator instead of an environment check.")
         protocol = execution_details.get("protocol")
         if not isinstance(protocol, dict) or any(not str(protocol.get(key) or "").strip()
                                                 for key in ("hypothesis", "dataset", "expected_outcome")):
@@ -251,14 +321,20 @@ def research_defaults(
             raise ValueError(f"Unknown research configuration section: {section}")
         for name, value in values.items():
             if section == "execution" and name in {
-                "pairs", "protocol", "seeds", "seed_flag", "seed_count", "baseline_policy", "baseline_ref", "output_files", "environment",
+                "pairs", "protocol", "seeds", "seed_flag", "seed_count", "baseline_policy", "baseline_ref", "output_files", "metric_sources", "environment", "initial_files",
             }:
-                if name == "pairs":
+                if name == "initial_files":
+                    if not isinstance(value, list) or not value or any(not isinstance(item, str) or not item.strip() for item in value):
+                        raise ValueError("execution.initial_files must be a nonempty list of exact new Python paths")
+                elif name == "pairs":
                     from simple_ar.app.research_execution import execution_pairs
                     execution_pairs({"pairs": value})
                 elif name == "output_files":
                     from simple_ar.experiment.execution.outputs import output_files
                     output_files({"output_files": value})
+                elif name == "metric_sources":
+                    from simple_ar.experiment.execution.outputs import metric_sources
+                    metric_sources({"output_files": values.get("output_files", {}), "metric_sources": value})
                 elif name == "protocol":
                     if not isinstance(value, dict):
                         raise ValueError("execution.protocol must be a table")
@@ -297,8 +373,8 @@ def research_defaults(
                 raise ValueError("report.outline_strategy must be auto, template or adaptive")
             if dest == "report_review_scope" and value not in {"section", "document"}:
                 raise ValueError("report.review_scope must be section or document")
-            if dest == "report_draft_scope" and value not in {"section", "document"}:
-                raise ValueError("report.draft_scope must be section or document")
+            if dest == "report_draft_scope" and value not in {"section", "document", "auto"}:
+                raise ValueError("report.draft_scope must be section, document or auto")
             if dest == "report_data_tables" and value not in {"linked", "full"}:
                 raise ValueError("report.data_tables must be linked or full")
             if dest == "decision_response" and value not in {"accept", "reject", "revise"}:

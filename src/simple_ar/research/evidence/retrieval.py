@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from simple_ar.literature.models import Paper
+from simple_ar.literature.models import Paper, bibliographic_details
 
 
 @dataclass(frozen=True)
@@ -20,12 +20,23 @@ class RetrievalCandidate:
     returned_source: str = ""
 
 
+def publication_scope_exclusion(paper: Paper, scope: dict[str, Any]) -> str | None:
+    """Apply the same date eligibility to ranked and unranked search handoffs."""
+    year = bibliographic_details(paper)["year"]
+    if not year:
+        return "publication_year_unknown"
+    if not scope["start_year"] <= int(year) <= scope["end_year"]:
+        return "outside_temporal_scope"
+    return None
+
+
 def select_retrieval_candidates(
     candidates: list[RetrievalCandidate],
     *,
     max_documents: int,
     negative_terms: list[str] | None = None,
     priority_facets: list[str] | None = None,
+    temporal_scope: dict[str, Any] | None = None,
 ) -> tuple[list[Paper], list[dict[str, Any]]]:
     """Deduplicate, score, and keep retrieval candidates within budget.
 
@@ -36,8 +47,11 @@ def select_retrieval_candidates(
         negative_terms: Optional out-of-scope hints from query planning.
         priority_facets: Optional required facets. When set, selection first
             reserves one relevant candidate per facet when possible, then fills
-            the remaining budget by rank. This keeps coverage from collapsing
-            to a single high-scoring query family.
+            remaining slots across focused queries before filling by rank.
+            Different routes can share a facet; one query family must not
+            consume every reading slot through lexical scores alone.
+        temporal_scope: Validated optional publication-year scope from the
+            source plan. Unknown dates are excluded, never inferred from IDs.
 
     Returns:
         A pair of ``(kept_papers, retrieval_selection_rows)``.
@@ -46,11 +60,26 @@ def select_retrieval_candidates(
     limit = max(1, max_documents)
     negative_terms = negative_terms or []
     best_by_key: dict[str, tuple[RetrievalCandidate, int]] = {}
+    facets_by_key: dict[str, set[str]] = {}
+    queries_by_key: dict[str, set[frozenset[str]]] = {}
     decisions: list[dict[str, Any]] = []
 
     for candidate in candidates:
+        if temporal_scope is not None:
+            reason = publication_scope_exclusion(candidate.paper, temporal_scope)
+            if reason:
+                row = _decision_row(candidate, 0, "discard", reason)
+                row.update(published=candidate.paper.published,
+                           publication_year=bibliographic_details(candidate.paper)["year"] or None)
+                decisions.append(row)
+                continue  # Before deduplication, facet reservation, ranking and document budget.
         key = paper_identity_key(candidate.paper)
         score = relevance_score(candidate.paper, candidate.query, negative_terms=negative_terms)
+        if score > 0:
+            facets_by_key.setdefault(key, set()).add(candidate.facet)
+            terms = frozenset(_terms(candidate.query))
+            if terms:
+                queries_by_key.setdefault(key, set()).add(terms)
         existing = best_by_key.get(key)
         if existing is None or score > existing[1]:
             if existing is not None:
@@ -71,13 +100,27 @@ def select_retrieval_candidates(
     for facet in _facet_priority(priority_facets):
         if len(kept_rows) >= limit:
             break
+        if any(facet in facets_by_key.get(key, set()) for key in selected_keys):
+            continue
         for rank, candidate, score in ranked_with_rank:
             key = paper_identity_key(candidate.paper)
-            if key in selected_keys or candidate.facet != facet or score <= 0:
+            if key in selected_keys or facet not in facets_by_key.get(key, set()) or score <= 0:
                 continue
             selected_keys.add(key)
             kept_rows.append((rank, candidate, score, "facet_coverage"))
             break
+
+    represented_queries = set().union(*(queries_by_key.get(key, set()) for key in selected_keys))
+    for rank, candidate, score in ranked_with_rank:
+        if len(kept_rows) >= limit:
+            break
+        key = paper_identity_key(candidate.paper)
+        queries = queries_by_key.get(key, set())
+        if score <= 0 or not queries - represented_queries or key in selected_keys:
+            continue
+        represented_queries.update(queries)
+        selected_keys.add(key)
+        kept_rows.append((rank, candidate, score, "query_coverage"))
 
     for rank, candidate, score in ranked_with_rank:
         if len(kept_rows) >= limit:
@@ -96,7 +139,9 @@ def select_retrieval_candidates(
         selected = kept_by_key.get(key)
         if selected is not None:
             kept.append(candidate.paper)
-            decisions.append(_decision_row(candidate, score, "keep", selected[3], rank=rank))
+            row = _decision_row(candidate, score, "keep", selected[3], rank=rank)
+            row["matched_facets"] = sorted(facets_by_key.get(key, set()) - {""})
+            decisions.append(row)
         else:
             reason = "below_document_budget" if len(kept_rows) >= limit else "low_relevance"
             decisions.append(_decision_row(candidate, score, "discard", reason, rank=rank))
@@ -241,6 +286,4 @@ def _negative_aliases(text: str) -> set[str]:
     aliases: set[str] = set()
     if 2 <= len(words) <= 8:
         aliases.add("".join(word[0] for word in words))
-    if words == ["multi", "agent", "reinforcement", "learning"]:
-        aliases.add("marl")
     return aliases

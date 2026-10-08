@@ -381,7 +381,7 @@ def _add_llm_synthesis(
             if round_index == 1:
                 raise
             correction = {"validation_error": str(exc), "previous_response": response,
-                          "allowed_motivation_refs": sorted(allowed_evidence_refs(pack))}
+                          "allowed_motivation_refs": _selected_pack(pack)["allowed_motivation_refs"]}
             response = client.ask_json(system,
                 prompt + "\n\nCorrect the rejected JSON once. Preserve grounded content; revise or omit an idea "
                 "that lacks evidence, never replace its citation with an unrelated allowed ID. Return the complete object.\n"
@@ -650,6 +650,17 @@ def _bounded_pack_json(pack: Mapping[str, Any]) -> str:
 def _selected_pack(pack: Mapping[str, Any]) -> dict[str, Any]:
     """Select current interpretations once, keeping source excerpts separate."""
 
+    # Models cite original documents/passages, not generated card identities.
+    # Card and note IDs belong to different namespaces and remain available in
+    # persisted handoffs for existing consumers, but do not add evidence.
+    source_refs = set(_row_string_list(pack.get("evidence_refs")))
+    for key in ("paper_cards", "claim_cards", "method_cards", "dataset_cards", "paper_notes"):
+        for row in _mapping_rows(pack.get(key)):
+            source_refs.update(_row_string_list(row.get("evidence_refs")))
+    for row in _mapping_rows(pack.get("papers")):
+        reference = row.get("document_id") or row.get("id")
+        if isinstance(reference, str) and reference.strip():
+            source_refs.add(reference.strip())
     selected: dict[str, Any] = {
         "topic": pack.get("topic", ""),
         "coverage": pack.get("coverage", {}),
@@ -657,11 +668,15 @@ def _selected_pack(pack: Mapping[str, Any]) -> dict[str, Any]:
         "limitations": pack.get("limitations", []),
         "interpretation_status": "Current adopted reading interpretations, not independent source verification; "
             "lookup passages remain source text and superseded notes remain only in the saved Read trace.",
+        "question_assessments": pack.get("question_assessments", []),
+        "question_assessment_status": "Chronological candidate-screening observations, not verified answers. "
+            "A missing candidate is a search gap, not proof that no method exists; a direct candidate is "
+            "not proof of its claims. Reconcile earlier gaps with later reading and source passages.",
         # Make the closed provenance boundary explicit in the model-facing
         # context.  The validator remains authoritative, but an exact
         # allowlist reduces avoidable retries when a model remembers a nearby
         # paper from the search pool instead of citing the selected evidence.
-        "allowed_motivation_refs": sorted(allowed_evidence_refs(pack)),
+        "allowed_motivation_refs": sorted(source_refs & allowed_evidence_refs(pack)),
     }
     execution_context = _execution_context_text(pack)
     if execution_context:
@@ -677,10 +692,23 @@ def _selected_pack(pack: Mapping[str, Any]) -> dict[str, Any]:
     for key in ("paper_cards", "claim_cards", "method_cards", "dataset_cards", "paper_notes"):
         value = pack.get(key)
         if isinstance(value, list):
-            selected[key] = value[:24]
+            selected[key] = [
+                {field: item for field, item in row.items()
+                 if field not in {"claim_id", "method_id", "dataset_id"}}
+                if isinstance(row, Mapping) else row for row in value[:24]
+            ]
             selection[key] = {"included": min(len(value), 24), "available": len(value)}
     selected["paper_notes"] = [
-        {**row, "reading_followup": reading_followup_context(row.get("reading_followup"), include_passages=True)}
+        {**row,
+         # These are local interpretation identities, not source evidence.
+         # Exposing them beside deterministic claim IDs invites citations to
+         # an invented hybrid identity. Keep the interpretation and its exact
+         # source references; retain local identities in the saved Read trace.
+         "claim_scopes": [
+             {key: value for key, value in claim.items() if key != "claim_id"}
+             for claim in _mapping_rows(row.get("claim_scopes"))
+         ],
+         "reading_followup": reading_followup_context(row.get("reading_followup"), include_passages=True)}
         for row in _mapping_rows(selected.get("paper_notes"))
     ]
     selected["context_selection"] = selection

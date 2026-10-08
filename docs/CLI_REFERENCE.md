@@ -18,6 +18,11 @@ uv run simple-ar start --kind writing --material notes.md --model env
 
 `start` prepares an ordinary task and delegates execution to `research-session`.
 
+Online surveys can request new sources after reading exposes a specific gap.
+With model reading and automatic expansion enabled, one follow-up search/ingest/read
+cycle reuses the original limits and saved evidence. `--fulltext` still controls
+remote full-text permission; finding an abstract does not establish full-text support.
+
 | Options | Applies to | Purpose |
 | --- | --- | --- |
 | `--kind`, `--goal`, `--output-root` | All | Select function, task and output location |
@@ -26,23 +31,92 @@ uv run simple-ar start --kind writing --material notes.md --model env
 | `--chat`, `--resume-setup PATH` | Model-assisted setup | Clarify a task or resume its saved setup draft |
 | `--sources materials\|search`, `--document PATH`, `--fulltext`, `--max-cited-sources N` | Survey | Source access, repeatable bibliographic papers, retrieval and citation limits |
 | `--material PATH`, `--template` | Writing | Repeatable notes/results and requested report format |
-| `--project`, `--validate`, `--allow PATTERN`, `--project-python PATH` | Code repair | Project, validator, repeatable edit scope and existing interpreter |
+| `--project`, `--validate`, `--allow PATTERN`, `--project-python PATH` | Code repair / opt-in reproduction adapter | Project, independent validator, repeatable edit scope and existing interpreter |
 | `--data-path PATH` | Code/reproduction | Repeatable input file/directory, not the table-analysis source |
 | `--hypothesis`, `--dataset`, `--expected-outcome`, `--metric` | Reproduction | Accepted conclusion, conditions and emitted metrics |
 | `--cwd`, `--timeout-sec`, `--output-files JSON` | Reproduction | Execution location, timeout and registered producer files |
+| `--metric-sources JSON` | Reproduction | Explicit JSON path or CSV/TSV unique-row metric selection from registered files; no aggregation |
 | `--environment current\|venv`, `--requirements PATH`, `--install-project` | Reproduction | Explicit dependency preparation |
 | `--check-argv JSON` | Reproduction | Explicit short check before measurement; no inferred command, and no check metrics in measured results |
 | `--command ARGV...` | Reproduction | Actual command; place it last |
 | `--with-report` | Data analysis | Also write from the analysis; requires a model |
 
-Supported kinds: `survey`, `bug_fix`, `reproduction`, `writing`, `data_analysis`. Structured setup is model-free until execution; chat setup itself uses the model and needs a terminal. Do not combine `--chat` with `--prepare-only`.
+Author output arguments can use literal `{output_dir}`, bound to the current
+invocation without shell expansion. See [file metric selectors](CONFIG_REFERENCE.md).
+
+Supported kinds: `survey`, `bug_fix`, `reproduction`, `writing`, `data_analysis`, `figure`. Structured setup is model-free until execution; chat setup itself uses the model and needs a terminal. Do not combine `--chat` with `--prepare-only`.
 
 Code-repair chat can inspect project text and propose a validation argv with quoted
 source basis. Confirmation serializes it into the existing CodeTask benchmark
 command; explicit `--validate` is retained. Setup does not run commands or install
 dependencies, and ordinary start still confirms edit scope and execution.
 
-Code repair's interpreter defaults to current. `--project-python` preserves an existing virtualenv entry path; it does not create or install an environment. Reproduction dependency preparation is a separate explicit option.
+Code repair's interpreter defaults to current. `--project-python` preserves an existing virtualenv entry path; it does not create or install an environment. Reproduction also accepts it for the formal command and short check; with explicitly chosen `--environment venv`, it selects the base interpreter for the new task environment. Chat can adopt an existing interpreter path quoted from your message after confirmation; it never selects one from source instructions.
+
+Reproduction keeps the fixed-command path by default. For an existing Python
+project already validated in a reproduction session, use `start --kind reproduction
+--from-session SESSION --reuse code_project --document PAPER --goal "Check readiness and repeat"`.
+This prepares an isolated task with the saved single-command protocol, output selectors,
+edit scope, checker and interpreter. It does not recreate existing adapters or reinstall
+dependencies. Confirm the displayed execution before running. Paired/extended protocols
+remain on the original session's resume path; execution overrides require a separate task.
+
+For an existing Python
+project, explicitly combine `--project`, repeatable `--allow PATTERN` and
+`--validate "…"` with an inspected project check to authorize a scoped result adapter or
+entry glue. The validator must differ from the formal measurement `--command`
+(placed last); validator outputs are not scientific measurements. CodeTask edits
+only the allowed isolated worktree/copy, with tests, secret files and declared
+project data protected; validation must pass before the formal command runs there.
+`--cwd`, if supplied, must match `--project`. Use current Python or an existing
+`--project-python` interpreter, or explicitly choose `--environment venv` with approved
+requirements/project installation before adaptation in the same isolated workspace.
+Both validation and measurement then use that task interpreter, not the base interpreter.
+Do not add `--check-argv` beside the independent
+CodeTask validator. Installation failure stops subsequent work. It does not authorize changes
+to methods, splits or evaluation conditions, and workspace isolation is not an OS
+sandbox. This opt-in capability is not autonomous arbitrary-paper preparation or
+evidence that real-paper reproduction acceptance has passed.
+
+Reproduction chat may propose exact new Python adapter paths and an independent
+validation argv after inspecting project source and command instructions. The
+displayed scope is adopted only on confirmation; explicit `--allow` / `--validate`
+remain authoritative. This proposal does not execute or implement the adapter.
+On authorized preparation, confirmed new paths are initialized only in the isolated
+workspace before indexing. Keep task output outside the author project; ordinary
+`--allow` paths without a creation declaration must already exist.
+
+Chat setup can propose public project/data/material downloads from quoted paper or project
+material, with separate confirmation for each asset. Projects accept a direct ZIP
+or a GitHub repository's default-branch snapshot, not a fixed commit; data stays a
+single downloaded file without automatic unpacking. Limits are 3 assets, 20 MiB
+per download, and 80 MiB / 5000 entries per project ZIP by default.
+Set `--asset-max-mb N` for a different project/data download capacity before chat
+setup; ZIP expansion is limited to `4*N` MiB. Confirmation displays these limits,
+and the saved receipt preserves them on recovery. ZIP format is checked from
+the archive itself, not inferred from the URL suffix. This does not authorize a
+download or installation by itself; supporting documents retain their own limits.
+Only public HTTPS URLs
+without query strings are accepted. Downloads do not authorize execution or
+dependency installation; this is not a security sandbox or complete SSRF protection.
+Supporting material can be an official instruction page or paper; it uses the existing
+document preview and question reads, with one public GET, no redirects and separate
+PDF permission. It counts against both asset and document limits, preserves its
+source URL and download ledger, and does not provide authority to execute commands.
+The acquisition path is implemented; end-to-end real-world reproduction acceptance
+has not yet passed.
+
+For a supplied paper link, use `start --kind reproduction --chat --document
+https://… --goal "…"`. Confirm acquisition before the model receives an attributed
+excerpt; PDF downloading/raw retention requires separate permission or explicit
+`--fulltext`. The preview is limited to 8000 characters / three PDF pages, not
+full-paper understanding. When a question needs later methods or instructions,
+chat can request a read-only lookup in an already supplied document or material.
+Expanded local extraction requires confirmation (up to 40 PDF pages / 20 MiB);
+only bounded query excerpts reach the model. Saved extraction bundles and
+acquisition receipts are reused on setup recovery, without parsing or fetching
+again. Ordinary `--prepare-only` does not fetch links. Repository and
+execution proposals still need inspected source text and separate confirmation.
 
 ### Existing data (no API)
 
@@ -65,6 +139,114 @@ For an accompanying report, `start` accepts `--material` and `--document`;
 `research-session` uses `--material` and `--local-document`. These provide context,
 not a different numeric transformation. Analysis-only ignores model settings.
 See [data fields](CONFIG_REFERENCE.md#existing-data-descriptive-analysis) for compatible option combinations.
+
+### Code-driven analysis and plots
+
+```bash
+simple-ar start --kind data_analysis --scripted --data-file measurements.csv --goal "Compare cost and quality in a three-panel figure"
+```
+
+This uses a model and executes generated code after ordinary execution confirmation.
+It prepares a small project and reuses CodeTask editing, protected data/checker files,
+validation, logging and recovery. No dependencies are installed. Deliveries include
+script, computed JSON and explanation. Figures follow the task: table-only analysis
+needs no plot, and multiple named figures/tables under outputs/ are retained.
+Matching PNG/SVG/PDF files are grouped as figure exports. File
+checks do not establish statistical correctness. Workspace isolation is not an
+OS/network sandbox. The canonical task uses the existing `bug_fix` execution path.
+
+Chat setup can propose this path for custom statistics or combined plots beyond
+the presets, then ask for confirmation; users need not select `--scripted` or
+prefill `value_column`. Unclear data semantics still require clarification, and
+user replies and units remain in `task.md`. Explanation is included; do not combine
+this path with `--with-report`, `--material` or `--project`. This routing capability
+does not establish successful real-world figure delivery.
+New scripted-analysis scaffolds use the existing `large` patch profile (16,000
+characters per new block), disclosed before execution; ordinary project repair
+keeps its existing limits. This avoids applying the normal 4,000-character block
+limit to a complete new analysis script, without claiming successful figure delivery.
+
+## Reuse deliveries
+
+For an editable conceptual method/architecture diagram, use
+`simple-ar start --kind figure --goal "Draw observations → comparison → evidence"`.
+No dummy dataset is created; optional `--data-file` supplies a real table. This
+shares the script/CodeTask route above and requires PNG, vector SVG, a design
+record and explanation. Structural checks do not verify diagram semantics or
+visual quality. Paper/material interpretation is not part of this entry yet.
+
+Guided code tasks default to one technical repair round. When process limits are
+omitted, `research-session` reserves one validation plus the configured repair/retest
+rounds; explicit limits, including zero, remain authoritative. A repair allowance
+does not authorize installation, scientific protocol changes or unlimited retries.
+
+`simple-ar start --from-session SESSION --reuse code_project --goal "Change the layout"`
+continues a validated code/plot project in a new isolated task, retaining its
+registered edit scope, protected files, validator and patch policy. The original
+delivery remains unchanged. This selector cannot be mixed with writing material
+selectors or new project/scope/validator overrides.
+
+```bash
+simple-ar results SESSION
+simple-ar start --from-session SESSION --reuse data_analysis --goal "Explain the cost/performance trade-off"
+simple-ar start --from-session SESSION --reuse report --goal "Shorten the discussion without changing measured results"
+```
+
+Select current registered `data_analysis`, `report`, `summary` or `code_analysis` results. Reuse starts
+a new writing task and leaves the original session unchanged. Reports include their
+registered source text bundle, saved experiment evidence and recorded citation identities
+where present; retained passages do not trigger another download, and metadata does not
+stand in for primary source text or re-verification. Reports are drafts, not new measured
+results. Analysis packages retain their existing source-data recheck. This is distinct
+from resuming an interrupted execution.
+
+To change the argument or chapter structure, use `--reuse report` with that goal
+to start a new adaptive writing task. It reuses the registered evidence without
+rewriting the original task's accepted outline. Normal revision keeps that outline.
+
+New validated script-analysis deliveries selected with `--reuse code_analysis` carry
+their source, input data, recorded results and PNG/vector exports into writing.
+Generated projects use `analysis.py` as the entry point; helper modules and editable
+layout sources may live in `src/` and are included in the portable package.
+The report can select figures for its body while retaining the complete linked package.
+Copying script outputs is not an independent numerical recomputation. Older sessions
+without the registered package retain their text/JSON-only reuse behavior.
+
+## Concept images
+
+```bash
+simple-ar image --config models.toml --prompt "A clean method overview" --output figures/v1
+simple-ar image --config models.toml --input figures/v1/image.png --prompt "Keep the layout; use green" --output figures/v2
+```
+
+Uses the named `image` route, or `--model profile:NAME`, with `image_generate` and,
+for edits, `image_edit` capabilities. The original stays untouched. Each version
+has its own request record and one-request ledger; repeating the identical completed
+request restores files without another API call. Failed/interrupted requests are
+not automatically resent. The generic `openai_images` API requires provider base64
+output and rejects URL-only output. With explicit `cctq_images_async`, recovery of a
+saved task ID polls the same task and authenticates its configured same-origin
+`files/0` download, without another POST. A saved completed task downloads directly;
+timeout and HTTP protocol settings may change for recovery without changing or
+resubmitting the generation. A request without a saved ID is not
+automatically resubmitted. The provider must implement this asynchronous contract;
+the adapter does not automatically switch APIs or models. These are raster concepts, not scientific
+measurements or vector layers.
+
+### Inspect a rendered figure
+
+```bash
+simple-ar image-review --config models.toml --input figures/v1/image.png \
+  --goal "Check readable labels, arrow routing and unwanted text" --output figures/review-v1
+```
+
+Requires a configured `vision` route; `--model profile:NAME` selects another vision
+connection. Repeat `--input` for up to four images. The command preserves source
+copies, the model response, `review.json` and `feedback.md`. Reopening identical
+completed inputs makes no API call; a saved raw response can be normalized offline.
+Changed inputs need a new output version. Interrupted requests without a saved
+response are not blindly resent. Apply feedback using the original code project or
+a new `image --input` edit; this command does not edit or certify the figure.
 
 ## Project preparation
 
@@ -105,7 +287,7 @@ The two report entrypoints use the same settings, with different option prefixes
 | --- | --- | --- |
 | `--report-document-review` / `--no-report-document-review` | `--document-review` / `--no-document-review` | Enable or disable whole-document review |
 | `--report-review-scope section\|document` | `--review-scope section\|document` | Review sections individually or after drafting the body |
-| `--report-draft-scope section\|document` | `--draft-scope section\|document` | Draft sections individually or jointly |
+| `--report-draft-scope section\|document\|auto` | `--draft-scope section\|document\|auto` | Draft separately, jointly, or jointly only for fully sized plans up to 2,000 words |
 | `--report-outline-strategy auto\|template\|adaptive` | `--outline-strategy auto\|template\|adaptive` | Select template-based or evidence-led planning |
 | `--report-data-tables linked\|full` | `--data-tables linked\|full` | Link data records or also include summary tables |
 | `--max-document-review-prompt-chars N` | `--max-document-review-prompt-chars N` | Optional complete review-request character ceiling |
@@ -132,7 +314,8 @@ uv run simple-ar report-export --report-dir PATH_TO_REPORT_ATTEMPT --output runs
 The input directory must contain `report_body.md` with its source citation keys,
 and `references.bib` when cited. Pandoc converts this existing text; no model or
 experiment is rerun. Local figures inside the report directory are copied;
-SVG figures require `rsvg-convert`. Remote image URLs are not fetched.
+SVG figures used in TeX require `rsvg-convert`. Remote image URLs are not fetched.
+Registered vector exports are retained even when the body uses a PNG preview.
 `--title` supplies a publication-facing title. Existing output directories are
 retained; choose a new one for each export.
 

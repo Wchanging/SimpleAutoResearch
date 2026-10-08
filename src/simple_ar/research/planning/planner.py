@@ -165,10 +165,11 @@ def build_llm_research_plan(
         config=config,
         rows=data.get("questions"),
     )
-    llm_queries = _string_list(data.get("queries"))
-    if not llm_queries:
-        llm_queries = _queries_from_llm_specs(data.get("query_specs"))
-    queries = _normalize_paper_queries(seed_queries + llm_queries, limit=max_queries)
+    llm_queries = _queries_from_llm_specs(data.get("query_specs")) or _string_list(data.get("queries"))
+    # Explicit user seeds remain executable. The natural-language task is not
+    # an obligatory keyword query once the planner has supplied focused ones.
+    configured_queries = _string_list(config.get("research_queries"))
+    queries = _normalize_paper_queries(configured_queries + llm_queries, limit=max_queries)
     if not queries:
         raise ValueError("LLM research planner produced no usable queries")
     query_specs = _complete_query_specs(_query_specs_from_llm(data.get("query_specs"), queries), queries)
@@ -352,7 +353,9 @@ def _normalize_paper_queries(values: list[str], *, limit: int) -> list[str]:
 
 def _paper_query_from_keywords(title_keywords: list[str], abstract_keywords: list[str]) -> str:
     terms: list[str] = []
-    for keyword in title_keywords + abstract_keywords:
+    # Supporting abstract conditions are screening/reading context, not an
+    # exhaustive conjunction imposed on every paper in the retrieval query.
+    for keyword in title_keywords or abstract_keywords:
         terms.extend(_keyword_terms(keyword))
     return " ".join(_unique(terms)[:MAX_QUERY_TERMS])
 

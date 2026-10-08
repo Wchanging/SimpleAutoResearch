@@ -208,9 +208,12 @@ def run_experiment_capability(
     execution to a failed capability result; it never turns a timeout into a
     successful experiment and never retries implicitly.
     """
-    from simple_ar.experiment.execution.outputs import capture_outputs, output_files
+    from simple_ar.experiment.execution.outputs import (
+        capture_outputs, output_files, metric_sources, extract_file_metrics,
+    )
 
     declared_outputs = output_files(request.result_schema)
+    declared_metrics = metric_sources(request.result_schema)
     implementation_refs = [ref for ref in context.inputs if ref.kind == "implementation_result"]
     if len(implementation_refs) > 1:
         raise ValueError("An experiment must name at most one producing implementation revision.")
@@ -274,6 +277,15 @@ def run_experiment_capability(
         canonical["output_evidence"] = output_evidence
     process_refs.extend(output_refs)
     canonical["artifacts"] = artifact_paths
+    file_metrics, metric_locations, metric_issues = extract_file_metrics(
+        context.store, output_evidence, declared_metrics, canonical["metrics"],
+    )
+    canonical["metrics"].update(file_metrics)
+    if declared_metrics:
+        canonical["metric_sources"] = metric_locations
+        if not canonical["primary_metric"] and canonical["metrics"]:
+            canonical["primary_metric"] = next(iter(canonical["metrics"]))
+    canonical["measurement"]["metric_count"] = len(canonical["metrics"])
     guard = (
         dict(request.guard)
         if request.guard is not None
@@ -282,6 +294,11 @@ def run_experiment_capability(
             result_schema=request.normalized_result_schema(),
         )
     )
+    guard = {**guard, "summary": {**guard.get("summary", {}), "metric_count": len(canonical["metrics"])}}
+    if metric_issues:
+        guard = {**guard, "status": "failed", "issues": [*guard.get("issues", []), *metric_issues],
+                 "summary": {**guard.get("summary", {}), "metric_count": len(canonical["metrics"]),
+                             "error_count": guard.get("summary", {}).get("error_count", 0) + len(metric_issues)}}
     canonical["guard"] = guard
     diagnosis = diagnose_experiment_run(
         results=canonical,
@@ -351,7 +368,7 @@ def run_experiment_capability(
         diagnostics=tuple(diagnostics),
         usage={
             "duration_sec": result.run.duration_sec,
-            "metric_count": len(result.run.metrics),
+            "metric_count": len(canonical["metrics"]),
         },
         provenance={
             "capability": "experiment",

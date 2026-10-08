@@ -18,9 +18,11 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Sequence
 from uuid import uuid4
+from simple_ar.integrations.model_profiles import model_connections_compatible
 
 from simple_ar.app.research_intake import normalize_assets, validate_brief, write_intake_artifacts
 from simple_ar.app.research_execution import (
+    code_task_validation,
     analysis_contract_context,
     execution_pairs,
     execution_protocol,
@@ -46,7 +48,7 @@ from simple_ar.research.brief import evidence_pack_from_read
 from simple_ar.research.assessment import IdeaAssessmentRequest
 from simple_ar.research.design import ResearchDesignRequest
 from simple_ar.research.documents.ingest import DocumentBundle, DocumentIngestRequest
-from simple_ar.research.evidence.reader import ReadRequest, ReadResult
+from simple_ar.research.evidence.reader import ReadRequest, ReadResult, new_source_queries, linked_material_records
 from simple_ar.research.planning.capability import (
     ResearchPlanRequest,
     ResearchPlanResult,
@@ -57,6 +59,7 @@ from simple_ar.research.task_plan import (
     TaskPlanResult,
     append_research_followup,
     insert_implementation_refinement,
+    insert_evidence_followup,
     report_from_documents,
 )
 from simple_ar.app.research_interaction import (
@@ -321,7 +324,7 @@ class ResearchApplication:
         """
         runtime = _read_runtime_config(self.controller)
         saved_connections = runtime.get("model_connections")
-        if saved_connections and saved_connections != _model_connection_bindings(self.services):
+        if saved_connections and not model_connections_compatible(saved_connections, _model_connection_bindings(self.services)):
             raise ResearchApplicationError(
                 "Named model connections differ from this saved session. Restore the catalog/profile "
                 "used for the task, or start a new task with the changed connections; credentials may rotate."
@@ -371,14 +374,7 @@ class ResearchApplication:
         self.require_llm_binding()
         with self.controller.mutation_scope():
             self._reconcile_running_attempt()
-            terminal = {attempt.attempt_id for attempt in self.controller.list_attempts()
-                        if attempt.status in {"completed", "failed"}}
-            for entry in self.budget_ledger.entries:
-                if entry.status == "reserved" and entry.attempt_id in terminal:
-                    self.budget_ledger.mark_unknown(
-                        entry.reservation_id, retain_reservation=True,
-                        reason="Attempt ended without persisted usage; retain its reservation, not zero consumption.",
-                    )
+            self._reconcile_terminal_usage()
             if self.controller.manifest.status in {"paused", "blocked", "completed"}:
                 return self.view()
             for _ in range(max_actions):
@@ -391,6 +387,17 @@ class ResearchApplication:
                     break
             self._finish_available_work()
             return self.view()
+
+    def _reconcile_terminal_usage(self) -> None:
+        """Ended attempts cannot retain live calls, nor claim zero consumption."""
+        terminal = {attempt.attempt_id for attempt in self.controller.list_attempts()
+                    if attempt.status in {"completed", "failed"}}
+        for entry in self.budget_ledger.entries:
+            if entry.status == "reserved" and entry.attempt_id in terminal:
+                self.budget_ledger.mark_unknown(
+                    entry.reservation_id, retain_reservation=True,
+                    reason="Attempt ended without persisted usage; retain its reservation, not zero consumption.",
+                )
 
     def recover_interrupted_attempt(
         self,
@@ -410,6 +417,7 @@ class ResearchApplication:
                     "Interrupted recovery requires exactly one current running attempt."
                 )
             self.controller.recover_interrupted(running[0].attempt_id, reason=reason)
+            self._reconcile_terminal_usage()
             return self.view()
 
     def continue_session(
@@ -707,6 +715,12 @@ class ResearchApplication:
                 output = _CAPABILITY_OUTPUTS.get(current.capability)
                 if output is not None and not any(ref.kind == output[1] for ref in result.artifacts):
                     self.controller.manifest.current_attempt = None
+            elif (current is not None and current.capability == "implement"
+                  and "implementation" in self.controller.manifest.state_refs
+                  and self._state_payload("implementation").get("stop_reason") == "validation_failed"):
+                # Explicit continuation retries the incomplete validation,
+                # rather than replaying the already settled partial result.
+                self.controller.manifest.current_attempt = None
             self.controller.continue_with_revision(
                 reason,
             )
@@ -1108,13 +1122,21 @@ class ResearchApplication:
         from simple_ar.research.design import ResearchDesignResult
         from simple_ar.report.schema import SourceHandle
 
-        refs = self.controller.manifest.state_refs
+        refs = self._evidence_refs()
         documents = self._load_documents()
         planned = {step.capability for step in self._load_task_plan().steps} if "task_plan" in refs else set()
-        if self._task_kind() in {"writing", "data_analysis"} or (
+        direct_report = (
             "task_plan" in refs and "synthesis" not in refs and "synthesize" not in planned
             and not set(self.brief.requested_outputs) & {"experiment", "experiments"}
-        ):
+        )
+        if direct_report and "search" in refs:
+            from simple_ar.report.projection import build_literature_report_inputs
+            context, memory = build_literature_report_inputs(
+                topic=self.brief.objective or self.brief.request_text, brief=None,
+                search=self._load_search(documents=documents), documents=documents, brief_ref=None)
+            return attach_report_read_evidence(context, memory, documents=documents,
+                read=self._load_read(documents=documents), read_ref=refs["read"], documents_ref=refs["documents"])
+        if self._task_kind() in {"writing", "data_analysis"} or direct_report:
             from simple_ar.report.projection import build_material_report_inputs
             context, memory = build_material_report_inputs(
                 topic=self.brief.objective or self.brief.request_text,
@@ -1122,7 +1144,7 @@ class ResearchApplication:
             )
             if "read" in refs or "read" in planned:
                 return attach_report_read_evidence(context, memory, documents=documents,
-                    read=self._load_read(documents=documents), read_ref=refs["read"])
+                    read=self._load_read(documents=documents), read_ref=refs["read"], documents_ref=refs["documents"])
             return context, memory
         search = self._load_search(documents=documents)
         synthesis = self._load_synthesis()
@@ -1134,7 +1156,7 @@ class ResearchApplication:
                 search=search, documents=documents, brief_ref=refs["synthesis"],
             )
             return attach_report_read_evidence(context, memory, documents=documents,
-                                               read=read, read_ref=refs["read"])
+                                               read=read, read_ref=refs["read"], documents_ref=refs["documents"])
         analysis_ref = self._latest_analysis_ref() or refs["analysis"]
         design_ref = self._implementation_design_ref() if "design" in refs else None
         design = ResearchDesignResult.from_handoff_dict(self.controller.store.read_json(design_ref)) if design_ref else None
@@ -1184,7 +1206,7 @@ class ResearchApplication:
             )
             memory.source_handles = list(context.source_handles)
             return attach_report_read_evidence(context, memory, documents=documents,
-                                               read=read, read_ref=refs["read"])
+                                               read=read, read_ref=refs["read"], documents_ref=refs["documents"])
         if analysis.execution_ref != self.latest_experiment_ref():
             raise ResearchApplicationError("Analyze the latest measurement before creating report inputs.")
         execution = dict(self.controller.store.read_json(analysis.execution_ref))
@@ -1242,7 +1264,7 @@ class ResearchApplication:
             output_store=self.controller.store,
         )
         return attach_report_read_evidence(context, memory, documents=documents,
-                                           read=read, read_ref=refs["read"])
+                                           read=read, read_ref=refs["read"], documents_ref=refs["documents"])
 
     def _report_experiment_observations(self) -> list[tuple[str, ArtifactRef, Mapping[str, Any]]]:
         refs = self.controller.manifest.state_refs
@@ -1291,7 +1313,7 @@ class ResearchApplication:
             self.services.llm_client is not None
             and planner_mode != "deterministic"
             and not protocol_accepted
-            and self._task_kind() not in {"measurement", "reproduction", "writing", "data_analysis"}
+            and self._task_kind() not in {"bug_fix", "measurement", "reproduction", "writing", "data_analysis"}
         )
         task_plan = TaskPlanRequest(
             task_kind=self._task_kind(),
@@ -1312,11 +1334,11 @@ class ResearchApplication:
             use_llm=use_llm,
             llm_client=self.services.llm_client,
         )
-        # This boundary already fixes the route: supplied documents to a report,
-        # without search, execution, assessment or an intermediate deliverable.
-        # Let the article planner organize its content, not re-plan this dispatch.
+        # A report-only route is fixed, but an open investigation still needs
+        # question/query planning. Skip model dispatch planning only; the
+        # planning capability separately skips unused evidence planning when
+        # the accepted route has neither search nor read.
         if report_from_documents(task_plan):
-            use_llm = False
             task_plan = replace(task_plan, use_llm=False)
         return self._execute(
             "plan", "plan",
@@ -1334,6 +1356,7 @@ class ResearchApplication:
         )
 
     def _run_summarize_action(self) -> bool:
+        refs = self._evidence_refs()
         state_refs = tuple(
             (name, ref)
             for name, ref in self.controller.manifest.state_refs.items()
@@ -1343,9 +1366,9 @@ class ResearchApplication:
             "summary", "summary",
             SummaryRequest(
                 brief_ref=self.controller.manifest.state_refs["brief"],
-                search_ref=self.controller.manifest.state_refs.get("search"),
-                documents_ref=self.controller.manifest.state_refs["documents"],
-                read_ref=self.controller.manifest.state_refs["read"],
+                search_ref=refs.get("search"),
+                documents_ref=refs["documents"],
+                read_ref=refs["read"],
                 synthesis_ref=self.controller.manifest.state_refs["synthesis"],
                 state_refs=state_refs,
             ),
@@ -1358,6 +1381,15 @@ class ResearchApplication:
 
     def _run_search_action(self) -> bool:
         plan = self._load_plan()
+        limit = self._search_limit(plan)
+        reserve = plan.query_plan.auto_expansion and plan.query_plan.max_rounds > 1 and self.services.llm_client is not None
+        if reserve and limit > 1:
+            limit -= min(2, limit - 1)  # Keep slots for question-driven or linked-material followup.
+        next_query_limit = plan.source_plan.budget.get("max_follow_up_queries", 3)
+        if type(next_query_limit) is not int or next_query_limit < 0:
+            next_query_limit = 3
+        if reserve:
+            next_query_limit = 0
         accepted = self._execute(
             "search", "search",
             self._search_request(plan), self._input_refs("plan"),
@@ -1365,7 +1397,9 @@ class ResearchApplication:
             emit=self.services.message_callback,
             selection_policy=SearchSelectionPolicy(
                 topic=self.controller.manifest.topic, questions=plan.questions,
-                query_plan=plan.query_plan, max_documents=self._search_limit(plan),
+                query_plan=replace(plan.query_plan, max_rounds=1) if reserve else plan.query_plan,
+                max_documents=limit,
+                next_query_limit=next_query_limit,
             ), allow_partial=True,
         )
         if accepted and not self._load_search().selected_papers and not self._local_documents():
@@ -1381,6 +1415,8 @@ class ResearchApplication:
         else:
             source_plan = self._load_plan().source_plan
         has_search = "search" in self.controller.manifest.state_refs
+        # Search already bounds the selected sources. Do not reserve again at
+        # acquisition: known selected evidence precedes speculative followups.
         papers = self._load_search().selected_papers if has_search else ()
         analysis_paths = tuple(Path(asset.locator) for asset in self.assets
             if self._task_kind() == "writing" and asset.role == "material" and Path(asset.locator).suffix.lower() == ".json")
@@ -1428,6 +1464,151 @@ class ResearchApplication:
                 emit=self.services.message_callback,
             ), self._input_refs("plan", "documents"), allow_partial=True,
         )
+
+    def _evidence_followup_inputs(self):
+        plan = self._load_plan()
+        base = SearchResult.from_handoff_dict(self._state_payload("search"))
+        documents = DocumentBundle.from_handoff_dict(self._state_payload("documents"))
+        previous = ReadResult.from_handoff_dict(self._state_payload("read"), bundle=documents)
+        key = lambda q: " ".join(q.split()).casefold()
+        used = {key(response.query) for response in base.responses}
+        extra = plan.source_plan.budget.get("max_follow_up_queries", 3)
+        extra = extra if type(extra) is int and extra >= 0 else 3
+        total = len({key(q) for q in self._search_request(plan).queries}) + extra
+        configured = self._effective_config().get("research_max_queries")
+        if type(configured) is int and configured > 0:
+            total = min(total, configured)
+        queries = tuple(q for q in new_source_queries(previous) if key(q) not in used)
+        if "evidence_followup_context_1" in self.controller.manifest.state_refs:
+            frozen = self._state_payload("evidence_followup_context_1")
+            return plan, documents, previous, tuple(frozen["queries"]), frozen["remaining_documents"]
+        return plan, documents, previous, queries[:max(0, total - len(used))], max(0, self._search_limit(plan) - len(documents.records))
+
+    def _supporting_evidence_records(self, plan, documents, previous, remaining):
+        from simple_ar.research.contracts import DocumentRecord
+        if "evidence_followup_context_1" in self.controller.manifest.state_refs:
+            return tuple(DocumentRecord(**r) for r in self._state_payload("evidence_followup_context_1")["supporting_records"])
+        budget, history = plan.source_plan.budget, documents.fulltext_manifest
+        caps = history.get("budget", {})
+        if not plan.source_plan.require_fulltext or any(type(caps.get(k, budget.get(k))) is not int
+                or caps.get(k, budget.get(k)) <= history.get(counter, 0)
+                for k, counter in (("max_fulltext_documents", "cached_count"),
+                                   ("max_fulltext_fetch_attempts", "fetch_attempt_count"), ("max_pdf_mb", "unused"))):
+            return ()
+        return linked_material_records(previous, bundle=documents, limit=remaining)
+
+    def _schedule_evidence_followup(self) -> None:
+        refs = self.controller.manifest.state_refs
+        if not {"task_plan", "plan", "search", "documents", "read"} <= refs.keys():
+            return
+        task = self._load_task_plan()
+        if task.task_kind not in {"survey", "research"} or any(s.action == "read_evidence:1" for s in task.steps):
+            return
+        base_read = next((s for s in task.steps if s.action == "read"), None)
+        downstream = [s for s in task.steps if s.action in {"synthesize", "report_write"}]
+        attempted = {a.trigger for a in self.controller.list_attempts()}
+        if (not any(s.action == "search" for s in task.steps) or base_read is None
+                or not self._step_completed(base_read) or not self._state_succeeded("read") or not downstream
+                or any(s.state_name in refs or f"application:{s.state_name}" in attempted for s in downstream)):
+            return
+        plan, documents, previous, queries, remaining = self._evidence_followup_inputs()
+        supporting = self._supporting_evidence_records(plan, documents, previous, remaining)
+        base = SearchResult.from_handoff_dict(self._state_payload("search"))
+        if not plan.query_plan.auto_expansion or plan.query_plan.max_rounds <= 1 or not (queries or supporting) or not remaining:
+            return
+        if max(base.response_rounds or (1,)) >= plan.query_plan.max_rounds:
+            return
+        extended = insert_evidence_followup(task, round_index=1, read_state="read", queries=queries or tuple(r.url for r in supporting))
+        refs["evidence_followup_context_1"] = self.controller.store.write_json(
+            "planning/evidence_followup_context_1.json", {"queries": list(queries),
+                "supporting_records": [r.to_row() for r in supporting], "remaining_documents": remaining},
+            kind="step_context", producer="research_application")
+        refs["task_plan"] = self.controller.store.write_json(
+            "planning/task_plan-evidence-1.json", extended.to_handoff_dict(),
+            kind="task_plan", schema="research_task_plan.v1", producer="research_application")
+        self.controller.save()
+
+    def _run_evidence_action(self, action: str) -> bool:
+        from simple_ar.research.evidence.retrieval import paper_identity_key
+        from simple_ar.literature.models import normalize_paper_id
+        plan, documents, previous, queries, remaining = self._evidence_followup_inputs()
+        if "evidence_followup_context_1" not in self.controller.manifest.state_refs:
+            # Old scheduled plans had paper queries only; do not add URL targets on recovery.
+            self.controller.manifest.state_refs["evidence_followup_context_1"] = self.controller.store.write_json(
+                "planning/evidence_followup_context_1.json", {"queries": list(queries),
+                    "supporting_records": [], "remaining_documents": remaining},
+                kind="step_context", producer="research_application")
+            self.controller.save()
+        supporting = self._supporting_evidence_records(plan, documents, previous, remaining)
+        refs = self.controller.manifest.state_refs
+        if action == "search_evidence:1":
+            if not queries:
+                from simple_ar.core.capabilities import CapabilityResult
+                def empty_search(*, context, **kwargs):
+                    output = context.store.write_json("search_result.json", SearchResult("empty", ()).to_handoff_dict(),
+                        kind="search_result", schema="search_handoff.v1", producer="research_application")
+                    return CapabilityResult("partial", (output,), diagnostics=("URL-only linked-material followup; no provider search.",))
+                handler = self.controller.registry.resolve("search")
+                self.controller.registry.register("search", empty_search, replace=True)
+                try:
+                    return self._execute("search", "search_evidence_1", None,
+                        self._input_refs("plan", "read", "evidence_followup_context_1"), allow_partial=True)
+                finally:
+                    self.controller.registry.register("search", handler, replace=True)
+            return self._execute("search", "search_evidence_1",
+                replace(self._search_request(plan), queries=queries, stop_after_papers=None),
+                self._input_refs("plan", "read", "search", "evidence_followup_context_1"), registry=self._provider_registry(),
+                emit=self.services.message_callback, allow_partial=True)  # No metadata expansion policy.
+        if action == "ingest_evidence:1":
+            search = SearchResult.from_handoff_dict(self._state_payload("search_evidence_1"))
+            old = provided_materials_result(documents.records).papers
+            seen = {paper_identity_key(p) for p in old}
+            ids = {r.document_id for r in documents.records}
+            papers = []
+            for paper in (search.selected_papers if search.selection_rows else search.papers):
+                identity = paper_identity_key(paper)
+                if identity not in seen and normalize_paper_id(f"{paper.source}-{paper.id}") not in ids:
+                    papers.append(paper)
+                    seen.add(identity)
+            budget = dict(plan.source_plan.budget)
+            historical = documents.fulltext_manifest
+            exhausted = False
+            for name, counter in (("max_fulltext_documents", "cached_count"),
+                                  ("max_fulltext_fetch_attempts", "fetch_attempt_count")):
+                cap = historical.get("budget", {}).get(name, budget.get(name, 0))
+                if type(cap) is int and cap > 0:
+                    budget[name] = max(0, cap - historical.get(counter, 0))
+                    exhausted |= budget[name] == 0
+            source = replace(plan.source_plan, local_documents=[], budget=budget,
+                             require_fulltext=plan.source_plan.require_fulltext and not exhausted)
+            return self._execute("document_ingest", "documents_evidence_1",
+                DocumentIngestRequest(papers=tuple(papers[:max(0, remaining - len(supporting))]), supporting_records=supporting, source_plan=source,
+                    cache_dir=self._cache_dir("literature"), extraction_dir=self._extraction_dir(),
+                    max_chunks=self.services.max_chunks),
+                self._input_refs("plan", "documents", "search_evidence_1", "evidence_followup_context_1"), allow_partial=True)
+        fresh = DocumentBundle.from_handoff_dict(self._state_payload("documents_evidence_1"))
+        return self._execute("read", "read_evidence_1",
+            ReadRequest(bundle=fresh, previous=previous, topic=self.controller.manifest.topic,
+                problem_markdown=self._problem_markdown(), research_plan_json=json.dumps(plan.to_handoff_dict(), ensure_ascii=False),
+                config=self._effective_config(), use_llm=bool(fresh.chunks) and self.services.llm_client is not None,
+                llm_client=self.services.llm_client, emit=self.services.message_callback),
+            (refs["read"], refs["documents"], refs["documents_evidence_1"], refs["plan"]), allow_partial=True)
+
+    def _empty_evidence_ingest(self, state: str, attempt_id: str, result: Any) -> bool:
+        if state != "documents_evidence_1" or result.status != "blocked" or not any(
+                r.kind == "document_bundle" for r in result.artifacts):
+            return False
+        ref = self.controller.attempt_output_ref(attempt_id, kind="document_bundle", schema="document_bundle.v1")
+        return not self.controller.store.read_json(ref).get("chunks")
+
+    def _evidence_refs(self) -> dict[str, ArtifactRef]:
+        refs = dict(self.controller.manifest.state_refs)
+        if "read_evidence_1" in refs and "documents_evidence_cumulative_1" in refs:
+            step = next((s for s in self._load_task_plan().steps if s.action == "read_evidence:1"), None)
+            if step is not None and self._step_completed(step) and self._state_succeeded(step.state_name):
+                refs.update(read=refs["read_evidence_1"], documents=refs["documents_evidence_cumulative_1"],
+                            search=refs["search_evidence_cumulative_1"])
+        return refs
 
     def _run_synthesize_action(self) -> bool:
         plan, search, read = self._load_plan(), self._load_search(), self._load_read()
@@ -1480,7 +1661,7 @@ class ResearchApplication:
             # smaller than the application-level protocol projection.
             config.pop("baseline_policy", None)
             config.pop("protocol_seed_reason", None)
-        if self._task_kind() != "bug_fix" and "code_task" in config and self._state_payload("design").get("contract") is None:
+        if self._task_kind() not in {"bug_fix", "reproduction"} and "code_task" in config and self._state_payload("design").get("contract") is None:
             return self._pause_action("CodeTask preparation requires a selected research design contract; review the candidate assessment before running its experiment matrix.")
         try:
             run = None
@@ -1492,6 +1673,12 @@ class ResearchApplication:
                     contract=self._execution_contract(),
                 ).run
             repair_limit(config)
+            if "code_task" in config:
+                command, timeout = code_task_validation(config, required=self._task_kind() == "reproduction")
+                if command is not None:
+                    # The preparation owner initializes benchmark/checker protection
+                    # from run; execution.command remains the formal measurement.
+                    run = replace(run, command=list(command), timeout_sec=timeout)
         except ValueError as exc:
             self.controller.pause(str(exc))
             return False
@@ -1499,7 +1686,7 @@ class ResearchApplication:
             "prepare_execution", "preparation",
             PreparationRequest(config, self._problem_markdown(), run, data_paths=self._execution_data_paths()),
             self._input_refs("brief", "runtime_config")
-            if self._task_kind() == "bug_fix" or "environment" in config
+            if self._task_kind() in {"bug_fix", "reproduction"} or "environment" in config
             else self._input_refs("brief", "design", "runtime_config"),
             backend=LocalExecutionBackend(budget_ledger=self.budget_ledger, message_callback=self.services.message_callback),
         )
@@ -1549,7 +1736,12 @@ class ResearchApplication:
             report_context, memory, config, template, _ = self._report_writing_parts()
         except ResearchApplicationError as exc:
             return self._pause_action(f"Report inputs are not ready: {exc}")
-        sources = tuple(ref for key, ref in self.controller.manifest.state_refs.items() if key not in {"work_plan", "work_plan_markdown", "readiness"})
+        document_ref = self._evidence_refs().get("documents")
+        sources = tuple(dict.fromkeys(
+            ref for key, ref in self.controller.manifest.state_refs.items()
+            if key not in {"work_plan", "work_plan_markdown", "readiness"}
+            and (ref.schema != "document_bundle.v1" or ref == document_ref)
+        ))
         # Attachment handles come from measured results, but read permission
         # comes from the producing attempt's registered outputs, not model text.
         output_paths = {handle.artifact for handle in report_context.source_handles if handle.kind == "experiment_output"}
@@ -1699,13 +1891,18 @@ class ResearchApplication:
         )
 
     def _run_implement_action(self, action: str) -> bool:
-        if self._task_kind() == "bug_fix":
+        if self._task_kind() in {"bug_fix", "reproduction"}:
             execution = self._execution_config().get("execution")
             if not isinstance(execution, Mapping) or not isinstance(execution.get("code_task"), Mapping):
                 return self._pause_action("Bug repair requires an explicit existing-project CodeTask configuration.")
             try:
+                if self._task_kind() == "reproduction":
+                    for resource in ("process_invocations", "process_wall_seconds"):
+                        if self.budget_ledger.remaining(resource) is None:
+                            raise ValueError(f"Reproduction validation requires an explicit finite {resource} budget.")
                 request = implementation_request(
                     execution, self.services.llm_client, validate=True,
+                    require_validation=self._task_kind() == "reproduction",
                     task_text=self.brief.request_text,
                     contract=self._execution_contract(),
                 )
@@ -1721,9 +1918,19 @@ class ResearchApplication:
             inputs = self._input_refs("brief", "runtime_config")
             if "preparation" in self.controller.manifest.state_refs:
                 inputs += self._input_refs("preparation")
-            return self._execute(
-                "implement", "implementation", request, inputs, allow_partial=True,
+            if self._task_kind() == "reproduction":
+                inputs += self._input_refs("read", "synthesis")
+                request = replace(request, revision_instruction=(
+                    "Reproduction preparation only: connect the author program and convert raw results "
+                    "to the declared JSON/CSV metric contract. Preserve the user brief, method, data, "
+                    "seeds and evaluation conditions. Do not invent candidates or modify protected checkers."
+                ))
+            accepted = self._execute(
+                "implement", "implementation", request, inputs, allow_partial=self._task_kind() == "bug_fix",
             )
+            if accepted and self._state_payload("implementation").get("stop_reason") == "validation_failed":
+                return self._pause_action("Short validation failed; inspect retained evidence and explicitly continue within the remaining repair and execution budgets.")
+            return accepted
         try:
             request = implementation_request(
                 self._execution_config()["execution"], self.services.llm_client,
@@ -1770,6 +1977,20 @@ class ResearchApplication:
 
     def _run_measurement_action(self, action: str) -> bool:
         try:
+            execution = self._execution_config().get("execution")
+            if self._task_kind() == "reproduction" and isinstance(execution, Mapping) and "code_task" in execution:
+                command, timeout = code_task_validation(execution, required=True)
+                ref = self.controller.manifest.state_refs.get("implementation")
+                attempt = self._attempt_for_ref(ref) if ref is not None else None
+                payload = self._state_payload("implementation") if ref is not None else {}
+                validation = payload.get("validation") or {}
+                if (attempt is None or attempt.status != "completed" or payload.get("status") != "validated"
+                    or validation.get("status") != "passed" or validation.get("command") != list(command)
+                    or validation.get("returncode") != 0 or validation.get("timed_out") is not False
+                    or validation.get("timeout_sec") != timeout
+                    or payload.get("workspace_dir") != execution.get("cwd")
+                    or payload.get("code_task_run_dir") != execution["code_task"].get("run_dir")):
+                    raise ValueError("Reproduction measurement requires completed independent CodeTask validation passed in this workspace.")
             matrix = action.startswith("matrix_")
             condition = "baseline" if action.startswith("matrix_baseline_") else action
             request = execution_request(
@@ -1998,7 +2219,8 @@ class ResearchApplication:
         report_context, memory = apply_report_bibliography(report_context, memory,
             documents=self._load_documents(), notes=memory.outline_planning.get("source_notes", []))
         if action == "report":
-            table_analyses = tuple(self.controller.store.ref(row["artifact"], kind="table_analysis", schema="table_analysis.v1")
+            table_analyses = tuple(self.controller.store.ref(row["artifact"], kind="analysis_package",
+                                  schema=row.get("schema_version", "table_analysis.v1"))
                                   for row in report_context.results.get("supplied_analyses", []))
             source_handles = {str(handle.metadata.get("document_id")): handle.handle
                               for handle in report_context.source_handles if handle.metadata.get("document_id")}
@@ -2044,6 +2266,8 @@ class ResearchApplication:
              allow_partial=True)
 
     def _run_action(self, action: str) -> bool:
+        if action in {"search_evidence:1", "ingest_evidence:1", "read_evidence:1"}:
+            return self._run_evidence_action(action)
         if action == "plan":
             return self._run_plan_action()
         if action == "data_ingest":
@@ -2462,7 +2686,7 @@ class ResearchApplication:
             # ref and stop this run; do not turn it into a successful delivery.
             self._record_attempt_outputs(capability, state_name, attempt_id, result)
             return self._pause_action("Report audit failed; inspect report_audit.json before delivery or revision.")
-        if result.status not in accepted and not measured_failure:
+        if result.status not in accepted and not measured_failure and not self._empty_evidence_ingest(state_name, attempt_id, result):
             if capability == "implement" and self._schedule_implementation_refinement(state_name, attempt_id, result):
                 self._persist_application_views()
                 return True
@@ -2491,7 +2715,7 @@ class ResearchApplication:
 
     def _schedule_implementation_refinement(self, state_name: str, attempt_id: str, result: Any) -> bool:
         """Route explicit design gaps; never infer research intent from error prose."""
-        if result.status != "blocked" or self.services.llm_client is None or self._task_kind() == "bug_fix":
+        if result.status != "blocked" or self.services.llm_client is None or self._task_kind() in {"bug_fix", "reproduction"}:
             return False
         output = next((ref for ref in result.artifacts if ref.kind == "implementation_result"), None)
         if output is None:
@@ -2609,6 +2833,30 @@ class ResearchApplication:
         except (KeyError, ValueError) as exc:
             raise ResearchApplicationError(f"{capability} has incomplete declared outputs: {exc}") from exc
         self.controller.manifest.state_refs.update(refs)
+        if state_name == "read_evidence_1":
+            refs = self.controller.manifest.state_refs
+            refs["documents_evidence_cumulative_1"] = self.controller.attempt_output_ref(
+                attempt_id, kind="document_bundle", schema="document_bundle.v1")
+            base = SearchResult.from_handoff_dict(self._state_payload("search"))
+            fresh = SearchResult.from_handoff_dict(self._state_payload("search_evidence_1"))
+            shift = max(base.response_rounds or (1,))
+            bundle = DocumentBundle.from_handoff_dict(self.controller.store.read_json(refs["documents_evidence_cumulative_1"]))
+            read_ids = {r.metadata.get("paper_id") for r in bundle.records}
+            old_ids = {p.id for p in base.papers}
+            added = tuple(p for p in fresh.papers if p.id not in old_ids)
+            selected_ids = {p.id for p in base.selected_papers}
+            selected = tuple(p for p in {p.id: p for p in fresh.papers}.values() if p.id in read_ids and p.id not in selected_ids)
+            cumulative = replace(base, responses=base.responses + fresh.responses, papers=base.papers + added,
+                selected_papers=base.selected_papers + selected,
+                coverage_report={**base.coverage_report, "evidence_followup": {
+                    "round": 1, "new_read_papers": len(selected),
+                    "observation": "Prior metadata coverage plus reading-directed search; gaps are not semantically resolved by search."}},
+                diagnostics=base.diagnostics + fresh.diagnostics,
+                response_rounds=(base.response_rounds or (1,) * len(base.responses))
+                    + tuple(shift + r for r in (fresh.response_rounds or (1,) * len(fresh.responses))))
+            refs["search_evidence_cumulative_1"] = self.controller.store.write_json(
+                "outputs/search_evidence_cumulative_1.json", cumulative.to_handoff_dict(),
+                kind="search_result", schema="search_handoff.v1", producer="research_application")
         if capability == "analysis":
             self._ensure_research_decision()
 
@@ -4164,6 +4412,7 @@ class ResearchApplication:
                 current_manifest.status == "completed"
                 or current_manifest.capability in {"experiment", "analysis"}
                 or (current_manifest.capability == "implement" and current_manifest.status == "blocked")
+                or current_state == "documents_evidence_1"
             )
             running = [current_manifest] if (
                 (current_step is not None or planner_attempt)
@@ -4196,7 +4445,8 @@ class ResearchApplication:
             ref.kind == _CAPABILITY_OUTPUTS[attempt.capability][1]
             for ref in result.artifacts
         )
-        if result.status not in {"completed", "partial"} and not measured_failure:
+        if result.status not in {"completed", "partial"} and not measured_failure and not self._empty_evidence_ingest(
+                attempt.trigger.removeprefix("application:"), attempt.attempt_id, result):
             if attempt.capability == "implement":
                 state_name = attempt.trigger.removeprefix("application:")
                 if self._schedule_implementation_refinement(state_name, attempt.attempt_id, result):
@@ -4503,6 +4753,7 @@ class ResearchApplication:
             return None
         if "task_plan" not in self.controller.manifest.state_refs:
             return "plan"
+        self._schedule_evidence_followup()
         plan = self._load_task_plan()
         if self._needs_execution_plan_extension(plan):
             # The first accepted plan intentionally ends at the design
@@ -4560,6 +4811,8 @@ class ResearchApplication:
         if ref is None:
             return False
         attempt = self._attempt_for_ref(ref)
+        if state_name == "documents_evidence_1" and attempt is not None and attempt.trigger == f"application:{state_name}":
+            return attempt.capability == "document_ingest" and attempt.status in {"completed", "blocked"}
         completed = bool(
             attempt is not None
             and attempt.status in {"completed", "failed"}
@@ -4571,6 +4824,8 @@ class ResearchApplication:
             # Keep the original attempt, but retry unusable text on explicit
             # continuation instead of sending an empty bundle to the Writer.
             return bool(self.controller.store.read_json(ref).get("chunks"))
+        if completed and step.capability == "implement":
+            return self.controller.store.read_json(ref).get("stop_reason") != "validation_failed"
         if not completed or step.capability != "experiment" or attempt is None or attempt.status != "completed":
             return completed
         try:
@@ -4656,6 +4911,11 @@ class ResearchApplication:
         ref = self.controller.manifest.state_refs.get(name)
         if ref is None:
             return False
+        if name == "documents_evidence_1" or name == "search_evidence_1":
+            attempt = self._attempt_for_ref(ref)
+            return attempt is not None and (attempt.status == "completed" or (
+                name == "documents_evidence_1" and attempt.status == "blocked"
+                and not self.controller.store.read_json(ref).get("chunks")))
         if ref.kind == "prepared_execution":
             # Preparation records configuration, not an experiment status.
             attempt = self._attempt_for_ref(ref)
@@ -4782,7 +5042,8 @@ class ResearchApplication:
 
     def _input_refs(self, *names: str) -> tuple[ArtifactRef, ...]:
         try:
-            return tuple(self.controller.manifest.state_refs[name] for name in names)
+            refs = self._evidence_refs()
+            return tuple(refs[name] for name in names)
         except KeyError as exc:
             raise ResearchApplicationError(f"Missing application input artifact: {exc.args[0]}") from exc
 
@@ -5053,15 +5314,15 @@ class ResearchApplication:
 
     def _load_search(self, *, documents: DocumentBundle | None = None) -> SearchResult:
         if "search" in self.controller.manifest.state_refs:
-            return SearchResult.from_handoff_dict(self._state_payload("search"))
+            return SearchResult.from_handoff_dict(self.controller.store.read_json(self._evidence_refs()["search"]))
         return provided_materials_result((documents if documents is not None else self._load_documents()).records)
 
     def _load_documents(self) -> DocumentBundle:
-        return DocumentBundle.from_handoff_dict(self._state_payload("documents"))
+        return DocumentBundle.from_handoff_dict(self.controller.store.read_json(self._evidence_refs()["documents"]))
 
     def _load_read(self, *, documents: DocumentBundle | None = None) -> ReadResult:
         return ReadResult.from_handoff_dict(
-            self._state_payload("read"), bundle=documents if documents is not None else self._load_documents(),
+            self.controller.store.read_json(self._evidence_refs()["read"]), bundle=documents if documents is not None else self._load_documents(),
         )
 
     def _load_synthesis(self) -> SynthesisResult:
@@ -5110,7 +5371,8 @@ class ResearchApplication:
         config = dict(self.services.config)
         preparation = self._active_preparation_ref()
         if preparation is not None:
-            prepared_execution = dict(self.controller.store.read_json(preparation)["execution"])
+            prepared_payload = self.controller.store.read_json(preparation)
+            prepared_execution = dict(prepared_payload["execution"])
             configured = config.get("execution")
             if isinstance(configured, Mapping):
                 prepared_task = prepared_execution.get("code_task")
@@ -5123,7 +5385,10 @@ class ResearchApplication:
                     for key in (
                         "approval_note", "max_repairs", "budget_profile", "allow_large_edits",
                         "env_mode", "python_executable",
+                        "validation_command", "validation_timeout_sec",
                     ):
+                        if key in {"env_mode", "python_executable"} and prepared_payload.get("environment", {}).get("mode") == "venv":
+                            continue  # The prepared interpreter, not the initial current policy, owns recovery.
                         if key in requested_task:
                             task[key] = requested_task[key]
                     prepared_execution["code_task"] = task

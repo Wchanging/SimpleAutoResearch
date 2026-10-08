@@ -14,12 +14,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from simple_ar.code_task.analysis.interfaces import public_api_from_source, render_source_snippets, _module_name, _resolve_import_module
-from simple_ar.code_task.analysis.index import is_python_environment
+from simple_ar.code_task.analysis.index import IGNORED_FILE_NAMES, is_python_environment, read_code_task_text
 from simple_ar.code_task.analysis.source_context import diff_source_anchors, source_context_for_files
 from simple_ar.reviewing.schema import ReviewFinding
 
 
-TEXT_SUFFIXES = {".py", ".json", ".toml", ".md", ".txt", ".yaml", ".yml"}
 SKIP_PARTS = {
     ".git",
     ".hg",
@@ -62,9 +61,11 @@ def build_review_index(
             notebooks.append({"path": rel, "size_bytes": path.stat().st_size,
                               "inspection": "path_only_cells_and_outputs_unread"})
             continue
-        if not _is_reviewable_file(path):
+        if path.name in IGNORED_FILE_NAMES or path.name.startswith(".env") or path.name.endswith(".lock") or path.stat().st_size > 1_000_000:
             continue
-        text = _read_text(path)
+        text = read_code_task_text(path)
+        if text is None:
+            continue
         role = classify_review_role(rel)
         row: dict[str, Any] = {
             "path": rel,
@@ -385,17 +386,6 @@ def _role_counts(files: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         role = str(row.get("role") or "support")
         counts[role] = counts.get(role, 0) + 1
     return counts
-
-
-def _is_reviewable_file(path: Path) -> bool:
-    return path.suffix.lower() in TEXT_SUFFIXES and path.stat().st_size <= 1_000_000
-
-
-def _read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
 
 
 def _safe_rel(root: Path, path: Path) -> str:

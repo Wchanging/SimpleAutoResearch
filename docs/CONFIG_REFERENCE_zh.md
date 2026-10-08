@@ -47,17 +47,59 @@ simple-ar start --chat --model profile:daily
 `input_price_per_million`、`output_price_per_million`。
 超时、等待和显式 token 上限须为正值；重试次数包含首次请求，单次调用仍可指定输出上限。
 推理、JSON 等参数是否被服务商接受需要实测，不由模型名称保证。
+SDK Chat 流式且设置有限超时时，提交与正文读取同时受总时长约束，随后最多两秒本地清理。
+未收到完成标记而到期，保留未知用量；有输出上限的纯文本请求可在 retry_attempts 内
+沿同一 API 重试，每次失败保留完整预算预留。无上限或视觉请求停止，预算不足也停止。
+这不代表服务商已停止或不计费。
+非流式、Responses 和 LiteLLM 保留其传输超时语义。已有 asyncio 事件循环中调用该同步接口，
+使用 `await asyncio.to_thread(client.ask, ...)`，不嵌套新事件循环。
 
-能力声明不是探针结果。可以登记 `openai_images` 连接和 `vision`／`image` 路由，
-但本次配置改动尚未实现图像生成、编辑或多模态检查执行器；Images 不能用作文本客户端，
+`json_response_format="off"` 只是不发送服务商原生 JSON 参数，`ask_json` 仍解析并检查 JSON。
+它用于接口兼容，不是过载修复。HTTP 连接成功后，流中仍可能返回上游错误；立即返回的
+`overloaded` 不能靠延长超时解决。有界重试逐次计入物理调用并保留未知用量，不重置旧任务额度。
+切换路由前，应在实际运行机器对比 SDK 和框架请求，并验证较长响应，而不只测试一句话。
+恢复任务可调整超时、输出上限和重试设置，模型、端点及代码路由身份仍绑定；不改写旧快照。
+
+能力声明不是探针结果。`simple-ar image` 使用 `openai_images` 连接生成或编辑；
+可选 `image_size`、`image_quality` 传给提供商，须验证其实际支持。
+Images 不能用作文本客户端，
 也不能继承文本的流式、token、JSON 或 token 单价参数。
+
+`simple-ar image-review` 使用独立 `vision` 路由，连接须声明 `vision` 能力并显式选择
+`openai_chat` 或 `openai_responses`，不自动切换 API 模式。发送实际图片像素，不是文件名；
+支持最多四张静态 PNG/JPEG/WebP，总计不超过 20 MiB，每张不超过 4,194,304 像素。
+服务商提供用量时据实登记，未提供时保留未知而不是零。反馈检查可见问题，不证明科学正确性。
+
+cctq 官方异步图像任务协议须显式选择 `api = "cctq_images_async"`；
+`openai_images` 保留通用同步接口。异步路径使用配置的 origin，保存同一 task ID，
+轮询该任务并认证下载同 origin 的 `files/0`，不硬编码主机、不跨服务商或接口 fallback。
+已通过用户配置的代理验证旧任务结果恢复和一次反馈编辑；不代表服务器直连已稳定。
+此前同步请求的超时仍保留为失败，不能算成功。
+
+可选 `proxy_env = "RESEARCH_API_PROXY"` 引用环境变量中的 HTTP(S) 代理 URL，
+只影响此 SDK/图像连接，不影响文献检索或其他 profile，也不是服务商 fallback。
+当前不接受 URL 内的用户名密码、query 或 fragment；变量缺失或无效在付费调用前失败。
+实际代理 URL 不进入任务快照或 provider 请求正文。未配置时沿用客户端标准环境路由。
+
+关联公共资料下载可单独配置部署路由，不改变模型连接：
+`SIMPLE_AR_DOCUMENT_ROUTE_HOSTS` 填逗号分隔的准确主机名，
+`SIMPLE_AR_DOCUMENT_PROXY_ENV` 填保存 HTTP(S) 代理 URL 的环境变量名；
+可选 `SIMPLE_AR_DOCUMENT_CA_BUNDLE` 指向已有可信 CA 文件。例如只路由 `github.com`，
+不接受通配符；未列出的主机仍直连，TLS 校验始终启用。这些设置仅影响关联补充资料下载，
+不影响文献检索、模型调用、论文 PDF 传输或 ZIP 获取。未配置时此下载器不使用环境代理。
+应在执行机器显式设置；模型代理可用不代表作者仓库也能访问。
+
+文献连接器读取独立可选的 `OPENALEX_API_KEY`、`SEMANTIC_SCHOLAR_API_KEY` 环境变量，
+不借用模型连接密钥；通过认证请求头发送，不放在查询参数里。缺密钥仍可匿名访问，
+受提供商额度限制；配置密钥不代表来源完整，也不取消限流。
 
 启用目录后，旧环境中的模型、URL、密钥等设置不覆盖 profile。未知名称、缺失密钥、
 能力不匹配会报错，不自动切换服务商；不同的裸模型名覆盖也会拒绝，请另建 profile。
 没有目录时旧 `.env` 方式不变；不会自动迁移或删除用户配置。
 
 新研究会话和对话草稿在已有快照中保存非秘密连接绑定；恢复时检查当前连接及嵌套代码路由。
-同一变量中的密钥可轮换；换连接需要恢复原配置或开始新任务。添加无关图像连接不影响文本任务。
+同一变量中的密钥可轮换，超时、输出上限和重试可调；更换模型或端点需恢复原配置或开始新任务。
+添加无关图像连接不影响文本任务。
 旧会话和独立 CodeTask 操作没有追溯补建的连接冻结，请在运行期间保持目录不变。
 
 迁移顺序：复制示例→填写当前非秘密连接→保留 `.env` 密钥→本地检查→用小型新任务验证。
@@ -65,7 +107,14 @@ simple-ar start --chat --model profile:daily
 
 改码 `--project-python PATH` 在 CodeTask 写入 `[environment] mode="external"` 和 `python="..."`，省略仍 current；只选择已有解释器，不安装依赖。
 
-复现 `--project` 用于只读准备和默认 cwd；`--data-path` 登记数据，`--output-files JSON` 写入 `execution.output_files`。不授权改码，也不从任意路径猜结果。
+复现默认以 `--project` 提供只读准备和 cwd；`--data-path` 登记数据，`--output-files JSON` 写入 `execution.output_files`。仅这些选项不授权改码，也不从任意路径猜结果。
+
+显式组合 `--project`、`--allow` 和独立 `--validate` 可另行选择限定范围的 CodeTask
+adapter 准备。CodeTask 的 current/external Python 同时用于验证和正式测量；
+`--project-python` 选择已有解释器。也可明确选择任务 venv，在同一隔离工作区先安装
+已授权的依赖/项目，再由该解释器执行改码、独立验证及正式测量，共用进程额度。
+不能同时指定 external 解释器或第二条 `check_command`；安装失败不进入实现或测量，
+已完成准备的恢复不重新安装。契约见下文复现段落。
 
 单 Python 命令的可选依赖准备：
 
@@ -128,27 +177,32 @@ JSON 语法错误会在引导保存前失败；声明 `table_analysis.*` 的文�
 单节稿仍审阅该节。检查点、证据工具和每节修订上限共用原机制，草稿不认证为已逐节审阅；
 已有任务通过明确的报告配置/刷新入口更改，不直接改检查点。
 联合起草独立于审阅时机。新引导的数据报告（`start --kind data_analysis --with-report`，
-也可由对话确认）明确生成下列两个范围；其他引导类型和已有配置保留默认值，专家可自行选择：
+也可由对话确认）沿用联合起草和整体审阅；新建引导调研与有限复现同样保留此默认。
+自动起草粒度仅供显式试用，尚不是新入口默认。
+已有配置和自定义写作模板保留原选择，专家可自行选择：
 
 ```toml
 [report]
 document_review = true
 review_scope = "document"
-draft_scope = "document"
+draft_scope = "document" # 显式实验性选择："auto"
 ```
 
-待写章节在一次请求中按冻结计划与共同证据组织，再沿原独立整稿审阅。
+`auto` 在所有章节都有正数目标词数、整份计划合计不超过 2,000 词时联合起草；
+较长或未定长度的计划逐节保存，完整正文再统一审阅。这是起草启发式，不是 token
+保证，也不改变输出上限。显式 `document` 则始终按冻结计划与共同证据联合组织待写章节。
 要求默认的 `full` 来源策略，不兼容 `batch_refine`；默认 `draft_scope = "section"`
 仍分次起草，并保持旧默认检查点身份。原 `max_section_tokens` 是单次调用上限，
 正数会限制整次联合回答。完整章节集验证后保存在同一检查点，恢复已保存正文不重写。
-此显式模式的跨节修订也形成完整候选；先核验旧意见、再独立检查整稿，全部合格才一起采用，
+此显式模式及 `auto` 的跨节修订仍形成完整候选；自动起草不会拆分大型联合修订。
+一次完整候选检查核对未解决意见与当前全文，合格才一起采用，
 否则保留原各节。原 `max_review_iterations` 限制联合候选轮数；恢复保留已消耗的旧逐节轮数
   与待完成的旧修订，不因升级获得新额度。候选及原修订请求保存在原迭代/检查点中。
   `allow_source_backtracking = true` 时，联合 Writer 可在初次组织或每轮共同修订前请求
   一批只读补证，受 `max_backtracking_calls` 与原六结果提示窗口约束，并与审阅共享
   工具级总额度。请求/结果在读取前后保存，恢复不重放已分配读取；设为 false 也关闭
   Writer 补读。不会新增在线检索、任意路径读取或执行权限。
-不自动选择长文策略，也不认证科学质量。
+不认证科学质量，也不保证消除服务商故障。
 提取后的文本随会话保存，恢复不重新读取修改过的原文件；更换材料应明确修订或新建任务。
 提供的结果仍是外部陈述，不能称为本次独立测量；缺证据和缺书目信息必须保留，审阅通过不保证论文正确。
 
@@ -284,9 +338,13 @@ value_unit = "秒"
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
 | `[research]` | `providers`、`queries`、`max_results`、`max_chunks`、`max_pdf_pages`、`read_max_shortlist`、`idea_limit`、`cache_dir` | 列表可省略；CLI 默认 `max_results = 10`、`max_chunks = 300`、`idea_limit = 3`。不设置 `max_pdf_pages` 默认提取全部 PDF 页面；显式正整数限制提取页数并记录截断。更改后应创建新会话，不能把已冻结的阅读证据当成新版本。`read_max_shortlist` 可选，显式提供的论文优先保留；若数量超过上限则显式报错。`cache_dir` 可选，未持久化，不能作为安全的恢复变更。 |
-| `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`max_fulltext_documents`、`max_pdf_mb`、`materials_only` | 开关默认 false，可选上限默认不设。`materials_only = true` 使用本地输入（`assets.papers`，或写作的 `assets.materials`）并禁用 search，仍允许模型阅读；writing 始终仅用本地输入。引导入口的 `--fulltext --sources search` 会允许缓存 PDF，默认最多 4 份、每份 20 MiB；专家可在 TOML 中调整正整数上限。远程 PDF 需要下载许可与缓存许可；获取失败仍明确标注只读摘要或不可用。 |
+| `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`max_fulltext_documents`、`max_pdf_mb`、`materials_only` | 开关默认 false，可选上限默认不设。`materials_only = true` 使用本地输入（`assets.papers`，或写作的 `assets.materials`）并禁用 search，仍允许模型阅读；writing 始终仅用本地输入。引导入口的 `--fulltext --sources search` 会允许缓存 PDF，默认最多 6 份远程资源、每份 20 MiB；专家可在 TOML 中调整正整数上限。自动补查会在既有总额内保留首轮取材名额，不额外下载。远程 PDF 需要下载许可与缓存许可；获取失败仍明确标注只读摘要或不可用。 |
 | `[research]` | `max_iterations`、`interaction` | `max_iterations` 默认 `1`，`0` 表示首轮分析后停止。`interaction` 新 CLI 默认 `checkpoints`，可选 `assisted`、`checkpoints`、`autonomous`；硬事实和权限缺口在任何模式下都是阻塞。 |
 | `[assets]` | `papers`、`materials`、`data` | 路径相对 TOML 所在目录解析。`papers` 表示书目来源；`materials` 用于 `writing` 的草稿、笔记、外部结果说明或附有数据副本的完整 `table_analysis.v1` 分析包，不当成本次实测实验指标。写作至少需要一份输入，不接受重复文件或同一文件兼任两种角色。`data` 表示执行输入：隔离 CodeTask 准备复制声明的项目数据，直接/外部输入保持原位置；不核验论文划分或改写 argv。 |
+
+模型检索计划保留用户显式查询；未配置时采用聚焦主题词，不把整段任务强制作首条检索。
+补充条件供筛选和原文阅读，不全部拼成一条必需条件。arXiv连接器明确用AND连接普通关键词，
+显式高级连接器表达式保持原样。文档额度内兼顾不同聚焦查询；取得材料不代表语义相关或覆盖充分。
 
 本地已有PDF也会尽力解析，即使关闭远程全文获取。省略页数上限提取全部页；
 观察到的总页/提取页、截断和空文本页会保留并传入下游。阅读窗口仍独立有界，
@@ -303,7 +361,7 @@ value_unit = "秒"
 
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
-| `[execution]` | `command`、`cwd`、`timeout_sec`、`code_task_config` | 选择一个执行边界：literal argv `command` 加已存在的绝对 `cwd`，或 CodeTask TOML 引用。只调研时两者都省略；`timeout_sec` 在 CLI/应用边界提供默认值。 |
+| `[execution]` | `command`、`cwd`、`timeout_sec`、`code_task_config` | 通常选择 literal argv `command` 加已存在的绝对 `cwd`，或 CodeTask TOML 引用。复现可显式同时提供，先授权 adapter 准备，再运行独立正式命令。只调研时两者都省略；`timeout_sec` 在 CLI/应用边界提供默认值。 |
 | `[execution.environment]` | `mode`、`requirements`、`install_project`、`python_executable`、`timeout_sec`、`check_command` | 可选的单命令准备：venv 创建任务环境；current 必须明确检查 argv，不安装或替换 Python。依赖列表默认空，项目安装默认 false，venv 基础 Python 默认当前运行时，每步超时默认 300 秒；可选检查在准备后执行。省略保持普通当前环境执行，专家 TOML 预留准备额度，引导计入。 |
 | `[execution]` | `primary_metric`、`metrics`、`metric_directions` | 可选测量 schema；方向为 `higher`、`lower`、`resource` 或 `ignore`。 |
 | `[execution]` | `output_files` | 可选映射，最多八个附件名称，对应进程 `SIMPLE_AR_OUTPUT_DIR` 内的相对 POSIX 文件路径。仅登记每个不超过 2 MiB 的 UTF-8 普通文件，提供有界预览与读取句柄；缺失或不可读附件独立于执行成功状态记录。 |
@@ -332,9 +390,22 @@ value_unit = "秒"
 综合来源证据、执行声明的命令、分析实测值，可选复现报告。要求 `research.materials_only = true`、
 `assets.papers`、`execution.command`，以及至少包含 `hypothesis`、`dataset`、`expected_outcome`
 的 `execution.protocol`；使用 `baseline_policy = "skip"` 和有限进程超时。
-它不提出创新、不改代码、不扩种子，也不寻找缺失环境；依赖安装仅在明确选择上述
-`execution.environment` 虚拟环境设置后进行。配对对照和 CodeTask
-仍使用普通研究路径。报告使用 `template = "reproduction"`，明确区分原论文结果、改编检查和本地实测。
+它默认不改代码，不提出创新、不扩种子，也不寻找缺失环境；依赖安装仅在明确选择上述
+`execution.environment` 虚拟环境设置后进行。已有项目可另行显式配置
+`execution.code_task_config`，只准备授权范围内的结果 adapter 或入口衔接：引用配置的
+`[benchmark].command` 成为独立 `validation_command`，`[execute].timeout_sec` 成为正值
+`validation_timeout_sec`；`execution.command`、`execution.timeout_sec` 仍负责正式测量。
+验证 argv 在解释器解析后也须与测量不同。隔离项目准备、限定实现和验证在测量之前完成；
+保护路径继续生效，授权不包含改变声明的科学协议；验证通过本身不证明科学等价。
+新适配器可用 `execution.initial_files = ["adapters/export.py"]` 明确声明创建意图；
+路径必须是明确允许、尚不存在且不受保护的 Python 文件。初始化只在隔离项目创建
+执行即报未实现的占位文件，再走原索引、编辑和验证；仅 `--allow` 不会创建文件。
+准备阶段消费该声明，恢复不覆盖已实现文件。
+CodeTask 默认使用 current/external Python；也可明确组合 `execution.environment` 的 venv
+准备，在隔离工作区创建环境后绑定实际解释器。不能同时指定 external Python，也不能
+叠加 current/check 或第二条检查命令；独立验证仍由 CodeTask 执行。配对对照仍走普通研究路径。
+这不是任意论文自主准备、OS
+沙箱或真实论文复现验收通过。报告使用 `template = "reproduction"`，区分原论文结果、改编检查和本地实测。
 完整低开销案例见 [conformal_reproduction](../examples/conformal_reproduction/README.md)。
 
 `task.kind = "measurement"` 仅用于原样运行并分析一条已提供的命令，不做文献检索、
@@ -361,6 +432,8 @@ runtime = "runtime.json"
 ```
 
 子命令将文件写入本次进程自动提供的 `SIMPLE_AR_OUTPUT_DIR` 目录（先自行建目录）。
+作者程序已有输出参数时，可在 `execution.command` 中使用字面量 `{output_dir}`，例如
+`--output={output_dir}/runtime.json`。本地执行后端替换为本次调用目录，不经 shell。
 最多声明八个相对 POSIX 路径；不扫描 cwd、不解析 stdout 中的路径、不自动复制外部目录。
 UTF-8 普通文件单个不超过 2 MiB；链接、越界、缺失、不可读或超大分别记录。
 `results.json` 的 `output_evidence` 保存来源、预览和截断范围，原写作/审阅工具可按登记句柄
@@ -369,6 +442,18 @@ UTF-8 普通文件单个不超过 2 MiB；链接、越界、缺失、不可读�
 避免盲猜字符位置。返回原始记录及匹配数量/截断状态，不汇总、不推断缺失值；词面命中不等于语义支撑。
 生产结果按登记名称归属，不强迫套论文引用键或编造参考文献。
 改变此契约属于执行输入修订，而非仅刷新报告；旧完成会话不静默补文件或重跑。
+
+直接从作者 JSON/CSV 结果提取指标，而非只作写作附件：
+
+```toml
+[execution.metric_sources]
+elapsed = { output = "runtime", path = ["elapsed_seconds"] }
+coverage = { output = "paired_observations", column = "coverage", match = { method = "candidate" } }
+```
+
+JSON 路径明确选择字段或数组下标；CSV/TSV 条件必须唯一选中一行，值须为有限数值。
+缺失、歧义或 stdout 与文件数值冲突会使提取失败，不隐式汇总、不猜列。
+规范结果保留文件及选择位置；文件存在不会把失败或超时进程变成成功测量。
 
 ```bash
 simple-ar research-session --config research.toml --session-root runs/research-session/<session>
@@ -497,7 +582,7 @@ CodeTask TOML 旧有的相对路径仍以运行时 cwd 为基准，不会被静�
 | `[models.code_task].planner` | work-plan 和 patch-plan 使用的模型。 |
 | `[models.code_task].editor` | edit proposal 使用的模型。 |
 | `[models.code_task].repair` | 失败后 repair proposal 使用的模型。 |
-| `[budget].profile` | 当前 edit budget profile。`normal` 保守，`large` 用于已审核的多文件修改。 |
+| `[budget].profile` | 当前 edit budget profile。`normal` 支持最多四个允许文件中的紧凑修改（总编辑字符 12,000）；`large` 用于经明确批准的较大修改。 |
 | `[budget].max_batches` | 一个 code task 中 executor 最多创建多少个实现批次。 |
 | `[budget].cost_cap_usd` | provider usage 返回费用估计时可用的成本上限。 |
 | `[budget.*].max_files` | 单个 edit proposal 最多修改多少个文件。 |
