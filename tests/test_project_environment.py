@@ -148,12 +148,16 @@ class ProjectEnvironmentTests(unittest.TestCase):
                         python.parent.mkdir(parents=True)
                         python.touch()
                     return RunResult(0, False, 'observed stdout', '', command=request.command, cwd=str(request.cwd))
-            result = run_preparation_capability(context=context, request=self.request(root,
+            with patch.dict('os.environ', {'PYTHONPATH': '/controller/packages', 'PYTHONHOME': '/controller/python',
+                                         'PIP_INDEX_URL': 'https://pypi.org/simple'}):
+                result = run_preparation_capability(context=context, request=self.request(root,
                 baseline={'command': ['python3', 'control.py', '--seed', '42'], 'label': 'control'},
                 environment={'mode': 'venv', 'requirements': ['requirements.txt'], 'timeout_sec': 7,
                              'check_command': ['python.exe', 'check.py']}), backend=Backend())
             self.assertEqual(result.status, 'completed')
             self.assertEqual(len(calls), 4)
+            self.assertTrue(all('PYTHONPATH' not in row.env and 'PYTHONHOME' not in row.env for row in calls))
+            self.assertTrue(all(row.env['PIP_INDEX_URL'] == 'https://pypi.org/simple' for row in calls))
             self.assertTrue(all(row.timeout_sec == 7 and row.session_id == 'session' and row.attempt_id == 'prepare-1' for row in calls))
             self.assertEqual(calls[0].command[:3], [sys.executable, '-m', 'venv'])
             self.assertEqual(calls[1].command[-2:], ['-r', str(root / 'requirements.txt')])

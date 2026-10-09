@@ -24,6 +24,13 @@ Set `SIMPLE_AR_MODELS_CONFIG` to its absolute path and put `CCTQ_API_KEY` (or yo
 in the environment/private `.env`. Alternatively use `~/.config/simple-ar/models.toml`.
 Only one catalog is loaded; files are not merged. Secrets never belong in the TOML.
 
+Interactive `start` lists text connections before model-assisted work and lets you choose a name or number.
+It shows the model, endpoint, streaming, timeout and credential availability, then saves `profile:NAME`
+in the task configuration. An explicit `--model` is retained; descriptive analysis does not require a model.
+With a catalog, do not duplicate model or endpoint settings in `.env`: keep only the referenced secrets
+and, when not using the global path, `SIMPLE_AR_MODELS_CONFIG`. Without a catalog, legacy fallback is
+explicitly labelled. `--prepare-only` can save a configuration even if its credential is not yet set.
+
 ```bash
 simple-ar models                       # local inspection, no API calls
 simple-ar models --config /path/models.toml
@@ -112,6 +119,33 @@ Literature connectors use their own optional `OPENALEX_API_KEY` and
 `SEMANTIC_SCHOLAR_API_KEY` environment variables, not model-profile credentials.
 They send keys in authorization headers; absent keys retain anonymous access with
 provider quotas. Supplying a key does not certify source coverage or remove rate limits.
+Anonymous quotas may be shared by users of the same server IP. On HTTP 429,
+the current search batch stops live requests to that provider, still checks each
+query's opted-in cache and continues other configured providers. Cached results
+retain their provenance; this does not expand source coverage or obtain credentials.
+
+For project documentation, repositories and dataset webpages, explicitly add
+`"web"` to `research_sources` (or repeat `--provider web` alongside paper providers).
+This optional connector uses `TAVILY_API_KEY` from the execution host's `.env`,
+not a model profile. It uses Tavily basic search without automatic upgrades,
+generated answers or automatic retries; provider-reported credits are recorded
+in the search response. Missing credentials fail clearly without falling back.
+Existing default providers and saved source plans are unchanged.
+Web hits retain their URLs and `source="web"`; excerpts are discovery material,
+not full text, verified paper metadata or proof that a project runs. Original-page
+acquisition uses the existing document path. Explicit publication-year restrictions
+still exclude undated pages; no year is inferred from retrieval time.
+
+Original HTML/text pages can explicitly use Tavily basic extraction with
+`[research] web_extract_backend = "tavily_basic"`, or
+`start --fulltext --web-extract-backend tavily_basic`. This is independent of
+search providers and requires full-text acquisition permission. The default
+`direct` and PDF download permissions are unchanged; PDFs still use the existing
+download path. Extracted text, its original URL, provider request ID and reported
+usage are cached separately from search excerpts. Cache reuse makes no new
+extraction request. Empty or failed URL results remain failures; there is no
+automatic upgrade or fallback. Provider-extracted pages are not verified paper
+full text, and a reported zero credit count is not a promise of free extraction.
 
 With a catalog, legacy model/URL/key environment settings do not override profile values.
 Missing profiles, credentials or incompatible capabilities fail without switching providers.
@@ -190,6 +224,9 @@ convert pages into words, or silently alter saved plans. Targets guide compositi
 they do not make a short or incomplete report acceptable. Review still checks the
 original request, evidence and complete canonical delivery. No new TOML field is
 required for this distinction.
+Specify whether the count includes the full delivery, excludes only references,
+or also excludes title and section headings. These are separate count scopes;
+saved plans keep their recorded scope rather than reinterpreting old tasks.
 
 `start --kind writing --goal "Explain my existing results" --material notes.md --prepare-only`
 saves ordinary TOML: `task.kind = "writing"`, `task.outputs = ["report"]`,
@@ -478,7 +515,7 @@ external parsers must declare their own observed coverage.
 | `[execution]` | `command`, `cwd`, `timeout_sec`, `code_task_config` | Normally choose literal argv `command` plus an existing absolute `cwd`, or a CodeTask TOML reference. Reproduction permits both for explicitly authorized adapter preparation followed by the separate formal command. Omit both for literature-only work. `timeout_sec` is optional and defaults at the CLI/application boundary. |
 | `[execution.environment]` | `mode`, `requirements`, `install_project`, `python_executable`, `timeout_sec`, `check_command` | Optional single-command preparation: `venv` creates a task environment; `current` requires an explicit check argv and does not install or override Python. Requirements default empty, project installation false, base venv Python this runtime, per-step timeout 300. Optional check executes after setup. Omission keeps ordinary current execution. Expert TOML budgets preparation explicitly; guided start includes it. |
 | `[execution]` | `primary_metric`, `metrics`, `metric_directions` | Optional measurement schema; directions use `higher`, `lower`, `resource`, or `ignore`. |
-| `[execution]` | `output_files` | Optional mapping of at most eight attachment names to relative POSIX files under the process-owned `SIMPLE_AR_OUTPUT_DIR`. Only declared UTF-8 regular files up to 2 MiB each receive bounded previews and registered read handles; missing/unreadable attachments are recorded separately from execution success. |
+| `[execution]` | `output_files` | Optional mapping of attachment names to relative POSIX files under the process-owned `SIMPLE_AR_OUTPUT_DIR`. Only declared UTF-8 regular files up to 2 MiB each receive bounded previews and registered read handles; missing/unreadable attachments are recorded separately from execution success. |
 | `[execution]` | `pairs`, `seeds`, `seed_flag`, `seed_count` | Optional explicit comparison inputs. `pairs` contains unique integer `seed` plus literal `baseline_command` and `candidate_command`; compact seed expansion requires a literal command and explicit seed flag/count. Natural-language seed requests are not parsed. |
 | `[execution]` | `baseline_policy`, `baseline_ref`, `protocol` | Policy is `run`, `skip`, or `reuse`; `reuse` requires a passed current-session artifact whose command, schema, protocol conditions, protected assets and preparation lineage match. `protocol` uses the existing experiment contract and does not certify data contents. |
 | `[report]` | `template`, `reviewer`, `max_review_iterations`, `document_review`, `max_section_tokens`, `max_cited_sources`, `figures` | `template` defaults to `auto`; `reviewer` defaults to `llm`; CLI review iterations default to `1`. Optional `document_review = true` adds cross-section review: argument-led plans can correct their frozen sections; legacy plans retain two targets. Each target has at most `max_review_iterations` corrections; rejected candidates consume the allowance and recovery does not reset it. Document review is off by default. `max_section_tokens = 0` omits a per-call output cap. Positive `max_cited_sources` bounds distinct final citations without truncating the reading pool; final audit records excess. Omit it for no source-count cap. Figures are deterministic by default; set `[report.figures].enabled = false` or `mode = "off"` for text-only output. |

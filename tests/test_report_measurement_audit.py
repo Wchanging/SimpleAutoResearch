@@ -432,6 +432,9 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             store = ArtifactStore(Path(tmp))
             patch = "--- method.py\n+++ method.py\n+use_phrase_features = True\n" + "x" * 12000
             store.write_text("attempts/implement-1/code_task/patch.diff", patch)
+            store.write_text("attempts/implement-1/code_task/source.txt", "Read the source entry and its caller; unrelated files were not read.")
+            store.write_text("attempts/implement-1/code_task/validation.json", '{"status":"passed","scope":"static syntax check"}')
+            store.write_text("attempts/implement-1/code_task/execution_report.json", '{"status":"passed","returncode":0,"scope":"runtime smoke check"}')
             ref = store.write_json("attempts/implement-1/implementation.json", {
                 "status": "validated", "asset_integrity": {"status": "observed_unchanged"},
                 "method_validation": {
@@ -439,7 +442,10 @@ class ReportMeasurementAuditTests(unittest.TestCase):
                     "reason": "No candidate-specific behavior check was recorded.",
                     "planned_checks": ["Observe the changed behavior on the supplied fixture."],
                 },
-                "artifact_refs": {"patch": {"path": "code_task/patch.diff"}},
+                "artifact_refs": {"patch": {"path": "code_task/patch.diff"},
+                    "source_context": {"path": "code_task/source.txt"},
+                    "validation": {"path": "code_task/validation.json"},
+                    "validation_report": {"path": "code_task/execution_report.json"}},
             })
             context = ReportContext(
                 topic="Classifier",
@@ -495,6 +501,8 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             for role in ("writer", "reviewer"):
                 view = received[role]
                 self.assertEqual(view["evidence"]["patch"], evidence)
+                for name in ("source_context", "validation", "validation_report"):
+                    self.assertEqual(view["evidence"][name], implementation["evidence"][name])
                 self.assertEqual(view["asset_integrity"], implementation["asset_integrity"])
                 self.assertEqual(view["method_validation"]["status"], "未检查")
             received.clear()

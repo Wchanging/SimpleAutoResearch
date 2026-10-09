@@ -80,6 +80,24 @@ class SourceWindowRelevanceTests(unittest.TestCase):
         row = source_chunk_views([proof], query='Proofs', max_chars=100)[0]
         self.assertEqual(row['text'], proof.text)
         self.assertNotIn('Proofs', row['text'])
+        for specific, query in (
+            ('License permits redistribution with attribution and reuse.', 'dataset code open access conditions license reuse'),
+            ('Memory requires eight gigabytes for initialization.', 'dataset code open access conditions memory initialization'),
+        ):
+            with self.subTest(query=query):
+                introduction = replace(background, text='Dataset code open access conditions are introduced. '
+                    'The overview describes research goals, comparison methods, categories, results, measurement, '
+                    'calibration, processing, examples, interpretation, evaluation, testing and limitations.')
+                statement = replace(proof, text=specific, metadata={})
+                other = [TextChunk(chunk_id=f'other-{index}', document_id='source',
+                    text=text) for index, text in enumerate(('Dataset code open access conditions are summarized.',
+                        'Bibliographic publication record.', 'Changes in previous versions.'))]
+                # A broad query has several legitimate aspects: the existing
+                # two-hit lookup must retain the short specific condition too.
+                self.assertIn(statement, rank_source_chunks([introduction, statement, *other], query, limit=2))
+        decimal = replace(proof, text='Risk is bounded by 0.6.', metadata={})
+        self.assertEqual(rank_source_chunks([replace(background, text='Risk is bounded by 0.60.'), decimal],
+                                           '0.6', limit=1), [decimal])
 
     def test_numbered_object_keeps_following_conditions_without_crossing_source_or_section(self):
         caption = TextChunk(chunk_id='caption', document_id='source', source_path='retained.txt',

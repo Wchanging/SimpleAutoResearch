@@ -24,6 +24,12 @@
 也可使用 `~/.config/simple-ar/models.toml`；一次只加载一个目录，不合并多份文件。
 TOML 保存名称、URL、模型及密钥变量名，不保存密钥本身。
 
+交互式 `start` 在模型任务开始前列出文本连接，可按名称或编号选择；展示实际模型、端点、
+流式、超时及密钥是否已配置，并将 `profile:名称` 写入任务配置。明确指定的 `--model`
+不会被替换；纯描述统计不要求模型。有目录时无需在 `.env` 重复填写模型和端点，只需保留
+被引用的密钥，以及不使用全局路径时的 `SIMPLE_AR_MODELS_CONFIG`。没有目录会明确提示
+正在使用旧环境配置；`--prepare-only` 允许在尚未设置密钥时先保存任务。
+
 ```bash
 simple-ar models                       # 本地检查，不调用 API
 simple-ar models --config /path/models.toml
@@ -92,6 +98,23 @@ cctq 官方异步图像任务协议须显式选择 `api = "cctq_images_async"`�
 文献连接器读取独立可选的 `OPENALEX_API_KEY`、`SEMANTIC_SCHOLAR_API_KEY` 环境变量，
 不借用模型连接密钥；通过认证请求头发送，不放在查询参数里。缺密钥仍可匿名访问，
 受提供商额度限制；配置密钥不代表来源完整，也不取消限流。
+项目文档、仓库与数据集网页可在 `research_sources` 中显式加入 `"web"`，
+或在论文提供方之外追加 `--provider web`。此可选连接器读取执行主机 `.env` 的
+`TAVILY_API_KEY`，不复用模型凭据。仅使用基础搜索，不自动升级、生成答案或自动重试；
+检索响应记录提供方返回的 credits。缺密钥明确失败，不自动换服务；默认来源与旧计划不变。
+网页保留 URL 与 `source="web"`；摘要只用于发现资料，不冒充原文、已核实书目或运行证据。
+原网页沿已有文档路径获取。明确限定出版年份时，无日期网页仍不符合范围，不以访问时间填年份。
+
+HTML／文本原网页可显式设置 `[research] web_extract_backend = "tavily_basic"`，
+或使用 `start --fulltext --web-extract-backend tavily_basic`。取得后端独立于搜索来源，
+仍需原文获取许可；默认 `direct` 不变，PDF 继续沿现有下载路径及权限处理。
+取得文本与搜索摘要分开缓存，保存原 URL、提供方请求 ID 和报告用量；缓存复用不再请求提取。
+空结果或逐 URL 失败仍记为失败，不自动升级或跨后端回退。提供方提取网页不等于已核实论文全文，
+返回零 credits 也不代表提取永久免费。
+
+匿名额度可能由同一服务器 IP 的用户共用。收到 HTTP 429 后，当前检索批次停止
+实时请求该提供方，仍检查各查询显式启用的缓存，并继续其他已配置来源。
+缓存沿原出处标记；该处理不补齐来源覆盖，也不代办密钥。
 
 启用目录后，旧环境中的模型、URL、密钥等设置不覆盖 profile。未知名称、缺失密钥、
 能力不匹配会报错，不自动切换服务商；不同的裸模型名覆盖也会拒绝，请另建 profile。
@@ -155,6 +178,8 @@ timeout_sec = 30
 “约 1200 词”（软目标）与“1000–1200 词”（硬范围），不臆造容差、不把页数
 换算为词数，也不静默修改保存计划。目标用于指导组织，不意味着过短或内容不全
 也能交付；审阅仍检查原要求、证据和完整规范装配稿，不需要新增 TOML 字段。
+可明确要求包含全部交付、仅排除参考文献，或另排除标题和章节名；这些范围分别计数，
+不要将正文范围等同于含书目的全交付。保存计划沿原口径，不自动重解释旧任务。
 
 `start --kind writing --goal "说明已有结果和局限" --material notes.md --prepare-only`
 自动保存普通配置，不必先写 TOML。高级配置使用 `task.kind = "writing"`、
@@ -364,7 +389,7 @@ value_unit = "秒"
 | `[execution]` | `command`、`cwd`、`timeout_sec`、`code_task_config` | 通常选择 literal argv `command` 加已存在的绝对 `cwd`，或 CodeTask TOML 引用。复现可显式同时提供，先授权 adapter 准备，再运行独立正式命令。只调研时两者都省略；`timeout_sec` 在 CLI/应用边界提供默认值。 |
 | `[execution.environment]` | `mode`、`requirements`、`install_project`、`python_executable`、`timeout_sec`、`check_command` | 可选的单命令准备：venv 创建任务环境；current 必须明确检查 argv，不安装或替换 Python。依赖列表默认空，项目安装默认 false，venv 基础 Python 默认当前运行时，每步超时默认 300 秒；可选检查在准备后执行。省略保持普通当前环境执行，专家 TOML 预留准备额度，引导计入。 |
 | `[execution]` | `primary_metric`、`metrics`、`metric_directions` | 可选测量 schema；方向为 `higher`、`lower`、`resource` 或 `ignore`。 |
-| `[execution]` | `output_files` | 可选映射，最多八个附件名称，对应进程 `SIMPLE_AR_OUTPUT_DIR` 内的相对 POSIX 文件路径。仅登记每个不超过 2 MiB 的 UTF-8 普通文件，提供有界预览与读取句柄；缺失或不可读附件独立于执行成功状态记录。 |
+| `[execution]` | `output_files` | 可选映射，附件名称对应进程 `SIMPLE_AR_OUTPUT_DIR` 内的相对 POSIX 文件路径。仅登记每个不超过 2 MiB 的 UTF-8 普通文件，提供有界预览与读取句柄；缺失或不可读附件独立于执行成功状态记录。 |
 | `[execution]` | `pairs`、`seeds`、`seed_flag`、`seed_count` | 可选的显式比较输入。`pairs` 每行包含唯一整数 `seed` 与 literal `baseline_command`/`candidate_command`；compact seed 必须有 literal command 和显式 seed flag/count，不解析自然语言 seed。 |
 | `[execution]` | `baseline_policy`、`baseline_ref`、`protocol` | policy 为 `run`、`skip` 或 `reuse`；`reuse` 要求当前 session 中通过且命令、schema、协议条件、保护资产和准备 lineage 都匹配的产物。`protocol` 复用已有实验合同，但不证明数据内容。 |
 | `[report]` | `template`、`reviewer`、`max_review_iterations`、`document_review`、`max_section_tokens`、`max_cited_sources`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，CLI 修订次数默认 `1`。可选 `document_review = true` 增加整稿审查：新论证计划可纠正冻结的各章节，旧计划保留两处目标；每处最多修订 `max_review_iterations` 次，被拒候选计入额度，恢复不重置。整稿审查默认关闭。`max_section_tokens = 0` 取消单次输出上限；正整数 `max_cited_sources` 限制最终不同引用数，不提前截断阅读池，超出在终审记录；省略即不设此上限。图表默认确定性生成，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |

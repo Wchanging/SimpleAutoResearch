@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from simple_ar.core.artifacts import write_json, write_text
-from simple_ar.core.process import ProcessSpec, run_process
+from simple_ar.core.process import ProcessSpec, run_process, with_process_outputs
 from simple_ar.core.budget import BudgetLedger
 from simple_ar.code_task.editing.attempts import (
     load_latest_code_task_batch,
@@ -515,8 +515,7 @@ def _run_command(
     }
     spec = ProcessSpec(command_args, cwd, timeout_sec, env=_safe_env(cwd), output_dir=output_dir,
                        session_id=session_id, attempt_id=attempt_id)
-    if output_dir:
-        spec = replace(spec, output_dir=output_dir / spec.invocation_id)
+    spec = with_process_outputs(spec)
     result = run_process(
         spec,
         output_callback=lambda name, chunk: relays[name].feed(chunk),
@@ -913,10 +912,9 @@ def _safe_env(workspace_dir: Path) -> dict[str, str]:
         "WINDIR",
     }
     env = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+    # Execute against the task's sources and selected interpreter, not packages
+    # injected into the controller (including an installed framework candidate).
     python_paths = [str(workspace_dir), str(workspace_dir / "src")]
-    existing = os.environ.get("PYTHONPATH")
-    if existing:
-        python_paths.append(existing)
     env["PYTHONPATH"] = os.pathsep.join(python_paths)
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"

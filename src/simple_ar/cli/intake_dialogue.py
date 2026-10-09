@@ -34,12 +34,12 @@ EXECUTION_BINDINGS = {"argv": "run_argv", "metrics": "metric", "hypothesis": "hy
 def _arguments(args: argparse.Namespace) -> dict[str, Any]:
     return {key: str(value) if isinstance(value, Path) else [str(item) if isinstance(item, Path) else item for item in value]
             if isinstance(value, list) else value for key, value in vars(args).items()
-            if not key.startswith("_") or key in {"_reuse_protected", "_reuse_edit_policy"}}
+            if not key.startswith("_") or key in {"_reuse_protected", "_reuse_edit_policy", "_reuse_report_drafts"}}
 
 
 def _located_basis(basis: Any, excerpts: list[dict[str, Any]], *, label: str = "Source",
                    allow_source_reference: bool = False) -> list[dict[str, str]]:
-    """Resolve inspected sources; quotations are required for acquisition URLs.
+    """Resolve inspected sources, retaining exact legacy quotations when supplied.
 
     An execution proposal may select an already observed source by path. This
     records its basis, not semantic verification of the proposed command. It
@@ -136,15 +136,21 @@ def validate_proposal(value: Any, args: argparse.Namespace, locked: set[str], *,
             options.get('requirements', args.requirements) or options.get('install_project', getattr(args, 'install_project', False))):
         raise ValueError("Selecting requirements or project installation also requires explicit venv preparation")
     read_requests = value.get("read_requests", [])
+    if isinstance(read_requests, list):
+        # A path-only object is the same read intent, not a reason to spend
+        # another model call. Still validate the indexed path below.
+        read_requests = [row["path"] if isinstance(row, dict) and set(row) == {"path"}
+                         else row for row in read_requests]
     if not isinstance(read_requests, list) or len(read_requests) > 3 or any(not isinstance(path, str) or
         path not in preparation.get("source_file_paths", []) for path in read_requests):
         raise ValueError("read_requests must name at most three indexed project text paths; no external files or notebooks")
     if read_requests and kind not in {"reproduction", "bug_fix"}:
         raise ValueError("Project preparation reads belong to reproduction or code repair")
     material_reads = value.get("material_read_requests", [])
-    from simple_ar.research.documents.ports import SUPPORTED_DOCUMENT_SUFFIXES
+    from simple_ar.research.documents.ports import SUPPORTED_DOCUMENT_SUFFIXES, SUPPORTED_MATERIAL_SUFFIXES
     authorized = {row.get("source_path") for row in (facts or {}).get("paper_previews", [])
-                  if row.get("source_path") and Path(row["source_path"]).suffix.lower() in SUPPORTED_DOCUMENT_SUFFIXES}
+                  if row.get("source_path") and Path(row["source_path"]).suffix.lower() in (
+                      SUPPORTED_MATERIAL_SUFFIXES if row.get("input_role") == "material" else SUPPORTED_DOCUMENT_SUFFIXES)}
     if not isinstance(material_reads, list) or len(material_reads) > 2 or any(
         not isinstance(row, dict) or set(row) != {"path", "query"} or
         not isinstance(row["path"], str) or row["path"] not in authorized or
@@ -170,12 +176,29 @@ def validate_proposal(value: Any, args: argparse.Namespace, locked: set[str], *,
         excerpts = [*preparation.get("excerpts", []), *(facts or {}).get("material_excerpts", []), *[
             {"path": row["source_path"], "text": row["text"]}
             for row in (facts or {}).get("paper_previews", []) if row.get("text") and row.get("source_path")]]
-        basis = _located_basis(acquisition["basis"], excerpts)
-        if basis and not any(acquisition["url"] in row["quote"] for row in basis):
+        basis = _located_basis(acquisition["basis"], excerpts, allow_source_reference=True)
+        linked = False
+        for row in basis:
+            # The code owns literal URL lookup. Requiring the model to recopy
+            # prose/footnotes adds formatting failures without stronger provenance.
+            if any(acquisition["url"] in {token.strip('.,;()[]<>\"\'') for token in source["text"].split()}
+                   for source in excerpts if source["path"] == row["path"]):
+                row["quote"] = acquisition["url"]
+                linked = True
+        if basis and not linked:
             raise ValueError("Acquisition URL must occur in its inspected source basis")
         acquisition = {**acquisition, "basis": basis}
     execution = value.get("execution_proposal")
     if execution is not None:
+        python_requirement = preparation.get("dependency_probe", {}).get("python_requirement", {})
+        if (kind == "reproduction" and resolved.environment == "venv"
+                and not getattr(args, "project_python", None)
+                and python_requirement.get("matches_inspecting_python") is False):
+            raise ValueError(
+                "The current Python does not satisfy the inspected project's requires-python "
+                f"{python_requirement.get('declared')}; select a compatible human-named interpreter "
+                "through assets role=python before proposing execution, or clarify the environment. "
+                "A textual assumption does not bind the task interpreter.")
         if kind not in {"reproduction", "bug_fix"}:
             raise ValueError("An execution proposal belongs only to reproduction or code repair")
         required = {"argv", "basis"} if kind == "bug_fix" else {"hypothesis", "dataset", "expected_outcome", "argv", "basis"}
@@ -236,8 +259,12 @@ def validate_proposal(value: Any, args: argparse.Namespace, locked: set[str], *,
                 raise ValueError("code_preparation cwd must match the existing project")
             roles = {row.get("role") for row in preparation.get("excerpts", [])
                      if any(row["path"] == cited["path"] for cited in located_basis)}
-            if not roles.intersection({"entry_source", "project_source"}) or "project_instructions" not in roles:
-                raise ValueError("code_preparation needs inspected source and command instruction basis")
+            # A new adapter derives its behavior from inspected implementation;
+            # a README classification is neither necessary nor execution proof.
+            # Recipes and source-defined CLI contracts remain valid basis even
+            # when the project has no prose command instructions.
+            if not roles.intersection({"entry_source", "project_source"}):
+                raise ValueError("code_preparation needs inspected implementation source basis")
             paths = adaptation["allowed_paths"]
             if not isinstance(paths, list) or not paths or any(not isinstance(path, str) for path in paths):
                 raise ValueError("code_preparation.allowed_paths must be nonempty exact new Python file paths")
@@ -300,7 +327,7 @@ def _asset_preview(args: argparse.Namespace, *, project_read_paths: tuple[str, .
     assets["data_paths"] = [str(path) for path in getattr(args, "data_path", [])]
     if args.document or args.material:
         from simple_ar.research.documents.extractors import LocalDocumentParser
-        from simple_ar.research.documents.ports import SUPPORTED_DOCUMENT_SUFFIXES
+        from simple_ar.research.documents.ports import SUPPORTED_DOCUMENT_SUFFIXES, SUPPORTED_MATERIAL_SUFFIXES
         # Same bounded excerpt sizes as project preparation; only already
         # supplied/confirmed paper paths, never links or paths in their content.
         paths = list(dict.fromkeys([*args.document, *args.material]))
@@ -309,18 +336,20 @@ def _asset_preview(args: argparse.Namespace, *, project_read_paths: tuple[str, .
         previews = assets["paper_previews"] = []
         parser = None
         for supplied in paths[:4]:
+            input_role = "material" if supplied in args.material else "paper"
             cached = next((row for row in saved_previews if row.get("source_path") == str(supplied.expanduser().resolve())), None)
-            if cached is not None:
+            if cached is not None and cached.get("input_role", "paper") == input_role:
                 previews.append(cached)
                 continue
-            row = {"path": str(supplied), "status": "unavailable"}
+            row = {"path": str(supplied), "status": "unavailable", "input_role": input_role}
             previews.append(row)
             try:
                 path = supplied.expanduser().resolve()
                 row["source_path"] = str(path)
                 if url := getattr(args, "paper_sources", {}).get(str(path)):
                     row.update(source_url=url, content_scope="supplied_web_resource_not_verified_paper_fulltext")
-                if path.suffix.lower() not in SUPPORTED_DOCUMENT_SUFFIXES:
+                supported = SUPPORTED_MATERIAL_SUFFIXES if input_role == "material" else SUPPORTED_DOCUMENT_SUFFIXES
+                if path.suffix.lower() not in supported:
                     row["reason"] = "unsupported_document_suffix"
                     continue
                 row["source_size_bytes"] = path.stat().st_size
@@ -476,7 +505,11 @@ def _adopt_acquisition(args: argparse.Namespace, state: dict[str, Any], entry: d
             entry["receipt"] = material["receipt"]
             write_json(root / "setup.json", state)
             return False
-        entry["receipt"], entry["adopted"] = material["receipt"], True
+        entry["receipt"] = material["receipt"]
+        if material.get("skipped"):
+            entry["skipped"] = True
+        else:
+            entry["adopted"] = True
         write_json(root / "setup.json", state)
         return True
     from simple_ar.research.preparation_assets import acquire_asset
@@ -519,7 +552,10 @@ def _adopt_paper_url(args: argparse.Namespace, state: dict[str, Any], entry: dic
     receipt_path = directory / "receipt.json"
     source = entry.get("source", "user")
     reservation = f"document:{directory}"
-    if receipt_path.exists():
+    if entry.get("skipped"):
+        return True
+    recovering = receipt_path.exists()
+    if recovering:
         receipt = read_json(receipt_path)
         if source == "supporting_material" and receipt["status"] == "started" and ledger is not None:
             pending = next((row for row in ledger.entries if row.reservation_id == reservation), None)
@@ -561,6 +597,13 @@ def _adopt_paper_url(args: argparse.Namespace, state: dict[str, Any], entry: dic
     if receipt["status"] != "completed":
         write_json(root / "setup.json", state)
         print_line("Paper acquisition unavailable/interrupted; inspect the saved receipt/manifest or supply a local paper. No automatic retry.")
+        if recovering and input("Continue without this failed resource, retaining its receipt? / 跳过失败资料并保留记录继续? [y/N]: ").strip().lower() in {"y", "yes"}:
+            entry["skipped"] = True
+            state.setdefault("user_messages", []).append(
+                f"I chose to continue without the unavailable resource {entry['url']}; "
+                "its failed acquisition is not source evidence. Use other supplied materials or explain remaining gaps.")
+            write_json(root / "setup.json", state)
+            return True
         return False
     path = Path(receipt["path"]).resolve()
     if path not in [item.resolve() for item in args.document]:
@@ -627,7 +670,7 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
         state["arguments"] = _arguments(args)
     write_json(root / "setup.json", state)
     for entry in state.get("paper_acquisitions", []):
-        if not entry.get("adopted") and not _adopt_paper_url(args, state, entry, root=root, ledger=ledger):
+        if not entry.get("adopted") and not entry.get("skipped") and not _adopt_paper_url(args, state, entry, root=root, ledger=ledger):
             return None
     for url in state.get("paper_urls", []):
         if any(entry["url"] == url for entry in state.get("paper_acquisitions", [])):
@@ -683,7 +726,7 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
         + (
         "For reproduction ONLY, execution_proposal may propose hypothesis, dataset, expected_outcome, argv (list), output_files (optional name-to-relative-file mapping), metric_sources (optional explicit file selectors), metrics (scalar stdout names only when not derived from file selectors), check_argv (optional short check from inspected project instructions), "
         "or optional code_preparation={allowed_paths: list of exact NEW project-relative Python files, validation_argv: independent checker argv}. "
-        "Use code_preparation only after reading author source and command instructions, to propose result conversion/execution glue within the user's fixed scientific scope. "
+        "Use code_preparation only after reading author implementation and available command instructions, to propose result conversion/execution glue within the user's fixed scientific scope. A prose README is not required when the inspected implementation defines the invocation and outputs. "
         "The adapter and its formal argv are proposed implementation, NOT an existing runnable command or source fact. Cite the actual author source/instructions as basis, not invented adapter text. "
         "Author code/data, tests, method, splits, metrics and evaluation conditions cannot be edited. No globs, existing files, installation commands or check_argv inside code_preparation. "
         "If inspected dependencies require a task venv, the ordinary environment/requirements/install_project options may accompany code_preparation; "
@@ -727,7 +770,9 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
         "Acquisition needs separate confirmation, including PDF permission. The resulting attributed excerpt is limited to 8000 characters/three PDF pages, "
         "not full-paper understanding; a landing webpage is not verified paper methods. Do not follow links automatically or invent missing text. "
         "Alternatively reproduction/code repair may propose ONE acquisition_proposal "
-        "{role: project/data/material, url: public HTTPS URL, basis: [{path: inspected path, quote: exact text containing URL}]}. "
+        "{role: project/data/material, url: public HTTPS URL, basis: [{path: inspected path}]}. "
+        "Select the inspected path whose displayed text contains that literal URL; the code records the exact URL evidence. "
+        "Do not reconstruct a URL from broken text or paraphrase a quotation. Legacy optional quotes must match the source. "
         "A URL quoted in a human reply needs no source basis; otherwise it must occur in inspected paper/project text. "
         "Use a public GitHub repository URL or direct ZIP for project; data is a single file, not automatically unpacked. "
         "Use material to inspect source-linked official instructions or paper text before selecting a project or data. "
@@ -794,6 +839,17 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
     # This is a human conversation, not an autonomous retry loop. Persist every
     # reply and proposal; one request plus one shape correction per turn.
     clarifications = 0
+    # Exhausted generation capacity need not prevent a user from reviewing a
+    # previously valid proposal. This does not regenerate or clear its budget.
+    remaining_calls = ledger.remaining("llm_requests")
+    if (state.get("status") == "discussing" and state.get("proposals")
+            and remaining_calls is not None and remaining_calls <= 0):
+        saved = state["proposals"][-1]
+        if not any(saved.get(key) for key in ("assets", "acquisition_proposal", "read_requests", "material_read_requests")):
+            if input("Model capacity exhausted. Review the saved proposal without a call? [review/stop]: ").strip().lower() != "review":
+                return None
+            state["status"] = "awaiting_reply"
+            write_json(root / "setup.json", state)
     while clarifications < 6:
         if state.get("status") == "accepted":
             # Explicit setup resumption recompiles technical bindings from the
@@ -802,13 +858,13 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
             proposal = validate_proposal(state["proposals"][-1], args, explicit, facts=facts)
             break
         if state.get("status") == "awaiting_reply":
-            proposal = state["proposals"][-1]
+            proposal = validate_proposal(state["proposals"][-1], args, explicit, facts=facts)
         else:
             if client is None:
                 def usage(record):
                     state["usage"].append(record.to_row())
                     write_json(root / "setup.json", state)
-                client = LLMClient.from_env(model=None if args.model == "env" else args.model, max_output_tokens=3000,
+                client = LLMClient.from_env(model=None if args.model == "env" else args.model,
                     budget_ledger=ledger, budget_session_id=root.name, budget_attempt_id="setup", usage_callback=usage)
                 binding = client.connection_binding() if isinstance(client, LLMClient) else {}
                 if state.get("model_connection") and not model_connections_compatible(state["model_connection"], binding):
@@ -825,8 +881,8 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
                        "response_contract": {"kind": [selected_kind] if selected_kind else sorted(KINDS), "summary": "string",
                            "questions": "list of unresolved material choices; [] when task-specific information is sufficient. Permission to execute is confirmed separately, not an unresolved scientific question. Only data_analysis needs value_column and observation_unit; never add those options to other functions.",
                            "assumptions": "list of strings", "assets": "list of role/path_quote objects; only missing inputs",
-                           "acquisition_proposal": "null or {role: project/data/material, url: public HTTPS source-backed URL, basis: list of {path, quote containing URL}}; reproduction/code repair only, separate explicit download confirmation; no target path or execution",
-                           "execution_proposal": "bug_fix: null or {argv: list of validation/test command arguments, basis: list of {path: inspected relative path}}. reproduction: null or {hypothesis: string, dataset: string, expected_outcome: string, argv: list of command arguments (optional literal {output_dir}), check_argv: optional short check argv from inspected instructions (never inferred by shortening training), code_preparation: optional {allowed_paths: list of exact NEW project-relative Python files, validation_argv: independent checker argv}, output_files: optional map of output names to relative files under SIMPLE_AR_OUTPUT_DIR, metric_sources: optional metric-to-selector map ({output,path} for JSON or {output,column,match} for CSV/TSV), metrics: optional exact scalar stdout names when no metric_sources; otherwise omit and use the selector keys, basis: list of {path: inspected relative path}}; choose observed source paths, do not recopy or paraphrase source code. Legacy optional quote must be verbatim. code_preparation requires read source AND command basis, existing project, no check_argv, readonly author code/data and fixed method/conditions; separately confirmed options may authorize venv/requirements/project installation in that SAME isolated workspace, both argv must use python/python3; adapter is proposed implementation not existing command fact; neither permits cwd, timeout, explicit interpreter changes, unconfirmed installs or setup execution",
+                           "acquisition_proposal": "null or {role: project/data/material, url: public HTTPS source-backed URL, basis: list of {path: inspected source path containing the literal URL}}; code locates exact URL evidence, legacy optional quotes must be verbatim; reproduction/code repair only, separate explicit download confirmation; no target path or execution",
+                       "execution_proposal": "bug_fix: null or {argv: list of validation/test command arguments, basis: list of {path: inspected relative path}}. reproduction: null or {hypothesis: string, dataset: string, expected_outcome: string, argv: list of command arguments (optional literal {output_dir}), check_argv: optional short check argv from inspected instructions (never inferred by shortening training), code_preparation: optional {allowed_paths: list of exact NEW project-relative Python files, validation_argv: independent checker argv}, output_files: optional map of output names to relative files under SIMPLE_AR_OUTPUT_DIR, metric_sources: optional metric-to-selector map ({output,path} for JSON or {output,column,match} for CSV/TSV), metrics: optional exact scalar stdout names when no metric_sources; otherwise omit and use the selector keys, basis: list of {path: inspected relative path}}; choose observed source paths, do not recopy or paraphrase source code. Legacy optional quote must be verbatim. code_preparation requires inspected implementation basis and supported invocation/output behavior, existing project, no check_argv, readonly author code/data and fixed method/conditions; separately confirmed options may authorize venv/requirements/project installation in that SAME isolated workspace, both argv must use python/python3; adapter is proposed implementation not existing command fact; neither permits cwd, timeout, explicit interpreter changes, unconfirmed installs or setup execution",
                            "read_requests": "list of up to three indexed source_file_paths; reproduction or bug_fix only. A partially read file can be requested again to retrieve its unread tail; completely supplied files return last_read_result without new text. [] otherwise",
                            "material_read_requests": "list of at most two {path: displayed authorized source_path, query: nonempty question <=500 characters}; all kinds; no other asset/read/acquisition/execution action in this response",
                            "options": setup_option_contract(selected_kind),
@@ -1018,13 +1074,22 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
             else:
                 _print_reproduction_proposal(args, proposal)
         while True:
+            if proposal["questions"]:
+                print_line("Answer the choices, or type accept-proposal to adopt the displayed settings and assumptions as-is. "
+                           "Unanswered factual questions remain unknown; this does not authorize execution. / "
+                           "回答选择，或输入 accept-proposal 明确采用所展示方案；未回答事实仍未知，执行仍须另行确认。")
             answer = input("Reply, or accept with y / 回答或输入 y 确认；stop 保存退出: ").strip()
             if answer and not (answer.lower() in {"y", "yes"} and proposal["questions"]):
                 break
             print_line("Please answer the outstanding choices; the draft has been saved.")
         if answer.lower() in {"stop", "quit"}:
             return None
-        if answer.lower() in {"y", "yes"}:
+        if answer.lower() in {"y", "yes", "accept-proposal"}:
+            if answer.lower() == "accept-proposal":
+                state["user_messages"].append(
+                    "I adopt the displayed task proposal, settings and assumptions as-is. "
+                    "Unanswered factual questions remain unknown; do not invent answers or verified facts. "
+                    "This confirms preparation only, not execution.")
             state["status"] = "accepted"
             write_json(root / "setup.json", state)
             break
@@ -1040,6 +1105,10 @@ def _discuss_start(args: argparse.Namespace, *, root: Path, client: Any | None) 
     result.kind = proposal["kind"]
     for key, value in proposal["options"].items():
         setattr(result, key, value)
+    if result.kind == "reproduction":
+        # Setup permission to fetch a paper is not a request for another online
+        # retrieval phase. Acquired/local sources already enter the same parser.
+        result.fulltext = False
     if proposal.get("execution_proposal"):
         if proposal["kind"] == "bug_fix":
             argv = proposal["execution_proposal"]["argv"]

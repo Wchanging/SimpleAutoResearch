@@ -1677,6 +1677,7 @@ def compact_project_results_for_prompt(data: Any, metric_summary: dict[str, Any]
                 "command", "measurement", "experiment_contract", "comparisons",
                 "limitations", "missing_measurements", "failed_measurements",
                 "implementation_ref", "candidate_revision", "superseded_candidates",
+                "guard", "diagnosis", "output_evidence",
             ) if key in execution
         }
     if isinstance(data.get("summary"), dict):

@@ -192,13 +192,15 @@ class ExperimentOutputTests(unittest.TestCase):
             self.assertTrue(runtime['query_matched'])
             self.assertIn('3.12', runtime['text'])
 
-    def test_contract_rejects_escape_and_unbounded_file_lists(self):
+    def test_contract_preserves_declared_files_and_rejects_escape(self):
         for value in ({"x": "../x"}, {"x": "/etc/passwd"}, {"x": "C:/x"},
                       {"x": "a\\x"}, {"x": "./x"}, {"x": "a//b"},
-                      {"x": 1}, {"": "x"}, {str(i): "x" for i in range(9)}, []):
+                      {"x": 1}, {"": "x"}, []):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 output_files({"output_files": value})
         self.assertEqual(output_files({}), {})
+        declared = {f"result_{i}": f"tables/result_{i}.csv" for i in range(12)}
+        self.assertEqual(output_files({"output_files": declared}), declared)
         self.assertEqual(output_files({"output_files": {"raw": "nested/raw.json"}}), {"raw": "nested/raw.json"})
 
     def test_live_process_two_layouts_registers_only_declared_files(self):
@@ -209,7 +211,7 @@ class ExperimentOutputTests(unittest.TestCase):
                     store = ArtifactStore(root / filename.replace("/", "-"))
                     script = ("import os; from pathlib import Path; "
                               "p=Path(os.environ['SIMPLE_AR_OUTPUT_DIR']); "
-                              f"f=p/{filename!r}; f.parent.mkdir(parents=True); "
+                              f"f=p/{filename!r}; f.parent.mkdir(parents=True, exist_ok=True); "
                               "f.write_text('seed,value\\n0,0.4\\n', encoding='utf-8'); "
                               "(p/'unrelated.txt').write_text('not requested'); print('METRIC accuracy=0.4')")
                     request = ExperimentRequest(run=RunRequest([sys.executable, "-c", script], root, 5),
@@ -346,15 +348,19 @@ class ExperimentOutputTests(unittest.TestCase):
     def test_projection_keeps_current_and_history_measurements_distinct(self):
         result = {"output_evidence": [{"name": "raw", "status": "available", "artifact": "outputs/raw.json",
                                        "preview": {"text": "producer", "truncated": False}}]}
+        result["output_evidence"].extend({"name": f"observation-{index}", "status": "available",
+            "artifact": f"outputs/observation-{index}.csv", "preview": {"text": "value\n0.2", "truncated": False}}
+            for index in range(11))
         ref = ArtifactRef("attempts/experiment-2/results.json")
         qualified = _qualified_outputs(result, ref)
+        self.assertEqual(len(qualified), 12)
         context = ReportContext(topic="Measurements", report_mode="experiment", results={"output_evidence": qualified})
         memory = ReportMemory()
         before = json.dumps(result)
         context, memory = attach_experiment_history(context, memory,
             [("initial", ArtifactRef("attempts/experiment-1/results.json"), result), ("repair", ref, result)], current_ref=ref)
         view = report_execution_evidence(context)
-        self.assertEqual(len(view["output_evidence"]), 2)
+        self.assertEqual(len(view["output_evidence"]), 24)
         self.assertEqual(view["output_evidence"][0]["artifact"], "attempts/experiment-2/outputs/raw.json")
         self.assertEqual(json.dumps(result), before)
         self.assertTrue(all(handle.kind == "experiment_output" for handle in _output_handles(qualified)))

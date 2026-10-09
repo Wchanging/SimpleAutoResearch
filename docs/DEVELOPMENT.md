@@ -33,6 +33,10 @@ Use `simple_ar.cli.main:main` for the console entrypoint and
 change, reinstall before using `--no-sync`; do not recreate package-level forwarding
 that depends on child-module import order.
 
+Retained-passage ranking uses Python's `sqlite3` with FTS5/BM25. A custom Python
+runtime must include FTS5. Its lexical table exists only in memory for the lookup
+and is closed afterwards; this does not introduce database files or an index service.
+
 ## Engineering Principles And Code Review Standard
 
 Code prompts share `scope.prompt_file_inventory`: all indexed paths retain their

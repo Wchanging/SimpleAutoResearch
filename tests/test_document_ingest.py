@@ -52,6 +52,31 @@ class DocumentIngestTests(unittest.TestCase):
             self.assertEqual(hint["content_scope"], "source_webpage_not_verified_paper_fulltext")
             self.assertEqual(restored["reason"], "cache_hit")
             self.assertEqual(hint["local_path"], restored["local_path"])
+            page_plan = replace(plan, budget={**plan.budget, "web_extract_backend": "tavily_basic"})
+            provenance = {"provider": "tavily", "source_url": paper.url, "usage": {"credits": 1},
+                          "content_scope": "provider_extracted_page_not_verified_paper_fulltext"}
+            with patch("simple_ar.research.connectors.web.WebConnector.extract_page",
+                       return_value=("# Guidance\n\nDocumented conditions.", provenance)) as extract:
+                page = build_document_bundle(papers=[paper], source_plan=page_plan,
+                    cache_dir=root / "page-cache", extraction_dir=root / "page-extracted")
+                cached_page = build_document_bundle(papers=[paper], source_plan=page_plan,
+                    cache_dir=root / "page-cache", extraction_dir=root / "page-extracted")
+            extract.assert_called_once_with(paper.url)
+            page_hint = page.fulltext_manifest["documents"][0]["hints"][0]
+            cached_hint = cached_page.fulltext_manifest["documents"][0]["hints"][0]
+            self.assertTrue(page_hint["acquisition"]["provider_requested"])
+            self.assertFalse(cached_hint["acquisition"]["provider_requested"])
+            self.assertIn("Documented conditions", " ".join(c.text for c in page.chunks))
+            for label, text, reason in (("empty", "", "page_extraction_empty"),
+                                        ("large", "x" * (1024 * 1024 + 1), "remote_file_exceeds_max_pdf_mb")):
+                with patch("simple_ar.research.connectors.web.WebConnector.extract_page",
+                           return_value=(text, provenance)):
+                    failed = build_document_bundle(papers=[paper], source_plan=replace(page_plan,
+                        budget={**page_plan.budget, "max_pdf_mb": 1}),
+                        cache_dir=root / label, extraction_dir=root / (label + "-extracted"))
+                failure = failed.fulltext_manifest["documents"][0]["hints"][0]
+                self.assertEqual(failure["reason"], reason)
+                self.assertEqual(failure["acquisition"]["usage"], {"credits": 1})
             self.assertEqual(first.records[0].parser, "basic_html")
             text = Path(first.records[0].local_path).read_text(encoding="utf-8")
             self.assertIn("Documented conditions.", text)
@@ -64,6 +89,32 @@ class DocumentIngestTests(unittest.TestCase):
             selected = linked_material_records(read, bundle=first, limit=1)
             self.assertEqual(selected[0].url, "https://github.com/author/research")
             self.assertIn(selected[0].url, selected[0].metadata["parent_quote"])
+            repository_id = selected[0].document_id
+            requested = replace(read, paper_notes=({"paper_id": first.records[0].document_id,
+                "new_source_queries": ["https://example.test/data", "Other validation papers"]},))
+            selected = linked_material_records(requested, bundle=first, limit=1)
+            self.assertEqual(selected[0].url, "https://example.test/data")
+            self.assertIn(selected[0].url, selected[0].metadata["parent_quote"])
+            self.assertNotEqual(selected[0].document_id, repository_id)
+            reordered = replace(requested, paper_notes=({"new_source_queries": [
+                "https://github.com/author/research", "https://example.test/data"]},))
+            reordered_links = linked_material_records(reordered, bundle=first)
+            self.assertEqual([r.document_id for r in reordered_links], [repository_id, selected[0].document_id])
+            all_requested = replace(reordered, paper_notes=(*reordered.paper_notes,
+                {"new_source_queries": ["https://example.test/code"]}))
+            self.assertEqual([r.url for r in linked_material_records(all_requested, bundle=first, limit=3)],
+                ["https://github.com/author/research", "https://example.test/data", "https://example.test/code"])
+            self.assertEqual(len(linked_material_records(all_requested, bundle=first, limit=1)), 1)
+            from simple_ar.research.evidence.reader import new_source_queries, ReadResult
+            self.assertEqual(new_source_queries(requested), ("Other validation papers",))
+            restored_read = ReadResult.from_handoff_dict(requested.to_handoff_dict(), bundle=first)
+            self.assertEqual(linked_material_records(restored_read, bundle=first),
+                             linked_material_records(requested, bundle=first))
+            for url in ("https://example.test/not-in-source", "https://127.0.0.1/private"):
+                with self.subTest(url=url):
+                    self.assertEqual(linked_material_records(replace(read, paper_notes=({
+                        "new_source_queries": [url]},)), bundle=first), ())
+            self.assertEqual(linked_material_records(requested, bundle=first, limit=0), ())
 
             material = DocumentRecord(document_id="official-page", title="Official guidance",
                 source="web", url="https://example.test/official/guidance",
@@ -99,6 +150,37 @@ class DocumentIngestTests(unittest.TestCase):
                 self.assertEqual(acquire(replace(plan, require_fulltext=False)).records[0].extraction_status, "metadata_only")
             get.assert_not_called()
 
+            # A linked document's redirects spend the same remaining fetch
+            # allowance. Another candidate cannot reuse those spent requests.
+            def redirect_document(request):
+                if request.url.path == "/official/guidance":
+                    return httpx.Response(302, headers={"Location": "/resolved"})
+                return httpx.Response(200, headers={"Content-Type": "text/html"},
+                                      stream=httpx.ByteStream(body))
+            client_type = httpx.Client
+            for attempts, expected_requests, expected_status in ((1, 1, "fetch_failed"), (2, 2, "cached")):
+                with self.subTest(attempts=attempts):
+                    requests = []
+                    def transport_factory(**kwargs):
+                        def observed(request):
+                            requests.append(str(request.url))
+                            return redirect_document(request)
+                        return client_type(transport=httpx.MockTransport(observed),
+                                            trust_env=False, follow_redirects=False)
+                    current = replace(plan, budget={**plan.budget, "max_fulltext_fetch_attempts": attempts,
+                                                   "max_fulltext_documents": 2})
+                    with patch("simple_ar.research.preparation_assets.socket.getaddrinfo",
+                               return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]), patch(
+                               "simple_ar.research.preparation_assets.httpx.Client", side_effect=transport_factory):
+                        redirected = build_supporting_material_bundle(records=[material,
+                            replace(material, document_id="another-page", url="https://example.test/another")], source_plan=current,
+                            cache_dir=root / f"redirect-cache-{attempts}",
+                            extraction_dir=root / f"redirect-text-{attempts}")
+                    self.assertEqual(len(requests), expected_requests)
+                    self.assertEqual(redirected.fulltext_manifest["fetch_attempt_count"], expected_requests)
+                    self.assertEqual(redirected.fulltext_manifest["documents"][0]["hints"][0]["status"], expected_status)
+                    self.assertEqual(redirected.fulltext_manifest["documents"][1]["hints"][0]["status"], "skipped")
+
             from simple_ar.research.preparation_assets import _document_transport
             with patch.dict("os.environ", {"HTTPS_PROXY": "http://127.0.0.1:1"}, clear=True):
                 self.assertEqual(_document_transport(material.url), {})
@@ -130,6 +212,17 @@ class DocumentIngestTests(unittest.TestCase):
                            "simple_ar.research.preparation_assets.httpx.Client", return_value=client):
                     with self.assertRaises(ValueError):
                         public_document_response(material.url, max_bytes=limit)
+                if status == 302:
+                    from unittest.mock import Mock
+                    allowance = Mock()
+                    client = client_type(transport=httpx.MockTransport(lambda request: httpx.Response(
+                        status, headers=headers)), trust_env=False, follow_redirects=False)
+                    with patch("simple_ar.research.preparation_assets.socket.getaddrinfo",
+                               return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]), patch(
+                               "simple_ar.research.preparation_assets.httpx.Client", return_value=client):
+                        with self.assertRaisesRegex(ValueError, "nonpublic_address"):
+                            public_document_response(material.url, max_bytes=limit, on_redirect=allowance)
+                    allowance.assert_not_called()
             with patch("simple_ar.research.preparation_assets.httpx.Client") as get:
                 with self.assertRaises(ValueError):
                     public_document_response("https://127.0.0.1/private", max_bytes=100)
@@ -138,6 +231,10 @@ class DocumentIngestTests(unittest.TestCase):
             get.assert_not_called()
 
     def test_landing_response_detection_and_unsupported_content(self) -> None:
+        from simple_ar.research.documents.fulltext import _kind_from_url
+        for url in ("https://example.test/article/12/pdf?version=4",
+                    "https://example.test/article/12/pdf/", "https://example.test/paper.pdf?download=1"):
+            self.assertEqual(_kind_from_url(url), "pdf")
         for mime, body, expected in (
             ("", b"<!doctype html><p>Source</p>", "html"),
             ("application/octet-stream", b"<html><p>Source</p></html>", "html"),
@@ -436,6 +533,19 @@ class DocumentIngestTests(unittest.TestCase):
             self.assertEqual([row.to_row() for row in imported.chunks], [row.to_row() for row in bundle.chunks])
             self.assertEqual(imported.records[1].metadata["retained_source_role"], "paper")
             self.assertEqual(saved.read_bytes(), before)
+            repeated = Paper(id="p1", title="Metadata Paper", authors=[], abstract="New metadata.",
+                             url="https://example.test/p1", source="fixture")
+            repeated_request = DocumentIngestRequest(papers=(repeated,), source_plan=SourcePlan(queries=[]),
+                extraction_dir=root / "repeat-text", analysis_paths=(saved,))
+            repeated_result = run_document_ingest_capability(context=SimpleNamespace(store=store), request=repeated_request)
+            merged = DocumentBundle.from_handoff_dict(store.read_json(repeated_result.artifacts[0]))
+            self.assertEqual(len(merged.records), len(bundle.records))
+            self.assertEqual({r.document_id for r in merged.records}, {r.document_id for r in bundle.records})
+            self.assertTrue(all(row in merged.chunks for row in bundle.chunks))
+            self.assertEqual(len({row.chunk_id for row in merged.chunks}), len(merged.chunks))
+            with self.assertRaisesRegex(ValueError, "identities conflict"):
+                run_document_ingest_capability(context=SimpleNamespace(store=store),
+                    request=replace(repeated_request, papers=(replace(repeated, source_id="different-source"),)))
             from simple_ar.result_analysis.table import TableSpec, describe_table, parse_table
             package_dir = root / "analysis"
             package_dir.mkdir()
@@ -456,7 +566,21 @@ class DocumentIngestTests(unittest.TestCase):
             self.assertEqual(analysis.metadata["table_analysis"]["records"], table["records"])
             self.assertTrue(copied_store.resolve(analysis.metadata["table_analysis"]["artifact"]).is_file())
             with_table["documents"][-1]["metadata"]["table_analysis"]["artifact"] = "../outside.json"
+            with_table["documents"].append(DocumentRecord(document_id="old-draft", title="Old conclusions",
+                source="local_files", abstract="Our model improves accuracy.",
+                metadata={"kind": "prior_draft", "evidence_role": "prior_draft_not_primary_evidence"}).to_row())
             write_json(saved, with_table)
+            sources_result = run_document_ingest_capability(context=SimpleNamespace(store=store),
+                request=replace(repeated_request, original_sources_only=True))
+            sources = DocumentBundle.from_handoff_dict(store.read_json(sources_result.artifacts[0]))
+            self.assertTrue(all(row.is_original_source for row in sources.records))
+            self.assertEqual({r.document_id for r in sources.records}, {r.document_id for r in bundle.records})
+            mixed = DocumentBundle.from_handoff_dict(with_table)
+            read = read_documents(ReadRequest(bundle=mixed))
+            self.assertNotIn("Old conclusions", [row.title for row in read.paper_cards])
+            self.assertNotIn("Measured data", [row.title for row in read.paper_cards])
+            old = next(row for row in read.to_handoff_dict()["documents"] if row["document_id"] == "old-draft")
+            self.assertEqual(old["metadata"]["evidence_role"], "prior_draft_not_primary_evidence")
             with self.assertRaisesRegex(ValueError, "inside the selected"):
                 run_document_ingest_capability(context=SimpleNamespace(store=copied_store),
                     request=DocumentIngestRequest(papers=(), source_plan=SourcePlan(queries=[], local_documents=[str(saved)]),

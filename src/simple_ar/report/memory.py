@@ -144,7 +144,7 @@ def _section_evidence_handles(context: ReportContext) -> list[str]:
         materials = [row.handle for row in context.source_handles if row.kind == "material"]
         papers = [row.handle for row in context.source_handles if row.kind == "paper"]
         remaining = [row.handle for row in context.source_handles
-                     if row.kind not in {"material", "paper", "chunk"}]
+                     if row.kind not in {"material", "paper", "chunk", "prior_draft"}]
         ordered = []
         for index in range(max(len(materials), len(papers))):
             if index < len(materials):
@@ -160,11 +160,11 @@ def _section_evidence_handles(context: ReportContext) -> list[str]:
     if context.max_section_sources <= 0:
         if context.report_mode == "experiment":
             return [*experiment_handles, *paper_handles] or [
-                handle.handle for handle in context.source_handles if handle.kind != "chunk"
+                handle.handle for handle in context.source_handles if handle.kind not in {"chunk", "prior_draft"}
             ]
         if paper_handles:
             return paper_handles
-        return [handle.handle for handle in context.source_handles if handle.kind != "chunk"]
+        return [handle.handle for handle in context.source_handles if handle.kind not in {"chunk", "prior_draft"}]
 
     budget = max(1, context.max_section_sources)
     selected = experiment_handles[:budget] if context.report_mode == "experiment" else []
@@ -174,7 +174,7 @@ def _section_evidence_handles(context: ReportContext) -> list[str]:
         return selected
     selected_set = set(selected)
     for handle in context.source_handles:
-        if handle.handle in selected_set:
+        if handle.handle in selected_set or handle.kind == "prior_draft":
             continue
         selected.append(handle.handle)
         selected_set.add(handle.handle)

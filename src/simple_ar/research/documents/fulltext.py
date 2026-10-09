@@ -4,10 +4,11 @@ from contextlib import suppress
 import codecs
 from dataclasses import replace
 import hashlib
+import json
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 import urllib.error
 import urllib.request
@@ -82,6 +83,9 @@ def build_fulltext_manifest(
     max_pdf_bytes = _positive_int(source_plan.budget.get("max_pdf_mb"), default=0) * 1024 * 1024
     keep_raw_pdf = bool(source_plan.budget.get("keep_raw_pdf")) if isinstance(source_plan.budget.get("keep_raw_pdf"), bool) else False
     parser_backend = str(source_plan.budget.get("parser_backend") or "basic")
+    page_backend = str(source_plan.budget.get("web_extract_backend") or "direct")
+    if page_backend not in {"direct", "tavily_basic"}:
+        raise ValueError("web_extract_backend must be direct or tavily_basic")
 
     rows: list[dict[str, Any]] = []
     fetch_attempt_count = 0
@@ -89,6 +93,11 @@ def build_fulltext_manifest(
     cached_count = 0
     remote_cached_count = 0
     hint_count = 0
+    def account_redirect() -> None:
+        nonlocal fetch_attempt_count
+        if attempt_limit and fetch_attempt_count >= attempt_limit:
+            raise RuntimeError("max_fulltext_fetch_attempts_reached")
+        fetch_attempt_count += 1
     for record in records:
         hints = _hints_for_record(record)
         hint_count += len(hints)
@@ -119,6 +128,8 @@ def build_fulltext_manifest(
                             max_pdf_bytes=max_pdf_bytes,
                             keep_raw_pdf=keep_raw_pdf,
                             allow_pdf_download=source_plan.allow_pdf_download,
+                            on_redirect=account_redirect,
+                            page_backend=page_backend,
                         )
             if planned.status == "cached":
                 cached_count += 1
@@ -160,6 +171,7 @@ def build_fulltext_manifest(
             "max_pdf_mb": _positive_int(source_plan.budget.get("max_pdf_mb"), default=0),
             "keep_raw_pdf": keep_raw_pdf,
             "parser_backend": parser_backend,
+            "web_extract_backend": page_backend,
         },
         "document_count": len(records),
         "hint_count": hint_count,
@@ -244,6 +256,8 @@ def _cache_selected_hint(
     max_pdf_bytes: int,
     keep_raw_pdf: bool,
     allow_pdf_download: bool,
+    on_redirect: Callable[[], None] | None = None,
+    page_backend: str = "direct",
 ) -> FulltextHint:
     if hint.local_path:
         return _cache_local_hint(hint)
@@ -253,7 +267,9 @@ def _cache_selected_hint(
         return _replace_hint(hint, status="skipped", reason="raw_pdf_retention_disabled")
     try:
         cached = _fetch_remote_hint(hint, cache_dir=cache_dir, max_bytes=max_pdf_bytes,
-                                    allow_pdf_download=allow_pdf_download, keep_raw_pdf=keep_raw_pdf)
+                                    page_backend=page_backend,
+                                    allow_pdf_download=allow_pdf_download, keep_raw_pdf=keep_raw_pdf,
+                                    on_redirect=on_redirect)
     except Exception as exc:
         return _replace_hint(hint, status="fetch_failed", reason=str(exc)[:300])
     return cached
@@ -263,17 +279,8 @@ def _cache_local_hint(hint: FulltextHint) -> FulltextHint:
     path = Path(hint.local_path or "")
     if not path.exists() or not path.is_file():
         return _replace_hint(hint, status="failed", reason="local_file_not_found")
-    return FulltextHint(
-        document_id=hint.document_id,
-        kind=hint.kind,
-        source=hint.source,
-        url=hint.url,
-        local_path=str(path),
-        access=hint.access,
-        status="cached",
-        reason="local_fulltext_available",
-        size_bytes=path.stat().st_size,
-    )
+    return replace(hint, local_path=str(path), status="cached", reason="local_fulltext_available",
+                   size_bytes=path.stat().st_size)
 
 
 def _remote_content_kind(content_type: str, head: bytes, *, fallback: str) -> str:
@@ -309,8 +316,12 @@ def _check_remote_pdf_policy(kind: str, *, allow_pdf_download: bool, keep_raw_pd
 
 
 def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int,
-                       allow_pdf_download: bool, keep_raw_pdf: bool) -> FulltextHint:
+                       allow_pdf_download: bool, keep_raw_pdf: bool,
+                       on_redirect: Callable[[], None] | None = None,
+                       page_backend: str = "direct") -> FulltextHint:
     """Enforce the shared max_pdf_mb byte budget for every remote content kind."""
+    if page_backend == "tavily_basic" and hint.kind in {"html", "text", "landing"}:
+        return _fetch_tavily_hint(hint, cache_dir=cache_dir, max_bytes=max_bytes)
     cache_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{_safe_name(hint.document_id)}-{_safe_name(hint.source)}"
     def path_for_kind(kind: str) -> Path:
@@ -342,7 +353,8 @@ def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int,
     try:
         if hint.source == "supporting_material":
             from simple_ar.research.preparation_assets import public_document_response
-            response_context = public_document_response(str(hint.url), max_bytes=max_bytes)
+            response_context = public_document_response(str(hint.url), max_bytes=max_bytes,
+                                                        on_redirect=on_redirect)
         else:
             response_context = urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SEC)
         with response_context as response:
@@ -395,6 +407,35 @@ def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int,
         reason="remote_fulltext_cached",
         size_bytes=bytes_written,
     )
+
+
+def _fetch_tavily_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int) -> FulltextHint:
+    """Cache extracted public-page text separately from direct downloads."""
+    from simple_ar.research.connectors.web import WebConnector
+    from simple_ar.core.artifacts import write_json
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{_safe_name(hint.document_id)}-tavily-basic.txt"
+    receipt = path.with_suffix(".json")
+    if _usable_cache_file(path, kind="text") and receipt.is_file():
+        provenance = json.loads(receipt.read_text(encoding="utf-8"))
+        if provenance.get("source_url") != hint.url:
+            raise RuntimeError("page_cache_source_mismatch")
+        size = path.stat().st_size
+        if max_bytes and size > max_bytes:
+            raise RuntimeError("remote_file_exceeds_max_pdf_mb")
+        return replace(hint, kind="text", local_path=str(path), status="cached", reason="cache_hit",
+                       size_bytes=size, acquisition={**provenance, "provider_requested": False})
+    text, provenance = WebConnector().extract_page(str(hint.url))
+    provenance["provider_requested"] = True
+    if not text.strip():
+        return replace(hint, status="fetch_failed", reason="page_extraction_empty", acquisition=provenance)
+    payload = text.encode("utf-8")
+    if max_bytes and len(payload) > max_bytes:
+        return replace(hint, status="fetch_failed", reason="remote_file_exceeds_max_pdf_mb", acquisition=provenance)
+    path.write_bytes(payload)
+    write_json(receipt, provenance)
+    return replace(hint, kind="text", local_path=str(path), status="cached", reason="tavily_basic_page_cached",
+                   size_bytes=len(payload), acquisition=provenance)
 
 
 def _usable_cache_file(path: Path, *, kind: str) -> bool:
@@ -450,6 +491,7 @@ def _hint_from_row(document_id: str, row: dict[str, Any]) -> FulltextHint | None
         status=str(row.get("status") or "hint_only"),
         reason=str(row.get("reason") or ""),
         size_bytes=row.get("size_bytes") if isinstance(row.get("size_bytes"), int) else None,
+        acquisition=dict(row.get("acquisition") or {}),
     )
 
 
@@ -491,24 +533,14 @@ def _hint_from_local_path(record: DocumentRecord) -> FulltextHint | None:
 
 
 def _replace_hint(hint: FulltextHint, *, status: str, reason: str) -> FulltextHint:
-    return FulltextHint(
-        document_id=hint.document_id,
-        kind=hint.kind,
-        source=hint.source,
-        url=hint.url,
-        local_path=hint.local_path,
-        access=hint.access,
-        status=status,
-        reason=reason,
-        size_bytes=hint.size_bytes,
-    )
+    return replace(hint, status=status, reason=reason)
 
 
 def _kind_from_url(url: str) -> str:
     lower = url.lower()
     parsed = urlparse(lower)
     path = parsed.path or lower
-    if path.endswith(PDF_SUFFIX) or "/pdf/" in path or _looks_like_pdf_download_path(path):
+    if path.endswith(PDF_SUFFIX) or path.rstrip("/").endswith("/pdf") or "/pdf/" in path or _looks_like_pdf_download_path(path):
         return "pdf"
     if any(path.endswith(suffix) for suffix in TEXT_SUFFIXES):
         return "text"

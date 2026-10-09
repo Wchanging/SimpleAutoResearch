@@ -30,7 +30,7 @@ class FakeClient:
 
 
 class ReadingFollowupTests(unittest.TestCase):
-    def test_external_requests_share_response_but_have_a_global_two_query_bound(self):
+    def test_external_requests_preserve_distinct_gaps_for_source_budget_selection(self):
         bundle = DocumentBundle(
             [DocumentRecord("p", "First source", "local_files"),
              DocumentRecord("q", "Second source", "local_files")], {}, {}, [],
@@ -42,7 +42,7 @@ class ReadingFollowupTests(unittest.TestCase):
             {"paper_id": "q", "new_source_queries": ["Replication evidence", "Third external query"]},
         ]])
         self.assertEqual(len(client.requests), 2)  # One note per paper; no external call.
-        self.assertEqual(new_source_queries(result), ("Independent validation", "Replication evidence"))
+        self.assertEqual(new_source_queries(result), ("Independent validation", "Replication evidence", "Third external query"))
         self.assertEqual(result.paper_notes[1]["new_source_queries"], ["Replication evidence", "Third external query"])
         self.assertEqual(result.paper_notes[0]["reading_followup"]["pending_queries"], ["NeverSeenLocalMarker"])
         self.assertNotIn("NeverSeenLocalMarker", new_source_queries(result))
@@ -52,6 +52,24 @@ class ReadingFollowupTests(unittest.TestCase):
             self.assertIn("not permission to search", request.user)
         restored = ReadResult.from_handoff_dict(json.loads(json.dumps(result.to_handoff_dict())), bundle=bundle)
         self.assertEqual(new_source_queries(restored), new_source_queries(result))
+        from dataclasses import replace
+        mixed = replace(result, question_assessments=({"new_source_queries": [
+            "https://example.test/data", " Independent validation "]},))
+        self.assertEqual(new_source_queries(mixed), ("Independent validation", "Replication evidence", "Third external query"))
+        assessments = (
+            {"status": "direct_candidate", "new_source_queries": ["Scope one", "Scope two"]},
+            {"status": "direct_candidate", "new_source_queries": ["Data one", "Data two"]},
+            {"status": "missing", "new_source_queries": ["Implementation one", "Implementation two"]},
+            {"status": "context_only", "new_source_queries": ["Protocol one", "Protocol two"]},
+        )
+        fair = replace(result, question_assessments=assessments)
+        self.assertEqual(new_source_queries(fair)[:4],
+                         ("Implementation one", "Protocol one", "Scope one", "Data one"))
+        self.assertEqual(set(new_source_queries(fair)),
+                         {q for row in assessments for q in row["new_source_queries"]}
+                         | set(new_source_queries(result)))
+        restored = ReadResult.from_handoff_dict(json.loads(json.dumps(fair.to_handoff_dict())), bundle=bundle)
+        self.assertEqual(new_source_queries(restored), new_source_queries(fair))
 
     def test_external_query_validation_is_bounded_without_truncating_the_request(self):
         bundle, _ = self.bundle()
@@ -103,7 +121,7 @@ class ReadingFollowupTests(unittest.TestCase):
                 kept = handle.metadata["evidence_passages"]
                 self.assertEqual([row["chunk_id"] for row in kept[:2]], ["query-0", "query-1"])
                 self.assertEqual(kept[:2], passages[:2])  # No recentering or prefix substitution.
-                self.assertEqual(len(kept), 6)
+                self.assertEqual(len(kept), len(overview) + len(queries))
                 self.assertIn(condition, json.dumps(_prompt_handle_view(handle)))
                 from simple_ar.report.narrative import review_source_evidence, report_tool_context
                 view = _prompt_handle_view(handle)
@@ -125,12 +143,12 @@ class ReadingFollowupTests(unittest.TestCase):
             "reading_followup": {"passages": [passages[0], passages[0], {**passages[1], "text": "Invented"}, *passages[1:]]}}
         bundle = DocumentBundle([DocumentRecord("p", "Source", "local_files")], {}, {}, [], [method, *queries, foreign])
         kept = self.project(bundle, note).metadata
-        self.assertEqual(len(kept["evidence_passages"]), 6)
-        self.assertEqual(len({row["chunk_id"] for row in kept["evidence_passages"]}), 6)
+        self.assertEqual(len(kept["evidence_passages"]), 7)
+        self.assertEqual(len({row["chunk_id"] for row in kept["evidence_passages"]}), 7)
         self.assertIn("paired inputs", json.dumps(kept))
         self.assertNotIn("Invented", json.dumps(kept["evidence_passages"]))
         self.assertNotIn("Different source", json.dumps(kept["evidence_passages"]))
-        self.assertTrue(kept["evidence_passages_truncated"])
+        self.assertFalse(kept["evidence_passages_truncated"])
 
     def test_only_query_windows_keep_their_existing_budget_and_exact_offsets(self):
         chunk = TextChunk("q", "p", "prefix middle suffix")

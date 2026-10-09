@@ -51,8 +51,8 @@ from simple_ar.integrations.usage import record_usage
 CODE_TASK_EDIT_SYSTEM = (
     "You are a careful senior engineer preparing a minimal JSON edit proposal. "
     "You may propose exact old/new text replacements, but you must not apply "
-    "patches yourself. Use only the supplied workspace-relative paths and source "
-    "snippets. Keep the patch small and reviewable."
+    "patches yourself. Use supplied source for existing files; create new files "
+    "only when the prompt explicitly permits their scope. Keep the patch small and reviewable."
 )
 
 MessageCallback = Callable[[str], None]
@@ -333,6 +333,7 @@ def propose_patch_edits(
                 allowed_edit_files=proposal_allowed_files,
                 batch_work_item=batch_constraints.get("work_item", {}),
                 memory_context=memory_context,
+                allow_new_files=bool(allowed_patterns) and not allowed_edit_files,
             )
             # Evidence acquisition is bounded independently of edit approval.
             # One request may reveal another missing interface; do not force a
@@ -345,12 +346,15 @@ def propose_patch_edits(
             if loaded_context is not None:
                 total_chars = int(loaded_context.context_pack.get("budget", {}).get("max_total_chars", total_chars))
             for round_number in range(1, MAX_EDIT_EVIDENCE_ROUNDS + 1):
-                if proposal.get("edits") or _implementation_feedback(proposal.get("implementation_feedback")) is not None:
+                if _implementation_feedback(proposal.get("implementation_feedback")) is not None:
                     break
                 raw_request = proposal.get("context_request")
                 request = _normalize_context_request(
                     raw_request if isinstance(raw_request, dict) else {}, _known_paths(index),
                 )
+                if proposal.get("edits") and not any(request[key] for key in
+                        ("files", "query", "symbols", "dependency_symbols")):
+                    break
                 source_fallback = False
                 if not any(request[key] for key in ("files", "query", "symbols", "dependency_symbols")):
                     request = inferred_source_request([*acquired_snippets, *acquired_references], proposal_allowed_files, max_files,
@@ -424,7 +428,11 @@ def propose_patch_edits(
                         budget=budget, allowed_edit_files=proposal_allowed_files,
                         batch_work_item=batch_constraints.get("work_item", {}),
                         memory_context=memory_context, dependency_api=dependency_api,
-                    ) + "\nRequested evidence is included above where available; an unavailable "
+                        allow_new_files=bool(allowed_patterns) and not allowed_edit_files,
+                    ) + "\nUnapplied draft edits (not changes in the workspace):\n"
+                    + json.dumps(proposal.get("edits", []), ensure_ascii=False)
+                    + "\nReturn one complete replacement proposal, retaining or correcting useful draft edits "
+                    "along with the newly resolved changes. Requested evidence is included above where available; an unavailable "
                     "interface is not a verified signature. Resolve implementation details "
                     "delegated by the accepted design. If algorithmic requirements remain "
                     "undefined, return no edits and implementation_feedback with kind=design_gap. "
@@ -450,6 +458,7 @@ def propose_patch_edits(
         budget=budget,
         allow_large_edits=allow_large_edits,
         allowed_edit_files=proposal_allowed_files,
+        allow_new_files=bool(allowed_patterns) and not allowed_edit_files,
     )
     normalized["selected_files"] = selected
     normalized["read_only_context"] = read_only_context
@@ -556,7 +565,7 @@ def apply_patch_edits(
         protected_patterns=protected_patterns,
     )
     pre_hash_rows = _hash_rows_for_prepared(workspace_dir, prepared)
-    old_text_by_path = {item.file_path: read_text(item.file_path) for item in prepared}
+    old_text_by_path = {item.file_path: _read_optional_text(item.file_path) for item in prepared}
     new_text_by_path = {item.file_path: item.updated_text for item in prepared}
     diff_text = _unified_diff(prepared, old_text_by_path, new_text_by_path)
     snapshot = create_file_snapshot_set(
@@ -631,6 +640,7 @@ def _ask_llm_for_edits(
     allowed_edit_files: list[str],
     batch_work_item: object,
     memory_context: str,
+    allow_new_files: bool = False,
 ) -> dict[str, Any]:
     prompt = _edit_user_prompt(
         task_text=task_text,
@@ -645,6 +655,7 @@ def _ask_llm_for_edits(
         allowed_edit_files=allowed_edit_files,
         batch_work_item=batch_work_item,
         memory_context=memory_context,
+        allow_new_files=allow_new_files,
     )
     response = client.ask_json(
         CODE_TASK_EDIT_SYSTEM,
@@ -733,6 +744,7 @@ def _edit_user_prompt(
     batch_work_item: object,
     memory_context: str,
     dependency_api: dict[str, Any] | None = None,
+    allow_new_files: bool = False,
 ) -> str:
     compact_files = prompt_file_inventory(
         index, allowed_patterns=allowed_patterns, protected_patterns=protected_patterns,
@@ -777,6 +789,12 @@ def _edit_user_prompt(
         "- Prefer one edit per file. If a file needs multiple nearby changes, "
         "combine them into one larger old/new replacement.\n"
         "- Keep the patch minimal and aligned with the approved patch plan.\n\n"
+        + ("New files are also permitted within these allowed scope patterns: "
+           + json.dumps(allowed_patterns) + ". Protected paths remain read-only. "
+           "For a genuinely absent file use old=\"\" and new=the complete file text. "
+           "Split implementation into focused helper modules when useful; the same edit budgets apply.\n\n"
+           if allow_new_files else "New files require an explicitly listed batch target; use old=\"\" only for an absent file.\n\n")
+        +
         "Context discipline:\n"
         "- A selected file can be only partially visible. If the required behavior is "
         "outside a partial snippet, request a bounded continuation of that same file "
@@ -842,6 +860,7 @@ def _normalize_edit_proposal(
     budget: EditBudget,
     allow_large_edits: bool,
     allowed_edit_files: list[str],
+    allow_new_files: bool = False,
 ) -> dict[str, Any]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
     allowed_paths = set(allowed_edit_files)
@@ -859,7 +878,9 @@ def _normalize_edit_proposal(
         path = _string(item.get("path"))
         old = item.get("old")
         new = item.get("new")
-        if path not in known_paths:
+        target = _workspace_file(workspace_dir, path)
+        creating = (allow_new_files or path in allowed_paths) and old == "" and target is not None and not target.exists()
+        if path not in known_paths and not creating:
             warnings.append(f"Dropped edit for unknown path: {path or '<empty>'}")
             continue
         rejection = edit_scope_rejection_reason(
@@ -874,7 +895,7 @@ def _normalize_edit_proposal(
                 warnings.append(f"Dropped edit for disallowed path `{path}`: {rejection}")
             rejected_edits.append({"path": path, "reason": rejection})
             continue
-        if allowed_paths and path not in allowed_paths:
+        if allowed_paths and path not in allowed_paths and not creating:
             warnings.append(f"Dropped edit outside current batch target files: {path}")
             rejected_edits.append({"path": path, "reason": "outside_batch_target_files"})
             continue
@@ -946,8 +967,8 @@ def _prepare_edits(
         if not path:
             errors.append(f"edit {index}: missing path")
             continue
-        if not isinstance(old_text, str) or not old_text:
-            errors.append(f"edit {index} `{path}`: old text must be a non-empty string")
+        if not isinstance(old_text, str):
+            errors.append(f"edit {index} `{path}`: old text must be a string")
             continue
         if not isinstance(new_text, str) or not new_text:
             errors.append(f"edit {index} `{path}`: new text must be a non-empty string")
@@ -970,6 +991,15 @@ def _prepare_edits(
             errors.append(
                 f"edit {index} `{path}`: {message}"
             )
+            continue
+        if old_text == "":
+            if file_path.exists() or file_path in current_text_by_path:
+                errors.append(f"edit {index} `{path}`: empty old text only creates an absent file")
+                continue
+            current_text_by_path[file_path] = new_text
+            prepared.append(_PreparedEdit(path=path, file_path=file_path, old_text="",
+                                         new_text=new_text, updated_text=new_text,
+                                         reason=reason or "Create file."))
             continue
         if not file_path.exists() or not file_path.is_file():
             errors.append(f"edit {index} `{path}`: target file does not exist")
@@ -1209,6 +1239,7 @@ def _unique_prepared_paths(prepared: list[_PreparedEdit]) -> list[str]:
 
 
 def _write_text_atomically(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(path.name + ".simple_ar_tmp")
     temp_path.write_text(text, encoding="utf-8")
     try:
@@ -1749,6 +1780,7 @@ def _hash_rows_for_prepared(
     return {
         item.path: _hash_row(workspace, item.file_path)
         for item in prepared
+        if item.file_path.is_file()
     }
 
 

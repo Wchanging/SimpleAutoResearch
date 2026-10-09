@@ -9,6 +9,7 @@ from simple_ar.research.connectors.arxiv import ArxivConnector
 from simple_ar.research.connectors.local_files import LocalFileConnector
 from simple_ar.research.connectors.openalex import OpenAlexConnector
 from simple_ar.research.connectors.semantic_scholar import SemanticScholarConnector
+from simple_ar.research.connectors.web import WebConnector
 from simple_ar.research.sources.base import LiteratureConnector
 
 
@@ -85,6 +86,7 @@ def default_search_provider_registry(
         "semantic_scholar": lambda: SemanticScholarConnector(SemanticScholarSearchClient()),
         "arxiv": lambda: ArxivConnector(ArxivSearchClient(page_size=arxiv_page_size)),
         "local_files": lambda: LocalFileConnector(list(documents)),
+        "web": WebConnector,
     }
     factories.update(connector_factories or {})
     return SearchProviderRegistry(factories)

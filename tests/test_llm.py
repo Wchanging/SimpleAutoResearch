@@ -6,11 +6,13 @@ import base64
 import json
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 import unittest
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from PIL import Image
 
@@ -195,6 +197,11 @@ class LLMParsingTests(unittest.TestCase):
                 (sync_factory if streamed else async_factory).assert_not_called()
 
     def test_proxy_preflight_precedes_budget_and_legacy_fake_signature_is_unchanged(self):
+        subprocess.run([sys.executable, '-c',
+            'import sys; from simple_ar.cli.main import main; '
+            'from simple_ar.integrations.llm import LLMClient, LLMSettings; '
+            'LLMClient(LLMSettings(api_key="fixture")); assert "litellm" not in sys.modules'],
+            check=True, timeout=20, capture_output=True)
         for value in (None, "http://secret@proxy", "https://proxy/?secret"):
             with self.subTest(value=value), patch.dict(os.environ, {}, clear=True):
                 if value is not None:
@@ -910,8 +917,8 @@ class LLMParsingTests(unittest.TestCase):
         )
         response = {"choices": [{"message": {"content": "ok"}}]}
 
-        with patch(
-            "simple_ar.integrations.llm.litellm.completion",
+        with patch.dict('sys.modules', {'litellm': Mock()}), patch(
+            "litellm.completion",
             side_effect=[RuntimeError("Connection error."), response],
         ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
             output = client.ask("system", "user", label="retry-test")
@@ -937,8 +944,8 @@ class LLMParsingTests(unittest.TestCase):
         )
         response = {"choices": [{"message": {"content": "ok"}}]}
 
-        with patch(
-            "simple_ar.integrations.llm.litellm.completion",
+        with patch.dict('sys.modules', {'litellm': Mock()}), patch(
+            "litellm.completion",
             side_effect=[
                 RuntimeError("Request timed out."),
                 RuntimeError("Cloudflare 524 Origin Time-out."),
@@ -968,11 +975,11 @@ class LLMParsingTests(unittest.TestCase):
         )
         response = {"choices": [{"message": {"content": "ok"}}]}
 
-        with patch(
-            "simple_ar.integrations.llm.litellm.responses",
+        with patch.dict('sys.modules', {'litellm': Mock()}), patch(
+            "litellm.responses",
             side_effect=RuntimeError("Server disconnected without sending a response."),
         ) as responses, patch(
-            "simple_ar.integrations.llm.litellm.completion",
+            "litellm.completion",
             return_value=response,
         ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
             output = client.ask("system", "user", label="compat-test")
@@ -1004,11 +1011,11 @@ class LLMParsingTests(unittest.TestCase):
             )
         )
 
-        with patch(
-            "simple_ar.integrations.llm.litellm.responses",
+        with patch.dict('sys.modules', {'litellm': Mock()}), patch(
+            "litellm.responses",
             side_effect=RuntimeError("503 Service Unavailable"),
         ) as responses, patch(
-            "simple_ar.integrations.llm.litellm.completion"
+            "litellm.completion"
         ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
             with self.assertRaises(LLMError):
                 client.ask("system", "user", label="strict-responses-test")
@@ -1029,11 +1036,11 @@ class LLMParsingTests(unittest.TestCase):
             )
         )
 
-        with patch(
-            "simple_ar.integrations.llm.litellm.responses",
+        with patch.dict('sys.modules', {'litellm': Mock()}), patch(
+            "litellm.responses",
             side_effect=RuntimeError("Server disconnected without sending a response."),
         ) as responses, patch(
-            "simple_ar.integrations.llm.litellm.completion"
+            "litellm.completion"
         ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
             with self.assertRaises(LLMError):
                 client.ask("system", "user", label="strict-disconnect-test")

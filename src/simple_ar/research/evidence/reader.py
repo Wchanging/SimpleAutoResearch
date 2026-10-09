@@ -158,6 +158,7 @@ class ReadRequest:
     llm_client: Any | None = field(default=None, repr=False, compare=False)
     emit: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
     previous: ReadResult | None = None
+    source_selection: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.use_llm and self.llm_client is None:
@@ -279,11 +280,36 @@ class ReadResult:
         return _with_evidence_validation(result)
 
 
-def new_source_queries(result: ReadResult) -> tuple[str, ...]:
-    """At most two external requests; whole-question gaps precede paper-local requests."""
+def _source_requests(result: ReadResult) -> tuple[str, ...]:
     from simple_ar.research.evidence.screening import _new_source_queries
     return tuple(dict.fromkeys(q for note in (*result.question_assessments, *result.paper_notes)
-                              for q in _new_source_queries(note.get("new_source_queries", []))))[:2]
+                              for q in _new_source_queries(note.get("new_source_queries", []))))
+
+
+def new_source_queries(result: ReadResult) -> tuple[str, ...]:
+    """Order gap requests fairly before the application applies its source budget.
+
+    Candidate metadata is not an answer. Missing/context-only questions get
+    first consideration, but one question's second query must not displace
+    every other question's first query. Keep all requests for caller-side
+    deduplication against search history and explicit limits; URLs retain the
+    separate parent-cited acquisition path.
+    """
+    from itertools import zip_longest
+    from simple_ar.research.evidence.screening import _new_source_queries
+
+    priority = {"missing": 0, "context_only": 1, "direct_candidate": 2}
+    questions = sorted(result.question_assessments,
+                       key=lambda row: priority.get(row.get("status"), 2))
+    groups = [tuple(q for q in _new_source_queries(row.get("new_source_queries", []))
+                    if not q.lower().startswith(("https://", "http://")))
+              for row in questions]
+    ordered = [q for round_queries in zip_longest(*groups)
+               for q in round_queries if q is not None]
+    ordered.extend(q for note in result.paper_notes
+                   for q in _new_source_queries(note.get("new_source_queries", []))
+                   if not q.lower().startswith(("https://", "http://")))
+    return tuple(dict.fromkeys(ordered))
 
 
 def linked_material_records(
@@ -291,15 +317,20 @@ def linked_material_records(
 ) -> tuple[DocumentRecord, ...]:
     """Select explicit parent-cited links; syntax checks only, no DNS or fetching."""
     from simple_ar.research.preparation_assets import validate_public_url
+    from uuid import NAMESPACE_URL, uuid5
     if limit <= 0:
         return ()
     seen = {r.url for r in bundle.records}
     parents = {r.document_id: r for r in bundle.records if r.metadata.get("kind") != "supporting_material"}
     chunks = {c.chunk_id: c for c in bundle.chunks}
     records = []
-    # An explicit author repository beats framework links in the reference
-    # list. This is acquisition priority, not a judgment of scientific merit.
-    for link in sorted(result.code_links, key=lambda link: not bool(link.repository)):
+    requested = tuple(q for q in _source_requests(result) if q.lower().startswith(("https://", "http://")))
+    # A reading gap can name a data or documentation link instead of searching
+    # for another paper. Only exact, parent-cited URLs are eligible. Legacy
+    # notes without URL requests retain repository-first acquisition.
+    links = ([link for url in requested for link in result.code_links if link.url == url]
+             if requested else sorted(result.code_links, key=lambda link: not bool(link.repository)))
+    for link in links:
         parent = next((r for r in parents.values() if link.paper_id in
             (r.document_id, r.metadata.get("paper_id"), r.source_id)), None)
         chunk = next((chunks[c] for c in link.evidence_refs if c in chunks and parent is not None
@@ -310,13 +341,14 @@ def linked_material_records(
             validate_public_url(link.url)
         except ValueError:
             continue
-        records.append(DocumentRecord(document_id=f"{parent.document_id}#linked-{len(records) + 1}",
+        identifier = uuid5(NAMESPACE_URL, parent.document_id + "\n" + link.url).hex
+        records.append(DocumentRecord(document_id=f"linked-{identifier}",
             title=f"Linked material for {parent.title}", source="supporting_material", url=link.url,
             metadata={"kind": "supporting_material", "parent_document_id": parent.document_id,
                       "parent_chunk_id": chunk.chunk_id, "parent_quote": chunk.text,
                       "content_scope": "linked_material_not_paper_or_measured_result"}))
         seen.add(link.url)
-        if len(records) >= min(2, limit):
+        if len(records) >= limit:
             break
     return tuple(records)
 
@@ -343,7 +375,7 @@ def _merge_fulltext(previous: dict, fresh: dict) -> dict:
     for key in metadata:
         if key == "budget":
             left, right = previous.get(key, {}), fresh.get(key, {})
-            for policy in ("max_pdf_mb", "keep_raw_pdf", "parser_backend"):
+            for policy in ("max_pdf_mb", "keep_raw_pdf", "parser_backend", "web_extract_backend"):
                 if policy in left and policy in right and left[policy] != right[policy]:
                     raise ValueError(f"Conflicting fulltext policy: {policy}")
             merged[key] = dict(left if key in previous else right)
@@ -399,7 +431,14 @@ def merge_read_results(previous: ReadResult, fresh: ReadResult) -> ReadResult:
     values = {name: tuple(_append_unique(getattr(previous, name), getattr(fresh, name), key))
               for name, key in (("paper_cards", "paper_id"), ("claim_cards", "claim_id"),
                   ("method_cards", "method_id"), ("dataset_cards", "dataset_id"),
-                  ("code_links", "link_id"), ("screening_decisions", "paper_id"), ("paper_notes", "paper_id"))}
+                  ("code_links", "link_id"), ("paper_notes", "paper_id"))}
+    # Selection is a batch-scoped judgment, not an immutable source identity.
+    # Preserve distinct judgments; the original attempts retain their provenance.
+    decisions = []
+    for row in (*previous.screening_decisions, *fresh.screening_decisions):
+        if row not in decisions:
+            decisions.append(row)
+    values["screening_decisions"] = tuple(decisions)
     status: ReadStatus = "empty" if not bundle.records else (
         "partial" if "partial" in (previous.status, fresh.status) else "completed")
     notes = previous.notes_markdown
@@ -419,12 +458,16 @@ def read_documents(request: ReadRequest) -> ReadResult:
     deriving cards from the selected records.
     """
     bundle = _select_bundle(request)
-    materials = [r for r in bundle.records if r.metadata.get("kind") == "supporting_material"]
+    materials = [r for r in bundle.records
+                 if r.metadata.get("kind") == "supporting_material" or not r.is_original_source]
     material_ids = {r.document_id for r in materials}
     screening_decisions: tuple[dict[str, Any], ...] = ()
     paper_notes: tuple[dict[str, Any], ...] = ()
     notes_markdown = ""
     question_assessments: list[dict[str, Any]] = []
+    if request.source_selection is not None:
+        screening_decisions = tuple(dict(r) for r in request.source_selection.get("decisions", []))
+        question_assessments = [dict(r) for r in request.source_selection.get("question_assessments", [])]
     if request.use_llm and bundle.records:
         client = request.llm_client
         if client is None:
@@ -433,7 +476,7 @@ def read_documents(request: ReadRequest) -> ReadResult:
         fixed_sources = screening_mode == "auto" and {
             record.document_id for record in bundle.records
         } <= set(request.required_document_ids)
-        if screening_mode != "deterministic" and any(r.document_id not in material_ids for r in bundle.records):
+        if request.source_selection is None and screening_mode != "deterministic" and any(r.document_id not in material_ids for r in bundle.records):
             decisions = [] if fixed_sources else screen_papers_with_llm(
                 client,
                 topic=request.topic or "research topic",
@@ -455,22 +498,27 @@ def read_documents(request: ReadRequest) -> ReadResult:
             bundle = replace(screened, records=[*screened.records, *materials],
                 sections=[*screened.sections, *(s for s in bundle.sections if s.document_id in material_ids)],
                 chunks=[*screened.chunks, *(c for c in bundle.chunks if c.document_id in material_ids)])
-        if bundle.records:
+        readable = [record for record in bundle.records if not record.is_prior_draft
+                    and (request.source_selection is None or record.extraction_status != "metadata_only")]
+        if readable:
             snippets = {record.document_id: format_bundle_evidence_snippets(
                 bundle, document_id=record.document_id,
                 focus="\n".join((request.topic, request.problem_markdown)),
-            ) for record in bundle.records}
+            ) for record in readable}
             notes = read_paper_notes_with_llm(
                 client,
-                papers=[record.to_row() for record in bundle.records],
+                papers=[record.to_row() for record in readable],
                 evidence_snippets_by_document=snippets,
                 front_matter_by_document={section.document_id: front_matter_view(section)
                     for section in bundle.sections if section.section == "front_matter"},
                 topic=request.topic,
                 problem_markdown=request.problem_markdown + (
-                    "\nRecords with source=supporting_material are linked webpages, not papers or verified official sources. "
+                    "\nRecords with source=supporting_material or web are webpages, not papers or verified official sources. "
                     "Read them only for the task questions; preserve their own passage citations and distinguish "
-                    "author statements from measured cost or verified runnable code." if materials else ""),
+                    "author statements from measured cost or verified runnable code. "
+                    "Records with source=local_analysis or table_analysis/code_analysis metadata are derived analysis, "
+                    "not literature; preserve their recorded evidence role and verification scope."
+                    if materials or any(record.source == "web" for record in readable) else ""),
                 emit=request.emit,
                 config=request.config,
             )
@@ -514,6 +562,9 @@ def read_documents(request: ReadRequest) -> ReadResult:
     code_links = build_code_links(documents=papers, chunks=bundle.chunks)
     diagnostics: list[str] = []
     status: ReadStatus = "completed"
+    if request.source_selection is not None and any(r.extraction_status == "metadata_only" for r in bundle.records):
+        status = "partial"
+        diagnostics.append("Selected sources remain metadata-only; discovery assessments are not original-text reading.")
     if any(row["status"] != "direct_candidate" for row in question_assessments):
         status = "partial"
         diagnostics.append("Required question evidence remains missing or context-only in the candidate assessment.")
@@ -1149,6 +1200,7 @@ def _document_handoff_row(record: DocumentRecord) -> dict[str, object]:
         "published": record.published,
         "extraction_status": record.extraction_status,
         "parser": record.parser,
+        "metadata": {key: record.metadata[key] for key in ("kind", "evidence_role") if key in record.metadata},
     }
 
 

@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
 from simple_ar.literature.models import Paper, bibliographic_details
-from simple_ar.report.document_plan import check_document_length, manuscript_body_tokens
+from simple_ar.report.document_plan import check_document_length, document_tokens
 from simple_ar.report.narrative import report_objective
 from simple_ar.report.projection import _declared_report_metrics, _verified_experiment_evidence
 from simple_ar.report.schema import (
@@ -111,10 +111,8 @@ def build_report_audit(
 def _document_length_findings(report: str, context: ReportContext, memory: ReportMemory, *, report_body: str) -> list[ReviewerFinding]:
     """Check final text against the existing frozen interpretation, not a new policy."""
     budget = memory.document_plan.length_budget if memory.document_plan else {}
-    if budget.get("scope") == "manuscript_body":
-        count = manuscript_body_tokens(report_body) if report_body.strip() else None
-    else:
-        count = len(report.split()) if report.strip() else None
+    selected = report_body if budget.get("scope") in {"manuscript", "manuscript_body"} else report
+    count = document_tokens(report_body, report, budget.get("scope", "")) if selected.strip() else None
     request = check_document_length(budget, objective=report_objective(context, memory),
         token_count=count)
     if request["status"] == "no_contract":

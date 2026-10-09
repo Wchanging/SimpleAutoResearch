@@ -118,8 +118,8 @@ class MaterialEvidenceSelectionTests(unittest.TestCase):
         before = copy.deepcopy(chunks)
         rows = material_overview_views(chunks, 'accuracy quality precision recall latency memory',
             limit=2, max_chars=500, max_chunk_chars=250)
-        self.assertEqual([row['chunk_id'] for row in rows], ['quality', 'cost'])
-        self.assertIn('Latency memory', rows[1]['text'])
+        self.assertEqual({row['chunk_id'] for row in rows}, {'quality', 'cost'})
+        self.assertIn('Latency memory', next(row['text'] for row in rows if row['chunk_id'] == 'cost'))
         self.assertLessEqual(sum(len(row['text']) for row in rows), 500)
         self.assertEqual(chunks, before)
         for row in rows:
@@ -164,6 +164,12 @@ class MaterialEvidenceSelectionTests(unittest.TestCase):
             self.assertEqual(context.papers[0]["authors"], [])
             self.assertEqual(bundle.to_handoff_dict(), original)
             self.assertEqual(prompt["metadata"]["evidence_passages"][0]["selection"], "abstract_overview")
+            referenced = [{"chunk_id": str(i), "text": "x" * 1300, "truncated": False} for i in range(11)]
+            expanded = _prompt_handle_view(handle.model_copy(update={"metadata": {"evidence_passages": referenced}}))
+            self.assertEqual(len(expanded["metadata"]["evidence_passages"]), 11)
+            bounded = _prompt_handle_view(handle.model_copy(update={"metadata": {"evidence_passages": referenced * 4}}))
+            self.assertLessEqual(sum(len(r["text"]) for r in bounded["metadata"]["evidence_passages"]), 24000)
+            self.assertTrue(bounded["metadata"]["evidence_passages_truncated"])
 
     def test_old_unheaded_prefix_is_not_used_as_paper_summary(self):
         record = DocumentRecord(document_id="source", title="Notes", source="local_files", source_id="note.txt",

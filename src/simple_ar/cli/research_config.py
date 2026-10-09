@@ -32,6 +32,7 @@ FIELDS = {
                  "allow_pdf_download": ("research_allow_pdf_download", bool),
                   "max_iterations": ("max_research_iterations", int),
                  "keep_raw_pdf": ("research_keep_raw_pdf", bool),
+                 "web_extract_backend": ("research_web_extract_backend", str),
                  "interaction": ("interaction", str)},
     "assets": {"papers": ("local_document", list), "materials": ("material", list), "data": ("data_path", list)},
     "analysis": {"file": ("data_file", str), "value_columns": ("value_column", list),
@@ -245,8 +246,17 @@ def validate_session_arguments(args: argparse.Namespace) -> SessionArguments:
               args.data_mode != "observations", args.data_missing != "reject", args.figure_width != "wide", args.data_max_mb != 20, args.data_max_figures != 100,
               args.data_plot != "bar", args.x_column, args.x_unit, args.data_max_points != 10000, args.series_layout != "separate", args.paired_baseline, args.data_attribution, getattr(args, "data_association", "none") != "none")):
         raise SystemExit("Data options require --task-kind data_analysis.")
-    if materials and task_kind not in {"writing", "data_analysis"}:
-        raise SystemExit("--material/assets.materials requires writing or data_analysis with a report.")
+    if materials and task_kind == "survey":
+        from simple_ar.research.documents.ingest import retained_document_materials
+        supplied = [Path(path).expanduser().resolve() for path in materials]
+        try:
+            valid_sources = retained_document_materials(supplied, original_sources_only=True)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        if any(path.suffix.lower() != ".json" for path in supplied) or len(valid_sources) != len(supplied):
+            raise SystemExit("Survey materials must be saved original-source document bundles; use --local-document for ordinary sources.")
+    elif materials and task_kind not in {"writing", "data_analysis", "reproduction"}:
+        raise SystemExit("--material/assets.materials requires survey source bundles, writing, reproduction preparation or data_analysis with a report.")
     if task_kind == "writing":
         if command or execution_details or getattr(args, "code_task_config", None) or args.no_report or outputs not in (None, ["report"]):
             raise SystemExit("Writing requests only a report without execution or CodeTask configuration.")
@@ -369,6 +379,8 @@ def research_defaults(
                 raise ValueError(f"Invalid value for {section}.{name}: {value}")
             if dest == "interaction" and value not in {"assisted", "checkpoints", "autonomous"}:
                 raise ValueError("research.interaction must be assisted, checkpoints or autonomous")
+            if dest == "research_web_extract_backend" and value not in {"direct", "tavily_basic"}:
+                raise ValueError("research.web_extract_backend must be direct or tavily_basic")
             if dest == "report_outline_strategy" and value not in {"auto", "template", "adaptive"}:
                 raise ValueError("report.outline_strategy must be auto, template or adaptive")
             if dest == "report_review_scope" and value not in {"section", "document"}:

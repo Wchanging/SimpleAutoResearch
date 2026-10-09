@@ -32,7 +32,7 @@ def diagnose_experiment_run(
                 "runtime",
                 "timeout",
                 "The experiment timed out.",
-                "Reduce workload, make the benchmark smaller, or increase the declared timeout only if resources allow.",
+                "Preserve completed observations. Reassess the declared resource budget or execution partition; do not silently reduce scientific conditions or rerun valid measurements.",
             )
         )
     if results.get("returncode") not in {0, "0"} and not _has_code(deficiencies, "nonzero_returncode"):
@@ -250,11 +250,11 @@ def _issue_category(code: str) -> str:
 def _suggested_fix_for_issue(code: str, missing: list[str]) -> str:
     if code in {"missing_primary_metric", "missing_required_metric", "missing_metrics"}:
         target = ", ".join(missing) if missing else "the declared metrics"
-        return f"Wire the experiment runner to emit parseable values for: {target}."
+        return f"Determine whether the missing outputs ({target}) reflect unfinished work or broken metric extraction before repairing code or scheduling another run."
     if code == "nonfinite_metric":
-        return "Clamp or handle invalid numerical values before writing metrics."
+        return "Investigate the numerical failure; do not clamp or substitute values just to satisfy the result schema."
     if code == "timeout":
-        return "Reduce the workload or make the run budget explicit before increasing the timeout."
+        return "Preserve partial results and reassess resources; keep declared scientific conditions unchanged unless a scope change is explicitly recorded."
     if code == "nonzero_returncode":
         return "Inspect stderr and fix the failing entrypoint before rerunning."
     if code == "code_review_warning":
@@ -271,7 +271,7 @@ def _suggested_actions(deficiencies: list[dict[str, Any]], local_repair_supporte
         return ["Proceed to report with bounded claims and cite the guard status."]
     actions: list[str] = []
     if local_repair_supported:
-        actions.append("Run the bounded local repair to satisfy declared metric outputs, then rerun the experiment.")
+        actions.append("Inspect saved outputs and execution limits to distinguish incomplete measurement from metric-wiring failure; repair only the latter and preserve valid measurements.")
     if any(item.get("category") == "runtime" for item in deficiencies):
         actions.append("Inspect stderr/stdout tails and fix the entrypoint before evaluating research claims.")
     if any(item.get("category") == "implementation" for item in deficiencies):

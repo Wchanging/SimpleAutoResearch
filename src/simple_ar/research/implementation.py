@@ -43,6 +43,7 @@ class ImplementationRequest:
     session_id: str = ""
     attempt_id: str = ""
     budget_profile: str | None = None
+    edit_budget_overrides: dict[str, int] | None = None
     allow_large_edits: bool = False
     message_callback: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
 
@@ -97,6 +98,7 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
             approval_note=request.approval_note,
             llm_client=request.llm_client, use_llm=True, allow_planning_fallback=False,
             budget_profile=request.budget_profile,
+            edit_budget_overrides=request.edit_budget_overrides,
             allow_large_edits=request.allow_large_edits,
             max_files=IMPLEMENTATION_CONTEXT_MAX_FILES,
             max_source_chars_per_file=IMPLEMENTATION_CONTEXT_MAX_SOURCE_CHARS,
@@ -159,9 +161,11 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
                 request.message_callback(
                     f"Bug validation failed; proposing bounded technical repair {repair_index}/{request.max_repairs}."
                 )
-            failure_text = validation.stderr_path.read_text(encoding="utf-8", errors="replace")[-8000:]
-            if not failure_text.strip():
-                failure_text = validation.stdout_path.read_text(encoding="utf-8", errors="replace")[-8000:]
+            streams = [(name, path.read_text(encoding="utf-8", errors="replace"))
+                       for name, path in (("stderr", validation.stderr_path), ("stdout", validation.stdout_path))]
+            streams = [(name, text) for name, text in streams if text.strip()]
+            per_stream = 8000 // max(1, len(streams))
+            failure_text = "\n\n".join(f"{name}:\n{text[-per_stream:]}" for name, text in streams)
             run_report = read_json(validation.report_path)
             history_ref = run_report.get("history_report") if isinstance(run_report, Mapping) else None
             if not isinstance(history_ref, str) or not history_ref.startswith("code_task/run/patched/attempts/"):
@@ -475,13 +479,19 @@ def _prepare_research_task(
             task = (
                 "# Fixed-scope reproduction preparation\n\n"
                 "Only connect the author program and adapt its actual results to the declared JSON/CSV contract. "
+                "When an inspected author entrypoint already runs the experiment, delegate to it rather than "
+                "copying its scientific trial loop into the adapter. Inspect its effective defaults and recipe "
+                "overrides; do not invent cheaper method parameters. "
                 "Preserve the user-confirmed method, data, seeds, evaluation conditions and protected checker. "
                 "Do not innovate, fabricate metrics, install dependencies or run formal measurement. "
                 "The outer application owns measurement; the independent validation command must pass first. "
                 "Before measurement outputs exist, validate real readiness: import the required author modules, "
                 "check the actual input path/schema, and exercise the necessary author entry on a bounded "
                 "non-measurement example when feasible. An empty directory, syntax check or absent outputs "
-                "alone cannot establish readiness. A readiness example must not change the formal protocol "
+                "alone cannot establish readiness. Exercise the adapter's actual output assembly too and "
+                "resolve the declared metric selectors against that shortcheck output; independently "
+                "recomputing values without checking the emitted file structure does not validate the adapter. "
+                "A readiness example must not change the formal protocol "
                 "or be reported as its scientific result. If readiness cannot be checked, fail with an "
                 "actionable reason rather than returning success. Existing outputs may be independently "
                 "checked as a separate result-contract mode, not a substitute for pre-run readiness.\n\n"

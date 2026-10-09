@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import shlex
 import sys
@@ -26,6 +27,50 @@ FUNCTION_LABELS = {
     "data_analysis": "Data and plots / 分析绘图 — deterministic tables (no API needed); --scripted uses model and code execution",
     "figure": "Editable method figure / 方法图 — describe components and relationships; deliver code, SVG and PNG",
 }
+
+
+def select_start_model(args: argparse.Namespace, *, interactive: bool) -> None:
+    """Resolve and display the ordinary catalog before setup or task calls."""
+    if getattr(args, "_model_confirmed", False) or getattr(args, "resume_setup", None):
+        return
+    from dotenv import load_dotenv
+    from rich.table import Table
+    from rich.text import Text
+    from simple_ar.core.console import make_console
+    from simple_ar.integrations.model_profiles import catalog_path, load_model_catalog
+    load_dotenv()
+    catalog = load_model_catalog()
+    if catalog is None:
+        print_line("Model catalog not found. Using legacy environment settings; configure ~/.config/simple-ar/models.toml or SIMPLE_AR_MODELS_CONFIG.")
+        print_line(f"Legacy model: {os.environ.get('SIMPLE_AR_MODEL', 'gpt-4o-mini') if args.model == 'env' else args.model}; timeout: {os.environ.get('SIMPLE_AR_LLM_TIMEOUT_SEC', '180')}s. Use simple-ar models to inspect catalog connections.")
+        args._model_confirmed = True
+        return
+    available = [(name, profile) for name, profile in catalog.profiles.items() if "text" in profile.capabilities]
+    if not available:
+        raise ValueError("The model catalog has no text connection for task setup.")
+    selected = args.model if args.model != "env" else None
+    if selected is None and interactive and not (catalog.routes.get("text") or catalog.routes.get("default")):
+        default_name = available[0][0]
+    else:
+        default_name, _ = catalog.select(selected, purpose="text")
+    table = Table(title="Model connections / 模型连接", show_lines=False)
+    for label in ("#", "Connection", "Model", "Endpoint", "Stream", "Timeout", "Key"):
+        table.add_column(label)
+    for index, (name, profile) in enumerate(available, 1):
+        table.add_row(*(Text(value) for value in (str(index), name + (" (default)" if name == default_name else ""),
+                      profile.model, profile.base_url, "yes" if profile.stream else "no",
+                      f"{profile.request_timeout_sec:g}s", "set" if os.environ.get(profile.api_key_env, "").strip() else "missing")))
+    make_console().print(table)
+    print_line(f"Catalog: {catalog_path()}")
+    if interactive and args.model == "env":
+        answer = input(f"Model number or connection name / 模型编号或名称 [{default_name}]: ").strip()
+        if answer:
+            choices = {str(index): name for index, (name, _) in enumerate(available, 1)}
+            default_name = choices.get(answer, answer.removeprefix("profile:"))
+    name, profile = catalog.select(f"profile:{default_name}", purpose="text")
+    args.model = f"profile:{name}"
+    args._model_confirmed = True
+    print_line(f"Selected: {args.model} → {profile.model}; stream={profile.stream}; timeout={profile.request_timeout_sec:g}s")
 
 
 def _document_input(value: str) -> Path | str:
@@ -77,10 +122,12 @@ def add_start_parser(subparsers: argparse._SubParsersAction) -> None:
                         help="Chat setup: explicit per-project/data download capacity in MiB (default 20); project ZIP expansion is limited to four times this. Does not grant download or execution permission.")
     parser.add_argument("--document", action="append", default=[], type=_document_input,
                         help="Literature tasks: local paper/reference; reproduction --chat also accepts a public HTTPS paper URL, acquired only after confirmation. Use --material for notes/drafts/analysis packages.")
-    parser.add_argument("--material", action="append", default=[], type=Path, help="Writing: notes, drafts, ordinary JSON or a table_analysis.v1 analysis package. Ordinary materials are unverified; analysis packages recheck copied data. Not a bibliographic paper.")
+    parser.add_argument("--material", action="append", default=[], type=Path, help="Writing or reproduction preparation: notes, drafts, ordinary JSON or a table_analysis.v1 analysis package. Ordinary materials are unverified; analysis packages recheck copied data when imported for writing. Not a bibliographic paper.")
     parser.add_argument("--template", help="Writing: built-in report template or Markdown template path; default material_report. Use experiment for an honest paper-style draft.")
     parser.add_argument("--sources", choices=setup_option_contract("survey")["sources"]["allowed_values"], help="Use only supplied documents, or allow online search.")
     parser.add_argument("--fulltext", action="store_true", help="Allow online survey full text, or PDF download/retention for explicitly confirmed reproduction --chat paper URLs; otherwise PDF permission is requested separately.")
+    parser.add_argument("--web-extract-backend", choices=("direct", "tavily_basic"),
+                        help="Explicit public-page acquisition backend; separate from PDF downloads.")
     parser.add_argument("--max-cited-sources", type=int, help="Optional maximum number of distinct sources cited in the final report.")
     parser.add_argument("--project", type=Path, help="Existing project: bug_fix edits an isolated copy; reproduction inspects it, with optional --allow/--validate for isolated result-adapter preparation.")
     parser.add_argument("--validate", help="Explicit code validation command; reproduction with --allow uses this independent check before formal measurement.")
@@ -151,6 +198,8 @@ def _literature_rows(args: argparse.Namespace, sources: str, documents: list[Pat
             f"use_fulltext = {'true' if args.fulltext else 'false'}",
             f"allow_pdf_download = {'true' if args.fulltext else 'false'}",
             f"keep_raw_pdf = {'true' if args.fulltext else 'false'}",
+            *([f"web_extract_backend = {_quote(args.web_extract_backend)}"]
+              if getattr(args, "web_extract_backend", None) else []),
             *(["max_fulltext_documents = 6", "max_pdf_mb = 20"] if args.fulltext else []),
             "", "[assets]", f"papers = {_array([str(path) for path in documents])}"]
 
@@ -161,9 +210,18 @@ def _code_task_files(goal: str, project: Path, validation: str, allowed: list[st
                      timeout_sec: int = 300) -> dict[str, str]:
     environment = ('mode = "current"\n' if python_executable is None else
                    'mode = "external"\n' + f'python = {_quote(str(python_executable))}\n')
-    policy = {"budget_profile": "large", "allow_large_edits": True} if generated_script else (edit_policy or {})
+    policy = {"budget_profile": "large", "allow_large_edits": True} if generated_script else dict(edit_policy or {})
+    from simple_ar.code_task.editing.budget import validated_edit_budget_overrides
+    overrides = validated_edit_budget_overrides(policy.pop("edit_budget_overrides", {}))
     policy_rows = ''.join(f'{key} = {str(value).lower() if type(value) is bool else _quote(value)}\n'
                           for key, value in policy.items() if value is not None)
+    # New programs need complete source blocks, unlike local repository fixes.
+    # Keep the large profile's total/file limits; use the existing absolute
+    # per-block ceiling rather than a task-specific or unlimited exception.
+    if generated_script:
+        from simple_ar.code_task.editing.budget import edit_budget_for_profile
+        overrides["max_new_chars"] = edit_budget_for_profile("absolute").max_new_chars
+    budget_rows = ("\n[budget]\n" + ''.join(f"{key} = {value}\n" for key, value in overrides.items())) if overrides else ""
     return {
         "task.md": goal + "\n",
         "code_task.toml": "[code_task]\n" + f"code_root = {_quote(str(project))}\n"
@@ -174,7 +232,7 @@ def _code_task_files(goal: str, project: Path, validation: str, allowed: list[st
             "tests/**", "**/tests/**", "test_*.py", "**/test_*.py", ".env", ".env.*", *(protected or [])]))) + '\n'
         + "\n[benchmark]\n" + f"command = {_quote(validation)}\n"
         + f'\n[execute]\nuse_llm = true\nbaseline_policy = "skip"\ntimeout_sec = {timeout_sec}\nrepair_rounds = 1\n'
-        + policy_rows,
+        + policy_rows + budget_rows,
     }
 
 
@@ -293,13 +351,14 @@ def _session_project(session) -> tuple[Path, dict, dict] | None:
         execution = session.store.read_json(prepared).get("execution", {})
         if execution.get("cwd") and Path(execution["cwd"]).resolve() == workspace:
             task = execution.get("code_task", {})
-            policy = {key: task[key] for key in ("budget_profile", "allow_large_edits") if key in task}
+            policy = {key: task[key] for key in ("budget_profile", "allow_large_edits", "edit_budget_overrides") if key in task}
             break
     return workspace, manifest, policy
 
 
 def session_materials(root: Path) -> dict[str, list[Path]]:
     """Resolve current registered deliveries, not arbitrary historical files."""
+    root = root.resolve()
     from simple_ar.core.capabilities import CapabilityRegistry
     from simple_ar.core.session import SessionController
     session = SessionController.load(root, registry=CapabilityRegistry())
@@ -321,7 +380,7 @@ def session_materials(root: Path) -> dict[str, list[Path]]:
             # Keep the draft and its evidence together; the draft alone is not
             # independently verified literature or a measured result.
             paths = [body]
-            paths.extend(p for p in (path.parent / "report_experiment_evidence.json",
+            paths.extend(p for p in (path.parent / "experiment_evidence.json",
                                     path.parent / "citation_map.json") if p.is_file())
             documents = session.manifest.state_refs.get("documents")
             # Reuse the evidence actually consumed by this draft, including
@@ -372,6 +431,7 @@ def reuse_session_materials(args: argparse.Namespace) -> None:
         if selected:
             raise ValueError("--reuse requires --from-session.")
         return
+    root = root.resolve()
     if not selected:
         raise ValueError("Select --reuse data_analysis, code_analysis, code_project, report or summary; inspect with results SESSION.")
     if "code_project" in selected:
@@ -423,6 +483,7 @@ def reuse_session_materials(args: argparse.Namespace) -> None:
         args.allow = list(manifest["edit_scope"]["allowed_patterns"])
         args._reuse_protected = list(manifest["edit_scope"].get("protected_patterns", []))
         args._reuse_edit_policy = policy
+        args._analysis_project = "code_analysis" in session_materials(root)
         python = manifest.get("environment", {}).get("policy", {}).get("python_executable")
         if reproduction:
             python = execution.get("code_task", {}).get("python_executable") or python
@@ -434,6 +495,40 @@ def reuse_session_materials(args: argparse.Namespace) -> None:
         print_line("Reuse a validated project in a new isolated task with its registered edit scope and checker." +
                    (" Repeat the saved reproduction protocol; no environment installation is requested." if reproduction else ""))
         return
+    if args.kind == "survey":
+        available = session_materials(root)
+        if selected != ["report"] or "report" not in available:
+            raise ValueError("Survey follow-up reuses --reuse report's source bundle, not its prose or analysis results.")
+        bundles = [path for path in available["report"] if path.suffix == ".json"
+                   and json.loads(path.read_text(encoding="utf-8")).get("schema_version") == "document_bundle.v1"]
+        if not bundles:
+            raise ValueError("The saved report has no reusable original-source bundle.")
+        # Older sessions may have untyped drafts/notes in their source bundle.
+        # Recover ownership from explicit input roles, never filenames or prose.
+        from simple_ar.core.capabilities import CapabilityRegistry
+        from simple_ar.core.session import SessionController
+        from simple_ar.research.documents.ingest import retained_document_materials
+        session = SessionController.load(root, registry=CapabilityRegistry())
+        assets_ref = session.manifest.state_refs.get("assets")
+        assets = session.store.read_json(assets_ref).get("assets", []) if assets_ref and assets_ref.status == "available" else []
+        material_inputs = {row["locator"] for row in assets if row.get("role") == "material" and row.get("locator")}
+        filtered = {}
+        for path, bundle in retained_document_materials(bundles, original_sources_only=True).items():
+            excluded = {row.document_id for row in bundle.records
+                        if row.source == "local_files" and row.source_id in material_inputs}
+            if excluded:
+                payload = bundle.to_handoff_dict()
+                for key in ("documents", "sections", "chunks"):
+                    payload[key] = [row for row in payload[key] if row["document_id"] not in excluded]
+                if not payload["documents"]:
+                    raise ValueError("The saved report contains only derived material; supply original sources for the survey.")
+                filtered[str(path)] = payload
+        args._survey_source_bundles = filtered
+        args.material.extend(bundles)
+        args.material = list(dict.fromkeys(args.material))
+        args.sources = args.sources or "search"
+        args.from_session, args.reuse = None, []
+        return
     if args.kind not in {None, "writing"}:
         raise ValueError("Registered deliveries currently enter writing; use their source data for a new analysis.")
     available = session_materials(root)
@@ -441,6 +536,8 @@ def reuse_session_materials(args: argparse.Namespace) -> None:
         if name not in available:
             raise ValueError(f"No current reusable {name} delivery in {root}.")
         args.material.extend(available[name])
+        if name == "report":
+            args._reuse_report_drafts = [str(available[name][0])]
     args.material = list(dict.fromkeys(args.material))
     args.kind = "writing"
     # Idempotent when called both before chat and by the ordinary entry point.
@@ -454,16 +551,25 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
         raise ValueError("--asset-max-mb applies to confirmed --chat downloads, not ordinary task preparation.")
     reuse_session_materials(args)
     interactive = sys.stdin.isatty()
-    print_line("Available now: survey, bug_fix, prepared reproduction, material-based writing, data_analysis, editable figure.")
-    print_line("Concept images use the image command; autonomous reproduction preparation is not yet offered.")
     if interactive and args.kind is None:
+        from rich.panel import Panel
+        from rich.table import Table
+        from simple_ar.core.console import make_console
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column(style="cyan", no_wrap=True)
+        table.add_column()
         for index, (name, label) in enumerate(FUNCTION_LABELS.items(), 1):
-            print_line(f"{index}. {label} ({name})")
+            table.add_row(str(index), label)
+        make_console().print(Panel(table, title="SimpleAutoResearch · 科研助手", border_style="cyan",
+                                  subtitle="Choose a task / 选择要完成的工作"))
+        print_line("Concept images: simple-ar image. For conversational setup: simple-ar start --chat.")
     kind = _answer("Function number or name / 功能编号或名称", args.kind, interactive=interactive)
     numbers = {str(index): name for index, name in enumerate(FUNCTION_LABELS, 1)}
     kind = numbers.get(kind, kind)
     if kind not in FUNCTION_LABELS:
         raise ValueError("Choose a displayed function number or name.")
+    if kind != "data_analysis" or args.with_report or args.scripted or args.chat:
+        select_start_model(args, interactive=interactive)
     if args.scripted or kind == "figure":
         if args.scripted and kind != "data_analysis":
             raise ValueError("--scripted requires --kind data_analysis.")
@@ -553,8 +659,12 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
     materials = [path.expanduser().resolve() for path in args.material]
     if args.template and kind != "writing":
         raise ValueError("--template requires --kind writing.")
-    if materials and kind != "writing" and not (kind == "data_analysis" and args.with_report):
-        raise ValueError("--material requires writing or data_analysis --with-report.")
+    if materials and kind == "survey":
+        from simple_ar.research.documents.ingest import retained_document_materials
+        if any(path.suffix.lower() != ".json" for path in materials) or len(retained_document_materials(materials, original_sources_only=True)) != len(materials):
+            raise ValueError("Survey materials must be saved original-source document bundles; use --document for ordinary source files.")
+    elif materials and kind not in {"writing", "reproduction"} and not (kind == "data_analysis" and args.with_report):
+        raise ValueError("--material requires writing, reproduction preparation or data_analysis --with-report.")
     if kind == "writing" and interactive and not (documents or materials):
         materials.append(Path(_answer("Draft, notes or results / 草稿、笔记或结果说明路径", None,
                                       interactive=interactive)).expanduser().resolve())
@@ -662,7 +772,16 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
         raise ValueError("start --with-report requires --kind data_analysis; survey, reproduction and writing already request reports.")
     if args.with_report and not args.model:
         raise ValueError("--with-report requires a model connection; analysis alone needs no model.")
-    print_line(f"Task: {kind}\nGoal: {goal}\nModel: {'not used (descriptive analysis)' if kind == 'data_analysis' and not args.with_report else args.model}\nInteraction: {args.interaction}")
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from simple_ar.core.console import make_console
+    summary = Table.grid(padding=(0, 2))
+    for label, value in (("Task", kind), ("Goal", goal),
+                         ("Model", "not used (descriptive analysis)" if kind == "data_analysis" and not args.with_report else args.model),
+                         ("Interaction", args.interaction)):
+        summary.add_row(Text(label, style="cyan"), Text(value))
+    make_console().print(Panel(summary, title="Task preview / 任务确认", border_style="cyan"))
     if project:
         print_line(f"Project: {project}\nEdit scope: {', '.join(allowed)}\nValidation: {validation}")
         print_line("The validation command is authorized in an isolated auto-selected worktree/copy using "
@@ -692,6 +811,24 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
 
     # Persist before the final confirmation: an EOF/decline here loses no inputs.
     root = getattr(args, "_start_root", None) or new_research_session_root(args.output_root, goal)
+    for index, (source, payload) in enumerate(getattr(args, "_survey_source_bundles", {}).items(), 1):
+        from simple_ar.core.artifacts import write_json
+        package = root / f"reused-sources-{index}.json"
+        write_json(package, payload)
+        materials = [package if str(path) == source else path for path in materials]
+    drafts = getattr(args, "_reuse_report_drafts", [])
+    if drafts:
+        from simple_ar.research.documents.ingest import build_draft_document_bundle
+        from simple_ar.core.artifacts import write_json
+        for index, draft in enumerate(drafts, 1):
+            draft = Path(draft)
+            if draft not in materials:
+                continue
+            package = root / f"reused-draft-{index}.json"
+            bundle = build_draft_document_bundle(draft, extraction_dir=root / f"draft-extraction-{index}",
+                                                  identity=f"reused-draft-{index}")
+            write_json(package, bundle.to_handoff_dict())
+            materials = [package if path == draft else path for path in materials]
     config = root / "research.toml"
     outputs = {"survey": ["report"], "bug_fix": ["bug_fix"], "reproduction": ["experiments", "report"], "writing": ["report"], "data_analysis": ["data_analysis"]}
     if args.with_report:
@@ -712,7 +849,7 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
                 read_paths=tuple(getattr(args, "_setup_state", {}).get("project_read_paths", [])))
             write_json(root / "preparation.json", facts)
             (root / "preparation.md").write_text(project_preparation_markdown(facts), encoding="utf-8")
-        if kind in {"writing", "data_analysis"}:
+        if kind in {"writing", "data_analysis", "survey", "reproduction"}:
             rows.append(f"materials = {_array([str(path) for path in materials])}")
     if kind in {"survey", "reproduction", "writing"} or args.with_report:
         rows.extend(["", "[report]", "document_review = true"])
@@ -740,6 +877,9 @@ def prepare_start(args: argparse.Namespace) -> Path | None:
         if data_paths and kind == "bug_fix":
             rows.extend(["", "[assets]", f"data = {_array([str(path) for path in dict.fromkeys(data_paths)])}"])
         implementation_goal = getattr(args, "_code_task_text", goal)
+        if getattr(args, "_analysis_project", False):
+            from simple_ar.result_analysis.script_project import SCRIPT_RESULT_REQUIREMENTS
+            implementation_goal += "\n\n" + SCRIPT_RESULT_REQUIREMENTS
         if kind == "reproduction":
             implementation_goal += ("\n\nPrepare only the authorized result adapter or execution glue. "
                 "Reuse the inspected author implementation; do not alter methods, splits, evaluation, "

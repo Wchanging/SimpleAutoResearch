@@ -23,7 +23,7 @@ from simple_ar.report.schema import (
 )
 
 LENGTH_REQUEST_SCHEMA = {
-    "unit": "words", "scope": "whole_document|manuscript_body",
+    "unit": "words", "scope": "whole_document|manuscript|manuscript_body",
     "request_quote": "exact task quotation, or return null instead of this object",
     "constraint": "bounds|target",
     "min_words": "integer for bounds; null for target", "max_words": "integer for bounds; null for target", "target_words": 0,
@@ -36,7 +36,8 @@ LENGTH_REQUEST_RULE = (
     "into an exact count or invent tolerance bounds. Interpret the original wording, not just its number. "
     "Section target_words are relative body shares: the controller reserves known title/headings/attachments before "
     "freezing. References and future generated visuals can add unresolved cost; final delivery must be checked. "
-    "Use whole_document for the complete delivered Markdown, or manuscript_body only when the task explicitly "
+    "Use whole_document for the complete delivered Markdown, manuscript when the task excludes references "
+    "but retains title/headings, or manuscript_body only when the task explicitly "
     "excludes title, headings and references. manuscript_body still includes prose, tables, captions and appended "
     "body material. Return null for pages, characters or other/custom exclusions; do not convert units or infer exclusions."
 )
@@ -240,8 +241,8 @@ def validate_length_request(value: Any, *, objective: str) -> dict[str, Any]:
         return {}
     if not isinstance(value, Mapping):
         raise ValueError("length_request must be null or an explicit whole-document word request")
-    if value.get("unit") != "words" or value.get("scope") not in {"whole_document", "manuscript_body"}:
-        raise ValueError("length_request supports only explicit whole-document or manuscript-body words; do not convert pages, characters or custom exclusions")
+    if value.get("unit") != "words" or value.get("scope") not in {"whole_document", "manuscript", "manuscript_body"}:
+        raise ValueError("length_request supports only explicit delivered-document, manuscript without references, or manuscript-body words; do not convert pages, characters or custom exclusions")
     quote = value.get("request_quote")
     if not isinstance(quote, str) or not quote.strip() or quote.strip() not in objective:
         raise ValueError("length_request requires an exact quotation from the original task")
@@ -278,6 +279,13 @@ def manuscript_body_tokens(markdown: str) -> int:
     """
     return sum(len(line.split()) for line in markdown.splitlines()
                if not re.match(r"^\s{0,3}#{1,6}(?:\s|$)", line))
+
+
+def document_tokens(body: str, delivery: str, scope: str) -> int:
+    """Count the frozen scope from canonical assembly fields, never strip by title."""
+    if scope == "manuscript_body":
+        return manuscript_body_tokens(body)
+    return len((body if scope == "manuscript" else delivery).split())
 
 
 def check_document_length(budget: Mapping[str, Any], *, objective: str, token_count: int | None) -> dict[str, Any]:

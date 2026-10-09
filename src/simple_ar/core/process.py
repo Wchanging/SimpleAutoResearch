@@ -12,7 +12,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -44,6 +44,21 @@ class ProcessResult:
     stderr: str
     duration_sec: float
     record: dict
+
+
+def with_process_outputs(spec: ProcessSpec) -> ProcessSpec:
+    """Bind argv and environment to the same invocation-owned output directory."""
+    if spec.output_dir is None:
+        if any("{output_dir}" in arg for arg in spec.argv):
+            raise ValueError("Command contains {output_dir} without a process output directory")
+        return spec
+    invocation_dir = (spec.output_dir / spec.invocation_id).absolute()
+    outputs_dir = invocation_dir / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    environment = dict(os.environ if spec.env is None else spec.env)
+    environment["SIMPLE_AR_OUTPUT_DIR"] = str(outputs_dir)
+    return replace(spec, output_dir=invocation_dir, env=environment,
+                   argv=[arg.replace("{output_dir}", str(outputs_dir)) for arg in spec.argv])
 
 
 class _Capture:

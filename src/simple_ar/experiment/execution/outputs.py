@@ -18,8 +18,8 @@ WINDOW_CHARACTERS = 2400
 
 def output_files(schema: Mapping) -> dict[str, str]:
     files = schema.get("output_files", {})
-    if not isinstance(files, Mapping) or len(files) > 8:
-        raise ValueError("result_schema.output_files must map at most eight names to relative files.")
+    if not isinstance(files, Mapping):
+        raise ValueError("result_schema.output_files must map names to relative files.")
     for name, value in files.items():
         if not isinstance(name, str) or not name.strip() or len(name) > 80:
             raise ValueError("Output names must be non-empty strings of at most 80 characters.")

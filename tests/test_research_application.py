@@ -138,6 +138,13 @@ class ResearchApplicationTests(unittest.TestCase):
                     services=ResearchApplicationServices(config={"research_task_kind": kind,
                         "research_materials_only": True, "research_plan_mode": "deterministic"},
                         budget_limits={"process_invocations": 0}))
+                if kind == "survey":
+                    with patch.object(app, "_execution_config", return_value={"research_materials_only": False}):
+                        self.assertNotIn("research_sources", app._plan_config())
+                    with patch.object(app, "_execution_config", return_value={
+                            "research_materials_only": False, "research_sources": ["arxiv"]}):
+                        self.assertEqual(app._plan_config()["research_sources"], ["arxiv"])
+                self.assertEqual(app._plan_config()["research_sources"], ["local_files"])
                 view = app.advance(max_actions=2)
                 self.assertEqual(view.next_action, "report_write", view.status_reason)
                 documents_ref = view.state_refs["documents"]
@@ -305,7 +312,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 webpage = outcome in {"web", "mixed"}
                 old = Paper("old", "Seed study", [], "Original evidence." + (
                     " Author materials: https://example.test/code" if webpage else ""), "", source="fixture")
-                fresh = Paper("new", "Additional study", [], "New abstract evidence.",
+                fresh = Paper("new", "Additional study on new question", [], "New abstract evidence.",
                     "https://example.invalid/new.html", source="fixture", fulltext_url="https://example.invalid/new.html")
                 source = SourcePlan(["seed"], sources=["fixture"], require_fulltext=outcome == "exhausted" or webpage,
                     allow_pdf_download=True, budget={"max_documents": 3, "max_follow_up_queries": 1,
@@ -348,6 +355,16 @@ class ResearchApplicationTests(unittest.TestCase):
                            return_value=() if outcome == "web" else ("seed", "new question")):
                     app._execute("read", "read", ReadRequest(bundle=bundle, topic="Study"), ())
                     base_refs = {name: refs[name] for name in ("search", "documents", "read")}
+                    # Supplied cached bundles are merged after acquisition;
+                    # they must not consume the reserved followup allowance.
+                    acquired = bundle.fulltext_manifest["document_count"]
+                    retained_bundle = replace(bundle, records=[*bundle.records,
+                        replace(bundle.records[0], document_id="retained-a", metadata={"retained_bundle": "saved.json"}),
+                        replace(bundle.records[0], document_id="retained-b", metadata={"retained_bundle": "saved.json"})])
+                    refs["documents"] = app.controller.store.write_json("retained-input-check.json",
+                        retained_bundle.to_handoff_dict(), kind="document_bundle", schema="document_bundle.v1", producer="test")
+                    self.assertEqual(app._evidence_followup_inputs()[-1], 3 - acquired)
+                    refs["documents"] = base_refs["documents"]
                     self.assertEqual(app._next_action(), "search_evidence:1")
                     app = load_session(app.controller.store.root, services=services)
                     with patch.object(app, "_provider_registry", wraps=app._provider_registry) as providers:
@@ -355,8 +372,20 @@ class ResearchApplicationTests(unittest.TestCase):
                         if outcome == "web":
                             providers.assert_not_called()
                     self.assertEqual([r.query for r in app._load_search().responses], ["seed"])
-                    self.assertEqual([r["query"] for r in app._state_payload("search_evidence_1")["responses"]],
+                    followup_responses = app._state_payload("search_evidence_1")["responses"]
+                    self.assertEqual([r["query"] for r in followup_responses
+                                      if r["source"] != "supporting_material"],
                                      [] if outcome == "web" else ["new question"])
+                    local_candidates = [r for r in followup_responses if r["source"] == "supporting_material"]
+                    self.assertEqual(len(local_candidates), int(outcome == "mixed"))
+                    if local_candidates:
+                        self.assertIn("no provider request", local_candidates[0]["message"])
+                    if outcome not in {"empty", "web"}:
+                        selected = app._state_payload("search_evidence_1")
+                        self.assertIn("new", selected["selected_paper_ids"])
+                        self.assertEqual(len(selected["selected_paper_ids"]), 2 if outcome == "mixed" else 1)
+                        self.assertTrue(any(row["reason"] == "already_retained_source"
+                                            for row in selected["selection"]))
                     from io import BytesIO
                     from simple_ar.research.documents.fulltext import _fetch_remote_hint
                     def response_for(*args, **kwargs):
@@ -407,7 +436,8 @@ class ResearchApplicationTests(unittest.TestCase):
                         self.assertIn(linked[0].document_id, notes.call_args.kwargs["evidence_snippets_by_document"])
                         self.assertEqual(observed.paper_cards, ())
                     self.assertEqual(len(app._load_search().selected_papers), expected - int(webpage))
-                    self.assertEqual(app._load_search().response_rounds, (1,) if outcome == "web" else (1, 2))
+                    self.assertEqual(app._load_search().response_rounds,
+                                     (1,) if outcome == "web" else (1, 2, 2) if outcome == "mixed" else (1, 2))
                     with patch.object(app, "_report_writing_parts", return_value=(
                         SimpleNamespace(source_handles=[]), None, None, None, None)), \
                          patch.object(app, "_execute", return_value=True) as write:
@@ -707,6 +737,12 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(resumed.advance(max_actions=1).status, "completed")
             self.assertEqual(resumed.latest_experiment_ref(), measurement)
             self.assertEqual(len(resumed.view().attempts), len(view.attempts))
+            reopened = resumed.request_report()
+            self.assertEqual(reopened.next_action, "plan")
+            extended = resumed.advance(max_actions=1)
+            self.assertEqual(extended.next_action, "report_write", extended.status_reason)
+            self.assertEqual(resumed.latest_experiment_ref(), measurement)
+            self.assertEqual(sum(a["capability"] == "experiment" for a in extended.attempts), 1)
 
     def test_fixed_protocol_technical_retry_does_not_require_research_design(self):
         for kind in ("measurement", "reproduction"):
@@ -2716,6 +2752,20 @@ class ResearchApplicationTests(unittest.TestCase):
             audit = app.controller.store.read_json(view.state_refs["report_audit"])
             self.assertEqual(audit["status"], "failed")
             self.assertIn("source-scope-exceeded", [row["finding_id"] for row in audit["reviewer_findings"]])
+            # Capacity can be authorized for an audit-stopped delivery without
+            # reopening it, discarding its findings or spending another call.
+            refs = dict(view.state_refs)
+            attempt_count = len(view.attempts)
+            authorized = app.continue_session(authorization_id="saved-report-check",
+                authorization_reason="Inspect the saved candidate separately.",
+                authorize_remaining={"total_tokens": 10000, "llm_requests": 1}, additional_attempts=3)
+            self.assertEqual(authorized.status, "paused")
+            self.assertEqual(authorized.state_refs, refs)
+            self.assertEqual(len(authorized.attempts), attempt_count)
+            replay = app.continue_session(authorization_id="saved-report-check",
+                authorization_reason="Inspect the saved candidate separately.",
+                authorize_remaining={"total_tokens": 10000, "llm_requests": 1}, additional_attempts=3)
+            self.assertEqual(replay.status, "paused")
 
     def test_request_report_reopens_completed_prefix_without_rerunning_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:

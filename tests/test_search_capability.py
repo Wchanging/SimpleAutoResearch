@@ -179,10 +179,23 @@ class SearchCapabilityTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
 
     def test_partial_failure_is_not_reported_as_empty_success(self) -> None:
+        import requests
+        from urllib.error import HTTPError
+        calls = []
         class FailingConnector:
             source_name = "broken"
 
             def search(self, request: SearchQuery) -> SearchResponse:
+                calls.append(request.query)
+                if limited:
+                    response = requests.Response()
+                    response.status_code = 429
+                    try:
+                        if limited == "urllib":
+                            raise HTTPError("https://example.test/search", 429, "quota exhausted", {}, None)
+                        raise requests.HTTPError("quota exhausted", response=response)
+                    except (requests.HTTPError, HTTPError) as cause:
+                        raise RuntimeError("provider wrapper") from cause
                 raise RuntimeError("service unavailable")
 
         class WorkingConnector:
@@ -195,16 +208,29 @@ class SearchCapabilityTests(unittest.TestCase):
                     papers=[],
                 )
 
-        result = search_sources(
-            SearchRequest(queries=("query",), providers=("broken", "working")),
-            registry=SearchProviderRegistry(
-                {"broken": FailingConnector, "working": WorkingConnector}
-            ),
-        )
-
-        self.assertEqual(result.status, "partial")
-        self.assertEqual(result.responses[0].status, "failed")
-        self.assertEqual(len(result.diagnostics), 1)
+        for limited in (False, "requests", "urllib"):
+            with self.subTest(rate_limited=limited):
+                calls.clear()
+                result = search_sources(
+                    SearchRequest(queries=("first", "second"), providers=("broken", "working")),
+                    registry=SearchProviderRegistry(
+                        {"broken": FailingConnector, "working": WorkingConnector}
+                    ),
+                )
+                self.assertEqual(result.status, "partial")
+                self.assertEqual(result.responses[0].status, "rate_limited" if limited else "failed")
+                self.assertEqual(len(result.diagnostics), 2)
+                self.assertEqual(len(result.responses), 4)
+                self.assertEqual(calls, ["first"] if limited else ["first", "second"])
+                restored = SearchResult.from_handoff_dict(result.to_handoff_dict())
+                self.assertEqual(restored.responses[1].query, "second")
+                self.assertEqual(restored.responses[1].status, result.responses[1].status)
+                if limited:
+                    self.assertIn("Skipped live query", restored.responses[1].message)
+                    only_limited = search_sources(
+                        SearchRequest(queries=("first", "second"), providers=("broken",)),
+                        registry=SearchProviderRegistry({"broken": FailingConnector}))
+                    self.assertEqual(only_limited.status, "failed")
 
     def test_all_provider_failures_are_failed(self) -> None:
         registry = SearchProviderRegistry({"missing": lambda: (_ for _ in ()).throw(KeyError("client"))})
@@ -234,6 +260,8 @@ class SearchCapabilityTests(unittest.TestCase):
         self.assertEqual(result.to_dict()["schema_version"], "search_result.v1")
 
     def test_optional_cache_recovers_provider_failure_without_hiding_it(self) -> None:
+        import requests
+        calls = []
         paper = Paper(
             id="cached-paper",
             title="Cached reliable agents",
@@ -247,7 +275,10 @@ class SearchCapabilityTests(unittest.TestCase):
             source_name = "fixture"
 
             def search(self, request: SearchQuery) -> SearchResponse:
-                raise RuntimeError("provider unavailable")
+                calls.append(request.query)
+                response = requests.Response()
+                response.status_code = 429
+                raise requests.HTTPError("provider unavailable", response=response)
 
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "literature"
@@ -258,9 +289,10 @@ class SearchCapabilityTests(unittest.TestCase):
                 [paper.to_row()],
                 cache_dir=cache_dir,
             )
+            put_cache("second", "fixture", 10, [paper.to_row()], cache_dir=cache_dir)
             result = search_sources(
                 SearchRequest(
-                    queries=("query",),
+                    queries=("query", "second"),
                     providers=("fixture",),
                     cache_dir=cache_dir,
                 ),
@@ -271,6 +303,9 @@ class SearchCapabilityTests(unittest.TestCase):
         self.assertEqual(result.responses[0].status, "cached")
         self.assertEqual(result.responses[0].papers[0].id, "cached-paper")
         self.assertIn("provider unavailable", result.responses[0].message)
+        self.assertEqual(calls, ["query"])
+        self.assertEqual(result.responses[1].status, "cached")
+        self.assertIn("Skipped live query", result.responses[1].message)
 
     def test_optional_cache_persists_successful_metadata(self) -> None:
         paper = Paper(
@@ -327,6 +362,7 @@ class SearchCapabilityTests(unittest.TestCase):
             url="https://example.test/paper",
             source="fixture",
         )
+        available = [paper]
 
         class Connector:
             source_name = "fixture"
@@ -335,7 +371,7 @@ class SearchCapabilityTests(unittest.TestCase):
                 return SearchResponse(
                     source=self.source_name,
                     query=request.query,
-                    papers=[paper],
+                    papers=list(available),
                 )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -366,6 +402,66 @@ class SearchCapabilityTests(unittest.TestCase):
             self.assertEqual(restored.status, "completed")
             self.assertEqual(restored.papers[0].id, "paper-1")
             self.assertEqual(restored.responses[0].papers[0].title, "Fixture paper")
+            # Semantic selection sees eligible candidates before acquisition
+            # truncation, including a candidate with no lexical query overlap.
+            from unittest.mock import patch
+            available.append(Paper(id="implementation", title="SDK reference", authors=[],
+                abstract="", url="https://example.test/sdk", source="fixture"))
+            policy = SearchSelectionPolicy(topic="fixture", questions=(),
+                query_plan=QueryPlan(topic="fixture", seed_queries=["fixture"], queries=["fixture"], max_rounds=1,
+                                     auto_expansion=False), max_documents=1)
+            def select(client, **kwargs):
+                self.assertEqual({r["id"] for r in kwargs["papers"]}, {"paper-1", "implementation"})
+                self.assertEqual(kwargs["config"]["read_screening_max_shortlist"], 1)
+                return [{"paper_id": "implementation", "decision": "keep"}]
+            with patch("simple_ar.research.evidence.screening.screen_papers_with_llm", side_effect=select):
+                controller.execute_attempt("search", attempt_id="attempt-002",
+                    request=SearchRequest(queries=("fixture",), providers=("fixture",), llm_client=object()),
+                    registry=SearchProviderRegistry({"fixture": Connector}), selection_policy=policy)
+            selected = controller.store.read_json("attempts/attempt-002/search_result.json")
+            self.assertEqual(selected["selected_paper_ids"], ["implementation"])
+            self.assertEqual(len(selected["papers"]), 2)
+            self.assertEqual(selected["coverage"]["semantic_selection"]["scope"],
+                             "candidate_metadata_not_read_evidence")
+            with patch("simple_ar.research.evidence.screening.screen_papers_with_llm",
+                       side_effect=RuntimeError("model unavailable")):
+                failed = controller.execute_attempt("search", attempt_id="attempt-003",
+                    request=SearchRequest(queries=("fixture",), providers=("fixture",), llm_client=object()),
+                    registry=SearchProviderRegistry({"fixture": Connector}), selection_policy=policy)
+            self.assertEqual(failed.status, "failed")
+            discovery = controller.store.read_json("attempts/attempt-003/search_result.json")
+            self.assertEqual(len(discovery["papers"]), 2)
+            self.assertNotIn("semantic_selection", discovery["coverage"])
+            # Linked originals and newly discovered sources compete for the
+            # same single slot, through one existing semantic selection call.
+            from simple_ar.research.contracts import DocumentRecord
+            linked = DocumentRecord("linked", "Author implementation", "supporting_material",
+                url="https://example.test/author-code",
+                metadata={"kind": "supporting_material", "parent_quote": "The author publishes code here."})
+            for chosen in ("implementation", "linked"):
+                with self.subTest(chosen=chosen):
+                    def select_joint(client, **kwargs):
+                        self.assertEqual({r["id"] for r in kwargs["papers"]},
+                                         {"paper-1", "implementation", "linked"})
+                        candidate = next(r for r in kwargs["papers"] if r["id"] == "linked")
+                        self.assertEqual(candidate["abstract"], linked.metadata["parent_quote"])
+                        self.assertEqual(candidate["source"], "supporting_material")
+                        self.assertEqual(kwargs["config"]["read_screening_max_shortlist"], 1)
+                        return [{"paper_id": chosen, "decision": "keep"}]
+                    with patch("simple_ar.research.evidence.screening.screen_papers_with_llm",
+                               side_effect=select_joint) as screen:
+                        attempt = "joint-" + chosen
+                        run_search_capability(context=CapabilityContext(
+                            ArtifactStore(Path(tmp) / attempt), AttemptManifest(attempt)),
+                            request=SearchRequest(queries=("fixture",), providers=("fixture",), llm_client=object()),
+                            registry=SearchProviderRegistry({"fixture": Connector}),
+                            selection_policy=policy, linked_records=(linked,))
+                    screen.assert_called_once()
+                    saved = ArtifactStore(Path(tmp) / attempt).read_json("search_result.json")
+                    self.assertEqual(saved["selected_paper_ids"], [chosen])
+                    self.assertEqual(len(SearchResult.from_handoff_dict(saved).papers), 3)
+                    self.assertIn("no provider request", saved["responses"][-1]["message"])
+            self.assertEqual(linked.abstract, "")  # Candidate projection cannot mutate the original.
 
     def test_search_handoff_reports_broken_paper_reference(self) -> None:
         restored = SearchResult.from_handoff_dict(

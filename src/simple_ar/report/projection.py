@@ -31,7 +31,7 @@ from simple_ar.report.schema import (
 from simple_ar.research.design import ResearchDesignResult
 from simple_ar.research.contracts import ResearchExperimentContract
 from simple_ar.research.documents.ingest import DocumentBundle
-from simple_ar.research.evidence.reader import reading_followup_context, select_representative_chunks
+from simple_ar.research.evidence.reader import reading_followup_context
 from simple_ar.research.evidence.bibliography import apply_bibliographic_note, local_citation_fields_to_fill
 from simple_ar.research.sources import SearchResult
 from simple_ar.research.synthesis import SynthesisResult
@@ -53,7 +53,7 @@ def _qualified_outputs(result: Mapping[str, Any], ref: ArtifactRef, store: Artif
     """Qualify attempt-local producer attachments against their result owner."""
     rows = result.get("output_evidence", [])
     qualified = []
-    for row in rows[:8] if isinstance(rows, list) else []:
+    for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, Mapping):
             continue
         item = dict(row)
@@ -123,7 +123,7 @@ def attach_implementation_evidence(
                 "reason": "No candidate-specific behavior criterion and observed result were recorded together.",
             }
         evidence: dict[str, dict[str, Any]] = {}
-        for name in ("patch", "validation", "review"):
+        for name in ("patch", "source_context", "validation", "validation_report", "validation_stdout", "review"):
             artifact_ref = record.get("artifact_refs", {}).get(name)
             if artifact_ref is None:
                 continue
@@ -314,6 +314,12 @@ def build_material_report_inputs(
     from simple_ar.research.store.retrieval import material_overview_views
     from simple_ar.research.documents.extractors import document_extraction_limitations
     from dataclasses import replace
+    from simple_ar.core.artifacts import read_json
+
+    json_materials = {record.document_id: read_json(Path(record.local_path))
+                      for record in documents.records
+                      if record.local_path and Path(record.local_path).suffix.lower() == ".json"
+                      and record.metadata.get("code_analysis") is None}
 
     roles = {str(Path(asset.locator).resolve()): asset.role for asset in assets}
     paper_records = [record for record in documents.records
@@ -331,16 +337,35 @@ def build_material_report_inputs(
                      replace(record, abstract="") if record.document_id in parsed_ids else record
                      for record in paper_records]
     search = provided_materials_result(paper_records)
-    paper_handles = {handle.paper_id: handle for handle in _paper_source_handles(search)}
+    by_paper_id = {handle.paper_id: handle for handle in _paper_source_handles(search)}
+    paper_handles = {record.document_id: by_paper_id[paper.id]
+                     for record, paper in zip(paper_records, search.selected_papers, strict=True)}
     chunks_by_document: dict[str, list[Any]] = {}
     for chunk in documents.chunks:
         chunks_by_document.setdefault(chunk.document_id, []).append(chunk)
     handles = []
     for record in documents.records:
         chunks = chunks_by_document.get(record.document_id, [])
+        payload = json_materials.get(record.document_id)
+        # The citation owner below consumes identities. A saved citation map
+        # may also embed derived reading cards, not the cited original text.
+        if isinstance(payload, dict) and payload.get("schema_version") == "citation_map.v1":
+            continue
         passages = material_overview_views(chunks, topic)
+        # A bounded overview is not the source's table of contents. Expose
+        # retained section locations so readers can choose a specific lookup
+        # instead of inferring that an unselected experiment does not exist.
+        directory = {}
+        for chunk in chunks:
+            section_id = chunk.metadata.get("section_id") or chunk.chunk_id
+            row = directory.setdefault(section_id, {
+                "section_id": section_id, "heading": str(chunk.metadata.get("heading") or "")[:240],
+                "chunk_id": chunk.chunk_id, "retained_chunks": 0,
+            })
+            row["retained_chunks"] += 1
         handle = paper_handles.get(record.document_id) or SourceHandle(
-            handle=f"material:{record.document_id}", kind="material", title=record.title,
+            handle=f"material:{record.document_id}",
+            kind="prior_draft" if record.metadata.get("kind") == "prior_draft" else "material", title=record.title,
             paper_id=record.document_id,
         )
         metadata = {**handle.metadata, "document_id": record.document_id,
@@ -348,10 +373,22 @@ def build_material_report_inputs(
                     "extraction_coverage": dict(record.metadata.get("fulltext_extraction", {}).get("coverage", {})),
                     "evidence_role": record.metadata.get("evidence_role") or ("linked_material_not_paper_or_measured_result" if record.metadata.get("kind") == "supporting_material" else "bibliographic_source_not_independently_verified" if record.document_id in paper_handles else "user_supplied_unverified"),
                     "document_chunk_count": len(chunks),
+                    "source_directory": {"sections": list(directory.values())[:80],
+                                         "total_sections": len(directory),
+                                         "truncated": len(directory) > 80},
                     "evidence_passages": passages,
                     "evidence_passages_truncated": (len({row["chunk_id"] for row in passages}) < len(chunks)
                                                      or any(row["truncated"] for row in passages)),
                     "evidence_selection": "structured_overview_and_task_lexical_matches"}
+        if isinstance(payload, dict) and payload.get("schema_version") == "report_experiment_evidence.v1":
+            # Reused records already distinguish declarations and observations.
+            # Preserve that contract instead of requiring prose retrieval to
+            # rediscover it; these are not executions of the current task.
+            from simple_ar.report.execution_evidence import report_execution_evidence
+            saved = ReportContext.model_validate({**payload.get("records", {}),
+                                                 "topic": topic, "report_mode": "experiment"})
+            metadata["evidence_role"] = "supplied_recorded_execution_not_current_task_or_independent_recheck"
+            metadata["recorded_execution_evidence"] = report_execution_evidence(saved)
         handles.append(handle.model_copy(update={"artifact": documents_ref.path,
             "chunk_id": passages[0]["chunk_id"] if passages else "",
             "summary": paper_handles[record.document_id].summary if record.document_id in paper_handles else record.abstract,
@@ -372,19 +409,31 @@ def build_material_report_inputs(
         citation_key_map=_citation_key_map(search.selected_papers),
         evidence_summary=f"Retained source passages from {sum(bool(chunks_by_document.get(record.document_id)) for record in documents.records)} of {len(documents.records)} supplied materials. Method and result assertions remain source-reported.",
         results={"evidence_origin": "user_supplied_unverified", "session_execution": "not_requested"})
+    # Assign linked-material citation identities before joining a saved map;
+    # otherwise the same snapshot gains a second metadata-only paper handle.
+    _attach_linked_document_references(context, documents)
+    handles = list(context.source_handles)
     # Reused drafts need their recorded reference identities, not a BibTeX file
     # treated as prose. Keep this separate from original-source evidence.
-    from simple_ar.core.artifacts import read_json
     from simple_ar.report.citations import references_from_citation_map
     known_ids = {row["id"] for row in context.papers}
     retained_keys = {}
     for record in documents.records:
-        if not record.local_path or Path(record.local_path).suffix.lower() != ".json":
+        code = record.metadata.get("code_analysis")
+        if code is not None:
+            results = code.get("results", {})
+            payload = results.get("citation_map", {}) if isinstance(results, dict) else {}
+        elif record.document_id in json_materials:
+            payload = json_materials[record.document_id]
+        else:
             continue
-        payload = read_json(Path(record.local_path))
         if not isinstance(payload, dict):
             continue
         references, keys = references_from_citation_map(payload)
+        if code is not None:
+            # Producer-local aliases are not a frozen manuscript's citations.
+            # The active report assigns unique keys across analysis packages.
+            keys = {}
         for key, paper_id in keys.items():
             if key in retained_keys and retained_keys[key] != paper_id:
                 raise ReportProjectionError("Reused citation maps have conflicting short keys; use stable paper identities before combining drafts.")
@@ -394,10 +443,14 @@ def build_material_report_inputs(
                 continue
             known_ids.add(paper.id)
             context.papers.append(paper.to_row())
+            if any(handle.paper_id == paper.id for handle in handles):
+                # Bibliographic metadata may describe a linked material that
+                # already has its own text/coverage. Do not promote that input
+                # into a second, metadata-only paper evidence handle.
+                continue
             handles.append(SourceHandle(handle=f"reference:{paper.id}", kind="paper",
                 paper_id=paper.id, title=paper.title, artifact=documents_ref.path,
-                metadata={"document_id": record.document_id,
-                          "evidence_role": "reused_reference_metadata_not_primary_text",
+                metadata={"evidence_role": "reused_reference_metadata_not_primary_text",
                           "document_chunk_count": 0, "evidence_passages": []}))
     # Do not renumber old aliases while their original map is visible to the
     # writer. Assign only unused keys to newly supplied references.
@@ -426,7 +479,6 @@ def build_material_report_inputs(
         limitations.append("Table packages are arithmetically recomputed; code-analysis packages preserve validated script outputs without independent recomputation. Neither certifies data collection, semantics or scientific validity.")
         context.evidence_summary += f" {len(analyses)} supplied analysis package(s) retain results, source inputs and figure encodings. Check each package's evidence_role before describing verification."
     context = context.model_copy(update={"source_handles": handles})
-    _attach_linked_document_references(context, documents)
     return apply_report_bibliography(context, ReportMemory(objective=topic, report_mode=context.report_mode,
                                  source_handles=context.source_handles, limitations=limitations), documents=documents, notes=[])
 
@@ -658,13 +710,19 @@ def apply_report_bibliography(
         if record.metadata.get("paper_id"):
             records.setdefault(str(record.metadata["paper_id"]), record)
     fronts = {section.document_id: section for section in documents.sections if section.section == "front_matter"}
-    by_id = {str(note.get("paper_id")): note for note in notes if isinstance(note, Mapping)}
+    by_id: dict[str, list[Mapping[str, Any]]] = {}
+    for note in notes:
+        if isinstance(note, Mapping):
+            by_id.setdefault(str(note.get("paper_id")), []).append(note)
     rows, origins_by_id = [], {}
     for original in context.papers:
         record = records.get(original["id"])
         row = dict(original)
         if record is not None:
-            row, origins = apply_bibliographic_note(row, record, fronts.get(record.document_id), by_id.get(record.document_id))
+            origins = {}
+            for note in by_id.get(record.document_id, [None]):
+                row, accepted = apply_bibliographic_note(row, record, fronts.get(record.document_id), note)
+                origins.update(accepted)
             if origins:
                 origins_by_id[row["id"]] = origins
         rows.append(row)
@@ -675,7 +733,8 @@ def apply_report_bibliography(
             handles.append(handle)
             continue
         origins = origins_by_id[handle.paper_id]
-        metadata = {**handle.metadata, "bibliographic_sources": origins,
+        metadata = {**handle.metadata,
+                    "bibliographic_sources": {**handle.metadata.get("bibliographic_sources", {}), **origins},
                     **{field: papers[handle.paper_id].get(field) for field in ("authors", "published", "doi", "url")},
                     "bibliography": bibliographic_details(Paper.from_row(papers[handle.paper_id]))}
         if "title" in origins:
@@ -852,20 +911,17 @@ def attach_report_read_evidence(
                         queried.append(dict(row))
             queried_ids = {row["chunk_id"] for row in queried}
             overview = [chunk for chunk in supported if chunk.chunk_id not in queried_ids]
-            # The existing six-window cap is shared, not enlarged. Reserve up
-            # to two slots for saved query hits (the reader interleaves its two
-            # queries); use the existing section-aware policy for the overview.
-            # Either pool can borrow unused slots. This is access sampling, not
-            # semantic support, and omitted passages still require a tool read.
-            selected = select_representative_chunks(overview, max_chunks=6 - min(2, len(queried)))
-            kept_queries = queried[:6 - len(selected)]
-            passages = [*kept_queries, *[
-                {"chunk_id": chunk.chunk_id, "text": chunk.text[:1200],
-                 "truncated": len(chunk.text) > 1200}
-                for chunk in selected
+            # These are already referenced original passages, not an overview
+            # requiring another representative sample. Bound their model view
+            # once in narrative; do not silently detach notes from their sources.
+            passages = [*queried, *[
+                {"chunk_id": chunk.chunk_id, "text": chunk.text,
+                 "truncated": False}
+                for chunk in overview
             ]]
             metadata["evidence_passages"] = passages
-            metadata["evidence_passages_truncated"] = len(queried) + len(overview) > len(passages)
+            metadata["evidence_passages_truncated"] = len({row["chunk_id"] for row in passages}) < len(
+                [chunk for chunk in chunks.values() if chunk.document_id == record.document_id])
         handles.append(
             handle.model_copy(
                 update={"summary": record.abstract or handle.summary, "metadata": metadata,

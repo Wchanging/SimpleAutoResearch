@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -18,6 +19,12 @@ from simple_ar.code_task.runtime.config import load_code_task_init_options, load
 
 
 class StartTests(unittest.TestCase):
+    def setUp(self):
+        # User-global connections must not change offline CLI fixtures.
+        catalog = patch('simple_ar.integrations.model_profiles.load_model_catalog', return_value=None)
+        catalog.start()
+        self.addCleanup(catalog.stop)
+
     def test_document_urls_preserve_literal_input_and_require_confirmed_chat_acquisition(self):
         url = 'https://example.test/paper'
         args = build_parser().parse_args(['start', '--kind', 'reproduction', '--goal', 'Inspect paper',
@@ -48,12 +55,14 @@ class StartTests(unittest.TestCase):
             session.manifest.state_refs['implementation'] = session.store.write_json('implementation.json',
                 {'status': 'validated', 'workspace_dir': str(initialized.workspace_dir), 'code_task_run_dir': str(initialized.run_dir)})
             session.manifest.state_refs['preparation'] = session.store.write_json('prepared.json',
-                {'execution': {'cwd': str(initialized.workspace_dir), 'code_task': {'budget_profile': 'large', 'allow_large_edits': True}}},
+                {'execution': {'cwd': str(initialized.workspace_dir), 'code_task': {'budget_profile': 'large', 'allow_large_edits': True,
+                    'edit_budget_overrides': {'max_new_chars': 32000, 'max_files': 6}}}},
                 kind='prepared_execution')
             session.save()
             before = session.store.resolve('session_manifest.json').read_bytes()
-            self.assertEqual(session_materials(session.store.root)['code_project'], [initialized.workspace_dir.resolve()])
-            args = build_parser().parse_args(['start', '--from-session', str(session.store.root), '--reuse', 'code_project',
+            session_alias = source / '..' / 'old'
+            self.assertEqual(session_materials(session_alias)['code_project'], [initialized.workspace_dir.resolve()])
+            args = build_parser().parse_args(['start', '--from-session', str(session_alias), '--reuse', 'code_project',
                 '--goal', 'Change VALUE to two', '--output-root', str(root / 'new'), '--prepare-only'])
             reuse_session_materials(args)
             self.assertEqual(args.allow, ['main.py'])
@@ -64,8 +73,20 @@ class StartTests(unittest.TestCase):
             self.assertIn('gold/**', settings['edit_scope']['protected_patterns'])
             self.assertEqual(settings['execute']['budget_profile'], 'large')
             self.assertTrue(settings['execute']['allow_large_edits'])
+            self.assertEqual(settings['budget'], {'max_new_chars': 32000, 'max_files': 6})
             self.assertEqual((initialized.workspace_dir / 'main.py').read_text(), 'VALUE = 1\n')
             self.assertEqual(session.store.resolve('session_manifest.json').read_bytes(), before)
+            self.assertNotIn('record each figure', (config.parent / 'task.md').read_text())
+            delivery = session.store.write_json('analysis/analysis.json', {'schema_version': 'code_analysis.v1'})
+            implementation = session.store.read_json(session.manifest.state_refs['implementation'])
+            implementation['artifact_refs'] = {'code_analysis': {'path': delivery.path}}
+            session.manifest.state_refs['implementation'] = session.store.write_json('implementation.json', implementation)
+            session.save()
+            revised = self.prepare('--kind', 'figure', '--from-session', str(session.store.root),
+                '--reuse', 'code_project', '--goal', 'Explain my existing figure',
+                '--output-root', str(root / 'figure-revision'), '--prepare-only')
+            self.assertIn('"path": "outputs/<filename>"', (revised.parent / 'task.md').read_text())
+            self.assertIn('Explain my existing figure', (revised.parent / 'task.md').read_text())
             conflict = build_parser().parse_args(['start', '--from-session', str(session.store.root), '--reuse', 'code_project', '--allow', '**'])
             with self.assertRaisesRegex(ValueError, 'do not override'):
                 reuse_session_materials(conflict)
@@ -131,6 +152,7 @@ class StartTests(unittest.TestCase):
             self.assertIn("data/**", options.edit_scope_protected_patterns)
             self.assertIn("tests/**", options.edit_scope_protected_patterns)
             self.assertEqual(execution.budget_profile, "large")
+            self.assertEqual(execution.edit_budget_overrides, {"max_new_chars": 32000})
             self.assertTrue(execution.allow_large_edits)
             self.assertEqual(execution.baseline_policy, "skip")
             self.assertEqual(defaults["data_path"], [str((source / "data").resolve())])
@@ -221,6 +243,7 @@ class StartTests(unittest.TestCase):
             self.assertEqual((config.parent / "source/data/input.csv").read_bytes(), data.read_bytes())
             self.assertIn("Never infer pairing", (config.parent / "task.md").read_text())
             self.assertIn("one supplied method summary", (config.parent / "task.md").read_text())
+            self.assertIn('"path": "outputs/<filename>"', (config.parent / 'task.md').read_text())
             self.assertFalse((config.parent / "source/outputs").exists())
 
     def test_saved_delivery_reuse_keeps_draft_evidence_and_old_session(self):
@@ -233,15 +256,21 @@ class StartTests(unittest.TestCase):
                 topic="Measured comparison", registry=CapabilityRegistry())
             ref = session.store.write_json("delivery/report.json", {"status": "completed"})
             session.store.write_text("delivery/report_body.md", "# Comparison\nA draft.")
-            session.store.write_json("delivery/report_experiment_evidence.json", {"measured": True})
+            evidence = session.store.write_json("delivery/experiment_evidence.json", {
+                "schema_version": "report_experiment_evidence.v1", "measured": True})
             session.store.write_json("delivery/citation_map.json", {"schema_version": "citation_map.v1", "entries": []})
             session.manifest.state_refs["report"] = ref
             documents = session.store.write_json("sources/document_bundle.json", {
                 "schema_version": "document_bundle.v1", "documents": [], "chunks": []})
             session.manifest.state_refs["documents"] = documents
             current_documents = session.store.write_json("sources/after-reading.json", {
-                "schema_version": "document_bundle.v1", "documents": [], "chunks": []},
+                "schema_version": "document_bundle.v1", "documents": [{"document_id": "retained-source",
+                    "title": "Original source", "source": "local_files", "abstract": "Source text, not draft judgment."},
+                    {"document_id": "legacy-note", "title": "Untyped historical material", "source": "local_files",
+                     "source_id": str(root / 'old-material.txt'), "abstract": "Old derived judgment."}], "chunks": []},
                 kind="document_bundle", schema="document_bundle.v1")
+            session.manifest.state_refs['assets'] = session.store.write_json('inputs/assets.json',
+                {'assets': [{'role': 'material', 'locator': str(root / 'old-material.txt')}]})
             session.store.write_json("writing/report_inputs.json", {"sources": [current_documents.to_dict()]})
             session.manifest.state_refs["writer"] = session.store.write_json("writing/writer.json", {
                 "input_snapshot": {"path": "report_inputs.json"}})
@@ -260,6 +289,7 @@ class StartTests(unittest.TestCase):
                 self.prepare("--from-session", str(session.store.root), "--reuse", "code_project",
                     "--goal", "Revise the retired project", "--prepare-only")
             self.assertEqual(len(files), 4)
+            self.assertIn(session.store.resolve(evidence).resolve(), files)
             self.assertIn(session.store.resolve(current_documents).resolve(), files)
             self.assertNotIn(session.store.resolve(documents).resolve(), files)
             config = self.prepare("--from-session", str(session.store.root), "--reuse", "report",
@@ -269,7 +299,42 @@ class StartTests(unittest.TestCase):
             self.assertEqual(defaults["report_outline_strategy"], "adaptive")
             self.assertEqual(defaults["report_draft_scope"], "document")
             self.assertIn("Reorganize the argument", config.read_text())
-            self.assertEqual(set(defaults["material"]), {str(path) for path in files})
+            selected = set(defaults["material"])
+            self.assertEqual(selected - {str(path) for path in files}, {str(config.parent / "reused-draft-1.json")})
+            self.assertNotIn(str(files[0]), selected)
+            draft = json.loads((config.parent / "reused-draft-1.json").read_text())
+            self.assertEqual(draft['documents'][0]['metadata']['kind'], 'prior_draft')
+            followup = self.prepare("--kind", "survey", "--from-session", str(session.store.root),
+                "--reuse", "report", "--goal", "Investigate a new question using relevant original sources",
+                "--output-root", str(root / "followup"), "--prepare-only")
+            followup_defaults = research_defaults(["research-session", "--config", str(followup)])
+            self.assertEqual(followup_defaults["task_kind"], "survey")
+            self.assertFalse(tomllib.loads(followup.read_text())["research"]["materials_only"])
+            self.assertEqual(followup_defaults["material"], [str(followup.parent / 'reused-sources-1.json')])
+            filtered = json.loads((followup.parent / 'reused-sources-1.json').read_text())
+            self.assertEqual([r['document_id'] for r in filtered['documents']], ['retained-source'])
+            self.assertEqual(len(session.store.read_json(current_documents)['documents']), 2)
+            self.assertFalse(list(followup.parent.glob("reused-draft-*.json")))
+            from simple_ar.research.documents.ingest import DocumentIngestRequest, DocumentBundle, run_document_ingest_capability
+            from simple_ar.research.contracts import SourcePlan
+            from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
+            from simple_ar.report.projection import build_material_report_inputs
+            from types import SimpleNamespace
+            package = config.parent / 'reused-draft-1.json'
+            ingest = CapabilityContext(ArtifactStore(config.parent / 'ingested'), AttemptManifest('ingest'))
+            result = run_document_ingest_capability(context=ingest, request=DocumentIngestRequest(
+                papers=(), source_plan=SourcePlan(queries=['local'], sources=['local_files'], local_documents=[str(package)]),
+                extraction_dir=config.parent / 'extracted', analysis_paths=(package,)))
+            documents = next(ref for ref in result.artifacts if ref.schema == 'document_bundle.v1')
+            retained = DocumentBundle.from_handoff_dict(ingest.store.read_json(documents))
+            projected, _ = build_material_report_inputs(topic='Reorganize the argument', documents=retained,
+                documents_ref=documents, assets=[SimpleNamespace(locator=str(package), role='material')])
+            self.assertEqual(projected.source_handles[0].kind, 'prior_draft')
+            self.assertEqual(projected.source_handles[0].metadata['evidence_role'], 'prior_draft_not_primary_evidence')
+            self.assertEqual(projected.papers, [])
+            from simple_ar.cli.intake_dialogue import _arguments
+            from argparse import Namespace
+            self.assertEqual(_arguments(Namespace(_reuse_report_drafts=[str(files[0])]))['_reuse_report_drafts'], [str(files[0])])
             self.assertEqual((session.store.root / "session_manifest.json").read_bytes(), original)
             with self.assertRaisesRegex(ValueError, "No current reusable"):
                 self.prepare("--from-session", str(session.store.root), "--reuse", "data_analysis",
@@ -321,7 +386,10 @@ class StartTests(unittest.TestCase):
             paper.write_text('A supplied conclusion.')
             data = root / 'data'
             data.mkdir()
+            notes = root / 'previous-observations.json'
+            notes.write_text('{"status":"partial","scope_complete":false}')
             common = ['--kind', 'reproduction', '--goal', 'Check conclusion', '--document', str(paper),
+                      '--material', str(notes),
                       '--cwd', str(root), '--data-path', str(data), '--data-path', str(data),
                       '--hypothesis', 'Declared claim', '--dataset', 'Explicit directory; split unspecified',
                       '--expected-outcome', 'Compare score', '--metric', 'score',
@@ -329,6 +397,7 @@ class StartTests(unittest.TestCase):
             config = self.prepare(*common, '--command', 'python', 'run.py')
             defaults = research_defaults(['research-session', '--config', str(config)])
             self.assertEqual(defaults['data_path'], [str(data.resolve())])
+            self.assertEqual(defaults['material'], [str(notes.resolve())])
             self.assertEqual(defaults['command_argv'], ['python', 'run.py'])
             facts = json.loads((config.parent / 'preparation.json').read_text())
             self.assertEqual(facts['data_paths'][0]['kind'], 'directory')
@@ -401,6 +470,7 @@ class StartTests(unittest.TestCase):
             self.assertNotIn("review_scope", settings)
 
     def test_resume_hint_preserves_the_selected_model(self):
+        from simple_ar.integrations.model_profiles import ModelCatalog
         with tempfile.TemporaryDirectory() as directory:
             for model in ("env", "custom-model"):
                 with self.subTest(model=model):
@@ -411,6 +481,22 @@ class StartTests(unittest.TestCase):
                     self.assertEqual(research_defaults(["research-session", "--config", str(config)])["model"], model)
                     resume_hint = next(call.args[0] for call in output.call_args_list if "resume its printed path" in call.args[0])
                     self.assertIn(f"--model {model}", resume_hint)
+            catalog = ModelCatalog.model_validate({"profiles": {
+                name: {"api": "openai_chat", "base_url": "https://example.test/v1", "model": name,
+                       "api_key_env": "TEST_ABSENT_KEY", "capabilities": ["text"], "stream": True,
+                       "request_timeout_sec": 600.0}
+                for name in ("first", "second")}, "routes": {"default": "first"}})
+            for explicit, reply, expected in (("env", "2", "second"), ("profile:first", None, "first")):
+                args = build_parser().parse_args(["start", "--kind", "survey", "--goal", "Compare [methods]",
+                    "--sources", "search", "--model", explicit, "--output-root", directory, "--prepare-only"])
+                with patch('simple_ar.integrations.model_profiles.load_model_catalog', return_value=catalog), \
+                     patch('sys.stdin.isatty', return_value=True), patch('builtins.input', return_value=reply) as prompt, \
+                     contextlib.redirect_stdout(io.StringIO()) as output:
+                    config = prepare_start(args)
+                self.assertEqual(research_defaults(['research-session', '--config', str(config)])['model'], f'profile:{expected}')
+                self.assertIn('600s', output.getvalue())
+                self.assertIn('Compare [methods]', output.getvalue())
+                self.assertEqual(prompt.call_count, 1 if reply is not None else 0)
 
     def test_data_setup_reports_columns_and_rejects_bad_shape_before_saving(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -99,6 +99,8 @@ class IntakeDialogueTests(unittest.TestCase):
             fetch.assert_not_called()
             self.assertEqual(restored.document, resolved.document)
             self.assertEqual(restored.paper_sources, resolved.paper_sources)
+            self.assertFalse(resolved.fulltext)
+            self.assertFalse(restored.fulltext)
             # Follow an inspected official page through the same document owner,
             # without adopting it as executable project/data or refetching on restore.
             from simple_ar.cli.intake_dialogue import _adopt_acquisition
@@ -121,7 +123,10 @@ class IntakeDialogueTests(unittest.TestCase):
             with patch('simple_ar.research.preparation_assets.public_document_response', return_value=response) as fetch:
                 self.assertTrue(_adopt_acquisition(resolved, state, acquired, root=support_root, ledger=ledger))
                 self.assertTrue(_adopt_acquisition(resolved, state, acquired, root=support_root, ledger=ledger))
-            fetch.assert_called_once_with(instructions, max_bytes=20 * 1024 * 1024)
+            fetch.assert_called_once()
+            self.assertEqual(fetch.call_args.args, (instructions,))
+            self.assertEqual(fetch.call_args.kwargs['max_bytes'], 20 * 1024 * 1024)
+            self.assertTrue(callable(fetch.call_args.kwargs['on_redirect']))
             self.assertEqual(len(ledger.entries), 1)
             self.assertEqual(ledger.entries[0].status, 'settled')
             self.assertEqual(ledger.entries[0].actual['download_requests'], 1)
@@ -137,7 +142,12 @@ class IntakeDialogueTests(unittest.TestCase):
             self.assertFalse((root / 'run.py').exists())  # Neither install nor execution.
 
     def test_paper_url_requires_read_consent_and_redirected_pdf_requires_separate_permission(self):
-        url = 'https://example.test/paper'
+        url = 'https://example.test/paper?id=public-paper-17&version=2'
+        from simple_ar.research.preparation_assets import validate_public_url
+        self.assertEqual(validate_public_url(url), url)
+        for private in ('?api_key=secret', '?access-token=secret', '?X-Amz-Signature=secret'):
+            with self.subTest(private=private), self.assertRaises(ValueError):
+                validate_public_url('https://example.test/paper' + private)
         for approved in (False, True):
             with self.subTest(approved=approved), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
@@ -160,7 +170,7 @@ class IntakeDialogueTests(unittest.TestCase):
                     self.assertEqual(manifest['documents'][0]['hints'][0]['reason'], 'pdf_download_disabled')
                     resumed = self.args(root, '--resume-setup', str(self.draft(root).parent))
                     with patch('simple_ar.research.documents.fulltext.urllib.request.urlopen') as retry:
-                        self.assertIsNone(self.converse(resumed, Client(), []))
+                        self.assertIsNone(self.converse(resumed, Client(), ['n']))
                     retry.assert_not_called()
 
     def test_paper_url_interruption_is_retained_without_refetch(self):
@@ -173,11 +183,22 @@ class IntakeDialogueTests(unittest.TestCase):
             state = {'paper_acquisitions': [entry]}
             write_json(root / 'paper_acquisitions' / '1' / 'receipt.json', {**entry, 'status': 'started'})
             with patch('simple_ar.research.documents.fulltext.urllib.request.urlopen') as fetch, \
-                 patch('simple_ar.cli.intake_dialogue.print_line'):
+                 patch('simple_ar.cli.intake_dialogue.print_line'), patch('builtins.input', return_value='n'):
                 self.assertFalse(_adopt_paper_url(args, state, entry, root=root))
             fetch.assert_not_called()
             self.assertEqual(entry['receipt']['status'], 'started')
             self.assertEqual(args.document, [])
+            receipt = (root / 'paper_acquisitions' / '1' / 'receipt.json').read_bytes()
+            with patch('simple_ar.research.documents.fulltext.urllib.request.urlopen') as fetch, \
+                 patch('simple_ar.cli.intake_dialogue.print_line'), patch('builtins.input', return_value='y'):
+                self.assertTrue(_adopt_paper_url(args, state, entry, root=root))
+                self.assertTrue(_adopt_paper_url(args, state, entry, root=root))
+            fetch.assert_not_called()
+            self.assertTrue(entry['skipped'])
+            self.assertFalse(entry.get('adopted', False))
+            self.assertEqual(args.document, [])
+            self.assertEqual((root / 'paper_acquisitions' / '1' / 'receipt.json').read_bytes(), receipt)
+            self.assertIn('not source evidence', state['user_messages'][-1])
 
     def test_method_figure_dialogue_requires_no_fabricated_dataset(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -232,9 +253,18 @@ class IntakeDialogueTests(unittest.TestCase):
         facts = {'paper_previews': [{'source_path': 'paper.md', 'text': 'Implementation: ' + url}]}
         validated = validate_proposal(proposal('reproduction', acquisition_proposal=request), args, set(), facts=facts)
         self.assertEqual(validated['acquisition_proposal'], request)
-        with self.assertRaises(ValueError):
+        selected = validate_proposal(proposal('reproduction', acquisition_proposal={**request,
+            'basis': [{'path': 'paper.md'}]}), args, set(), facts=facts)
+        self.assertEqual(selected['acquisition_proposal'], request)
+        with self.assertRaisesRegex(ValueError, 'Acquisition URL'):
             validate_proposal(proposal('reproduction', acquisition_proposal={**request,
-                'basis': [{'path': 'paper.md'}]}), args, set(), facts=facts)
+                'url': url + '-other', 'basis': [{'path': 'paper.md'}]}), args, set(), facts=facts)
+        wrapped = {'paper_previews': [{'source_path': 'paper.md',
+            'text': 'Footnote: https://github.com/example/\nresearch\nPDF hyperlink targets: ' + url}]}
+        selected = validate_proposal(proposal('reproduction', acquisition_proposal={**request,
+            'basis': [{'path': 'paper.md', 'quote': 'https://github.com/example/\nresearch'}]}),
+            args, set(), facts=wrapped)
+        self.assertEqual(selected['acquisition_proposal'], request)
         for changes in ({'url': 'http://example.org/archive.zip'}, {'url': 'https://user:secret@example.org/archive.zip'},
                         {'destination': '/outside'}, {'role': 'script'}, {'basis': [{'path': 'unread.md', 'quote': url}]}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -340,6 +370,21 @@ class IntakeDialogueTests(unittest.TestCase):
                 self.assertTrue(row['text_truncated'])
                 self.assertNotIn('UNSHOWN TAIL', row['text'])
                 self.assertNotIn('must not be disclosed', row['text'])
+            material = root / 'observations.json'
+            material.write_text('{"status":"partial","observations":[0.2,0.4]}')
+            args.document = [material]
+            rejected = _asset_preview(args)['paper_previews'][0]
+            self.assertEqual(rejected['reason'], 'unsupported_document_suffix')
+            args.document = []
+            args.material = [material]
+            facts = _asset_preview(args, saved_previews=[rejected])
+            view = facts['paper_previews'][0]
+            self.assertEqual(view['input_role'], 'material')
+            self.assertIn('"status":"partial"', view['text'])
+            self.assertIn('not a full-paper reading or verified result', view['limitations'])
+            validate_proposal(proposal('reproduction', material_read_requests=[{
+                'path': str(material.resolve()), 'query': 'Which observations are recorded?'}]),
+                args, set(), facts=facts)
 
     def test_pdf_preview_uses_document_parser_and_preserves_page_coverage_and_failure(self):
         from simple_ar.cli.intake_dialogue import _asset_preview
@@ -702,7 +747,9 @@ class IntakeDialogueTests(unittest.TestCase):
             client = Client(proposal(questions=["What does each row mean and are timings matched?"]),
                             proposal(options=settings))
             reply = "One row is one matched run; old and new are times in seconds."
-            resolved = self.converse(args, client, [reply, "y"])
+            with patch('simple_ar.cli.intake_dialogue.LLMClient.from_env', return_value=client) as factory:
+                resolved = self.converse(args, None, [reply, "y"])
+            self.assertNotIn('max_output_tokens', factory.call_args.kwargs)
             self.assertEqual(len(client.requests), 2)
             self.assertEqual(client.requests[0]["assets"]["data_preview"]["columns"], ["group", "old", "new"])
             self.assertIn(reply, resolved.goal)
@@ -720,18 +767,34 @@ class IntakeDialogueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             args = self.args(root)
-            first = Client(proposal("survey", options={"sources": "search"}))
+            first = Client(proposal("survey", options={"sources": "search"}, questions=['Prefer this scope or another?']))
             self.assertIsNone(self.converse(args, first, ["stop"]))
             draft = self.draft(root)
             ledger = draft.parent / "setup_budget.json"
             old = ledger.read_bytes()
             resumed = self.args(root, "--resume-setup", str(draft.parent))
             no_calls = Client()
-            result = self.converse(resumed, no_calls, ["y"])
+            result = self.converse(resumed, no_calls, ["accept-proposal"])
             self.assertEqual(result.kind, "survey")
             self.assertEqual(len(no_calls.requests), 0)
             self.assertEqual(ledger.read_bytes(), old)
             self.assertEqual(len(read_json(draft)["proposals"]), 1)
+            self.assertIn('Unanswered factual questions remain unknown', result.goal)
+            self.assertEqual(read_json(draft)['proposals'][0]['questions'], ['Prefer this scope or another?'])
+            from simple_ar.core.artifacts import write_json
+            stopped = read_json(draft)
+            stopped['status'] = 'discussing'
+            write_json(draft, stopped)
+            budget = read_json(ledger)
+            budget['limits']['llm_requests'] = 0
+            write_json(ledger, budget)
+            before = ledger.read_bytes()
+            offline = Client()
+            again = self.converse(self.args(root, '--resume-setup', str(draft.parent)), offline,
+                                  ['review', 'accept-proposal'])
+            self.assertEqual(again.kind, 'survey')
+            self.assertEqual(offline.requests, [])
+            self.assertEqual(ledger.read_bytes(), before)
 
     def test_accepting_saved_proposal_does_not_require_model_connection(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -946,6 +1009,11 @@ class IntakeDialogueTests(unittest.TestCase):
                 'basis': [{'path': 'README.md', 'quote': 'python run.py --data values.csv'},
                           {'path': 'README.md', 'quote': 'python check.py'}]}
             args.goal += f' Use existing Python {sys.executable}'
+            facts = {'project_preparation': {'dependency_probe': {'python_requirement': {
+                'declared': '>=999', 'matches_inspecting_python': False}}}}
+            with self.assertRaisesRegex(ValueError, 'compatible human-named interpreter'):
+                validate_proposal(proposal('reproduction', options={'environment': 'venv'},
+                    execution_proposal=execution), args, set(), facts=facts)
             client = Client(proposal('reproduction', assets=[{'role': 'python', 'path_quote': sys.executable}]),
                             proposal('reproduction', execution_proposal=execution))
             with patch('subprocess.run', side_effect=AssertionError('setup must not execute')):
@@ -1138,6 +1206,11 @@ class IntakeDialogueTests(unittest.TestCase):
             accepted = validate_proposal(proposal('reproduction', options={'environment': 'venv'},
                 execution_proposal=adapter), args, set(), facts=adapter_facts)
             self.assertEqual(accepted['options']['environment'], 'venv')
+            # Source-defined invocation does not require a prose README role.
+            source_only = {**adapter, 'basis': [{'path': 'run.py'}]}
+            source_facts = {'project_preparation': {'excerpts': [adapter_facts['project_preparation']['excerpts'][1]]}}
+            self.assertEqual(validate_proposal(proposal('reproduction', execution_proposal=source_only),
+                args, set(), facts=source_facts)['execution_proposal']['basis'], source_only['basis'])
             with self.assertRaises(ValueError):
                 validate_proposal(proposal('reproduction', options={'environment': 'venv', 'install_project': True},
                     execution_proposal=adapter), args, set(), facts=adapter_facts)
@@ -1161,7 +1234,7 @@ class IntakeDialogueTests(unittest.TestCase):
             (root / 'run.py').write_text("if __name__ == '__main__':\n    pass\n")
             (root / 'metrics.py').write_text("OUTPUT_NAME = 'coverage'\n")
             args = self.args(root, '--kind', 'reproduction', '--project', str(root))
-            first = Client(proposal('reproduction', read_requests=['metrics.py']),
+            first = Client(proposal('reproduction', read_requests=[{'path': 'metrics.py'}]),
                            proposal('reproduction', questions=['Which published conclusion?']))
             self.assertIsNone(self.converse(args, first, ['stop']))
             self.assertEqual(len(first.requests), 2)

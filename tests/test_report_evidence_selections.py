@@ -91,17 +91,29 @@ class EvidenceSelectionTests(unittest.TestCase):
         self.assertEqual(direct, selected)
 
     def test_direct_field_selection_preserves_scalars_and_declared_ownership(self):
-        view = {"metric_sources": {"missing": None, "enabled": False, "delta": -0.5},
+        view = {"metric_sources": {"missing": None, "enabled": False, "delta": -0.5, "unit": ""},
+            "delivery_text_observation": {"references": {"markdown": ""}},
             "objective": "Claimed condition, not an observation."}
         for pointer, value, role in (
             ("/metric_sources/missing", "null", "registered_result"),
             ("/metric_sources/enabled", "false", "registered_result"),
             ("/metric_sources/delta", "-0.5", "registered_result"),
+            ("/metric_sources/unit", "", "registered_result"),
+            ("/delivery_text_observation/references/markdown", "", "derived_context"),
             ("/objective", view["objective"], "declaration"),
         ):
             with self.subTest(pointer=pointer):
                 quote, _ = self.resolve({"pointer": pointer}, view)
                 self.assertEqual((quote.quote, quote.role, quote.mode), (value, role, "field_reference"))
+                if value == "":
+                    view["evidence_locator"] = review_evidence_locator(view)
+                    self.assertEqual(self.resolve({"anchor": select(view, role, pointer)}, view)[0], quote)
+                    restored = ReportEvidenceQuote.model_validate(quote.model_dump(mode="json"))
+                    validate_evidence_quotes([restored], view)
+                    with self.assertRaises(LLMResponseError):
+                        self.resolve({"pointer": pointer, "quote": "", "role": role}, view)
+                    with self.assertRaises(LLMResponseError):
+                        validate_evidence_quotes([restored.model_copy(update={"quote": "invented"})], view)
 
     def test_direct_pointer_does_not_repair_a_quote_or_select_unknown_containers(self):
         view = self.view()

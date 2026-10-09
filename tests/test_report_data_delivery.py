@@ -116,9 +116,12 @@ class DataDeliveryTests(unittest.TestCase):
                                "data/input.csv": "value\n2\n", "tests/verify_delivery.py": "# retained verifier",
                                "outputs/figure.png": "PNG fixture", "outputs/figure.svg": "<svg/>"}.items():
                 write_text(project / name, text)
-            write_json(project / "outputs/results.json", {"observations": [2]})
+            caption = 'Observed values (units); marks show the supplied records.'
+            write_json(project / "outputs/results.json", {"observations": [2], 'figures': [
+                {'path': 'outputs/figure.svg', 'caption': caption}]})
             package = root / "package"
             recorded = copy_code_analysis_package(project, package, workspace=True)
+            self.assertEqual(recorded['figures'][0]['caption'], caption)
             # Output shape follows the task, including tables without a plot
             # and several separately named figures. Legacy figure.* stays valid.
             (project / "outputs/figure.png").unlink()
@@ -130,7 +133,13 @@ class DataDeliveryTests(unittest.TestCase):
             copy_code_analysis_package(root / "tabular/analysis.json", root / "tabular-moved")
             for name in ("left.svg", "right.png", "right.pdf"):
                 write_text(project / "outputs" / name, "attachment fixture")
+            write_json(project / "outputs/results.json", {'observations': [2], 'figures': [
+                'outputs/left.svg',
+                {'path': 'outputs/right.pdf', 'caption': 'Alternate-format authored caption.'},
+                {'path': '../unregistered.svg', 'caption': 'Must not attach.'}]})
             multi = copy_code_analysis_package(project, None, workspace=True)
+            self.assertEqual([row['caption'] for row in multi['figures']],
+                ['Figure: left.', 'Alternate-format authored caption.'])
             self.assertEqual({row["path"] for row in multi["figures"]},
                              {"outputs/left.svg", "outputs/right.png"})
             self.assertEqual(next(row for row in multi["figures"] if row["path"].endswith("right.png"))["exports"],
@@ -155,6 +164,7 @@ class DataDeliveryTests(unittest.TestCase):
             self.assertIn("did not independently recompute", block["markdown"])
             self.assertNotIn("Arithmetic was rechecked", block["markdown"])
             self.assertIn("outputs/figure.png", block["markdown"])
+            self.assertIn(caption, block['markdown'])
             registry = CapabilityRegistry()
             registry.register("report", run_report_capability)
             controller = SessionController.create(root / "session", session_id="script-report", topic="Supplied results",
@@ -165,6 +175,12 @@ class DataDeliveryTests(unittest.TestCase):
             from simple_ar.research.contracts import SourcePlan
             from simple_ar.report.projection import build_material_report_inputs
             registry.register("document_ingest", run_document_ingest_capability)
+            citation_map = {"schema_version": "citation_map.v1", "entries": [{
+                "paper_id": "recorded-dataset", "model_key": "P1", "title": "Recorded input dataset",
+                "url": "https://example.test/data", "bibliography": {"authors": [], "year": "", "doi": ""}}]}
+            results_path = moved / "outputs/results.json"
+            results_path.write_text(json.dumps({**json.loads(results_path.read_text()), "citation_map": citation_map,
+                "stratified": {"control": {"mean": 1}, "comparison": {"mean": 2}}}))
             acquired = controller.execute_attempt("document_ingest", attempt_id="ingest-1", request=DocumentIngestRequest(
                 papers=(), source_plan=SourcePlan(queries=["supplied results"], sources=["local_files"],
                     local_documents=[str(moved / "analysis.json")]), extraction_dir=root / "extract",
@@ -177,7 +193,23 @@ class DataDeliveryTests(unittest.TestCase):
             projected, _ = build_material_report_inputs(topic="Interpret existing results", documents=documents,
                                                         documents_ref=document_ref, assets=[])
             self.assertEqual(projected.results["supplied_analyses"][0]["schema_version"], "code_analysis.v1")
+            self.assertEqual(projected.citation_key_map, {"P1": "recorded-dataset"})
+            self.assertEqual(projected.papers[0]["title"], "Recorded input dataset")
+            self.assertEqual(projected.papers[0]["authors"], [])
+            reference = next(h for h in projected.source_handles if h.handle == 'reference:recorded-dataset')
+            self.assertNotIn('document_id', reference.metadata)
+            projected_plan = memory.document_plan.model_copy(deep=True)
+            projected_plan.sections[0].evidence_handles = [projected.source_handles[0].handle]
+            projected_plan.visual_intents[0].evidence_handles = [projected.source_handles[0].handle]
+            projected_delivery = supplied_data_delivery(projected, config=config, plan=projected_plan,
+                section_ids=[section.section_id])[0]
+            self.assertIn('analyses/analysis-001/outputs/figure.png', projected_delivery['markdown'])
+            self.assertIn(caption, projected_delivery['markdown'])
             self.assertIn("observations", " ".join(row.text for row in documents.chunks))
+            numeric = next(row for row in documents.sections if row.heading == "Recorded script outputs: stratified")
+            self.assertEqual(json.loads(numeric.text), {"stratified": {"control": {"mean": 1}, "comparison": {"mean": 2}}})
+            self.assertTrue(numeric.source_path.endswith("outputs/results.json"))
+            self.assertTrue(any(row.metadata.get("heading") == numeric.heading for row in documents.chunks))
             compact = _compact_execution_results(projected.results)
             self.assertEqual(compact["supplied_analyses"][0]["evidence_role"],
                              "validated_script_output_not_independently_recomputed")
@@ -188,6 +220,8 @@ class DataDeliveryTests(unittest.TestCase):
                     config=config, document_plan=memory.document_plan, table_analyses=(supplied,),
                     analysis_handles={supplied.path: "material:data"}), inputs=(supplied,))
             self.assertEqual(result_delivery.status, "completed", result_delivery.diagnostics)
+            delivered_text = controller.store.resolve('attempts/report-1/report.md').read_text()
+            self.assertIn(caption, delivered_text)
             figure_paths = [row.path for row in result_delivery.artifacts if row.kind == "figure"]
             self.assertEqual({Path(path).suffix for path in figure_paths}, {".png", ".svg"})
             attachments = [row for row in result_delivery.artifacts if row.kind == "analysis_attachment"]

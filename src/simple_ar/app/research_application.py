@@ -48,7 +48,7 @@ from simple_ar.research.brief import evidence_pack_from_read
 from simple_ar.research.assessment import IdeaAssessmentRequest
 from simple_ar.research.design import ResearchDesignRequest
 from simple_ar.research.documents.ingest import DocumentBundle, DocumentIngestRequest
-from simple_ar.research.evidence.reader import ReadRequest, ReadResult, new_source_queries, linked_material_records
+from simple_ar.research.evidence.reader import ReadRequest, ReadResult, new_source_queries, linked_material_records, _read_screening_mode
 from simple_ar.research.planning.capability import (
     ResearchPlanRequest,
     ResearchPlanResult,
@@ -648,7 +648,11 @@ class ResearchApplication:
             pending_after_mode_change and prepared is None and answer is None
         )
         authorization_only = (
-            self.controller.manifest.status == "completed" and prepared is None
+            (self.controller.manifest.status == "completed" or (
+                has_additional_budget and self.controller.manifest.status in {"paused", "blocked", "failed"}
+                and self._next_action() is None
+                and not (isinstance(gate, Mapping) and gate.get("status") == "pending")
+            )) and prepared is None
             and (answer is None or settled_answer_replay)
             and not interaction_changed and not report_config_changed
         )
@@ -1419,7 +1423,7 @@ class ResearchApplication:
         # acquisition: known selected evidence precedes speculative followups.
         papers = self._load_search().selected_papers if has_search else ()
         analysis_paths = tuple(Path(asset.locator) for asset in self.assets
-            if self._task_kind() == "writing" and asset.role == "material" and Path(asset.locator).suffix.lower() == ".json")
+            if self._task_kind() in {"writing", "survey"} and asset.role == "material" and Path(asset.locator).suffix.lower() == ".json")
         if self._task_kind() == "data_analysis" and "data_analysis" in self.controller.manifest.state_refs:
             analysis_paths = (self.controller.store.resolve(self.controller.manifest.state_refs["data_analysis"]),)
         if self.services.message_callback:
@@ -1434,6 +1438,7 @@ class ResearchApplication:
                 cache_dir=self._cache_dir("literature"), extraction_dir=self._extraction_dir(),
                 max_chunks=self.services.max_chunks,
                 analysis_paths=analysis_paths,
+                original_sources_only=self._task_kind() == "survey",
             ), self._input_refs("task_plan" if self._task_kind() == "data_analysis" else "plan", "search" if has_search else "assets",
                 *(("data_analysis",) if self._task_kind() == "data_analysis" else ())), allow_partial=True,
         )
@@ -1462,6 +1467,8 @@ class ResearchApplication:
                 config=self._effective_config(), use_llm=self.services.llm_client is not None,
                 llm_client=self.services.llm_client,
                 emit=self.services.message_callback,
+                source_selection=self._load_search().coverage_report.get("semantic_selection")
+                    if "search" in self.controller.manifest.state_refs else None,
             ), self._input_refs("plan", "documents"), allow_partial=True,
         )
 
@@ -1482,7 +1489,13 @@ class ResearchApplication:
         if "evidence_followup_context_1" in self.controller.manifest.state_refs:
             frozen = self._state_payload("evidence_followup_context_1")
             return plan, documents, previous, tuple(frozen["queries"]), frozen["remaining_documents"]
-        return plan, documents, previous, queries[:max(0, total - len(used))], max(0, self._search_limit(plan) - len(documents.records))
+        # Ingest records the current acquisition pool before merging supplied
+        # bundles. Reused source text must not spend the reserved new-source
+        # slots a second time; it is not a fresh retrieval or fetch.
+        acquired = documents.fulltext_manifest.get("document_count", len(documents.records))
+        if type(acquired) is not int or acquired < 0:
+            acquired = len(documents.records)
+        return plan, documents, previous, queries[:max(0, total - len(used))], max(0, self._search_limit(plan) - acquired)
 
     def _supporting_evidence_records(self, plan, documents, previous, remaining):
         from simple_ar.research.contracts import DocumentRecord
@@ -1521,7 +1534,8 @@ class ResearchApplication:
         extended = insert_evidence_followup(task, round_index=1, read_state="read", queries=queries or tuple(r.url for r in supporting))
         refs["evidence_followup_context_1"] = self.controller.store.write_json(
             "planning/evidence_followup_context_1.json", {"queries": list(queries),
-                "supporting_records": [r.to_row() for r in supporting], "remaining_documents": remaining},
+                "supporting_records": [r.to_row() for r in supporting], "remaining_documents": remaining,
+                "joint_selection": True},
             kind="step_context", producer="research_application")
         refs["task_plan"] = self.controller.store.write_json(
             "planning/task_plan-evidence-1.json", extended.to_handoff_dict(),
@@ -1541,6 +1555,7 @@ class ResearchApplication:
             self.controller.save()
         supporting = self._supporting_evidence_records(plan, documents, previous, remaining)
         refs = self.controller.manifest.state_refs
+        joint_selection = bool(self._state_payload("evidence_followup_context_1").get("joint_selection"))
         if action == "search_evidence:1":
             if not queries:
                 from simple_ar.core.capabilities import CapabilityResult
@@ -1558,11 +1573,26 @@ class ResearchApplication:
             return self._execute("search", "search_evidence_1",
                 replace(self._search_request(plan), queries=queries, stop_after_papers=None),
                 self._input_refs("plan", "read", "search", "evidence_followup_context_1"), registry=self._provider_registry(),
-                emit=self.services.message_callback, allow_partial=True)  # No metadata expansion policy.
+                emit=self.services.message_callback,
+                selection_policy=SearchSelectionPolicy(
+                    topic=self.controller.manifest.topic, questions=plan.questions,
+                    query_plan=replace(plan.query_plan, queries=list(queries), max_rounds=1,
+                                       auto_expansion=False),
+                    max_documents=max(1, remaining if joint_selection else remaining - len(supporting)),
+                ),
+                linked_records=supporting if joint_selection else (),
+                excluded_paper_keys=frozenset(paper_identity_key(p)
+                    for p in provided_materials_result(documents.records).papers),
+                allow_partial=True)  # Select actual gaps without another metadata expansion round.
         if action == "ingest_evidence:1":
             search = SearchResult.from_handoff_dict(self._state_payload("search_evidence_1"))
+            if joint_selection and queries:
+                selected = {paper_identity_key(p) for p in search.selected_papers}
+                supporting = tuple(record for record in supporting
+                    if paper_identity_key(provided_materials_result([record]).papers[0]) in selected)
             old = provided_materials_result(documents.records).papers
             seen = {paper_identity_key(p) for p in old}
+            seen.update(paper_identity_key(p) for p in provided_materials_result(supporting).papers)
             ids = {r.document_id for r in documents.records}
             papers = []
             for paper in (search.selected_papers if search.selection_rows else search.papers):
@@ -1591,7 +1621,9 @@ class ResearchApplication:
             ReadRequest(bundle=fresh, previous=previous, topic=self.controller.manifest.topic,
                 problem_markdown=self._problem_markdown(), research_plan_json=json.dumps(plan.to_handoff_dict(), ensure_ascii=False),
                 config=self._effective_config(), use_llm=bool(fresh.chunks) and self.services.llm_client is not None,
-                llm_client=self.services.llm_client, emit=self.services.message_callback),
+                llm_client=self.services.llm_client, emit=self.services.message_callback,
+                source_selection=SearchResult.from_handoff_dict(
+                    self._state_payload("search_evidence_1")).coverage_report.get("semantic_selection")),
             (refs["read"], refs["documents"], refs["documents_evidence_1"], refs["plan"]), allow_partial=True)
 
     def _empty_evidence_ingest(self, state: str, attempt_id: str, result: Any) -> bool:
@@ -4771,7 +4803,7 @@ class ResearchApplication:
             # checkpoint and therefore has no delivery steps yet. Do not
             # mistake that bounded checkpoint for a report revision or loop
             # the same short plan before the design is accepted.
-            execution_checkpoint = self._requires_execution_output() and (
+            execution_checkpoint = self._task_kind() not in {"bug_fix", "measurement", "reproduction"} and self._requires_execution_output() and (
                 not isinstance(self._execution_config().get("execution"), Mapping)
                 or "design" not in self.controller.manifest.state_refs
                 or not isinstance(self._state_payload("design").get("contract"), Mapping)
@@ -5064,7 +5096,10 @@ class ResearchApplication:
             config["research_sources"] = ["local_files"]
             config["research_allow_pdf_download"] = False
         if local_documents:
-            config.setdefault("research_sources", ["local_files"])
+            # Supplied sources supplement an explicitly online investigation.
+            # Preserve the legacy local-only default when search was not requested.
+            if config.get("research_materials_only") is not False:
+                config.setdefault("research_sources", ["local_files"])
             config["research_local_documents"] = [str(path) for path in local_documents]
             config.setdefault("research_use_fulltext", True)
             config.setdefault("research_allow_pdf_download", False)
@@ -5294,6 +5329,11 @@ class ResearchApplication:
             search_request_from_plan(plan),
             cache_dir=self._cache_dir("literature"),
             cache_enabled=plan.source_plan.cache_enabled,
+            llm_client=self.services.llm_client if self._task_kind() == "survey"
+                and _read_screening_mode(self._effective_config()) != "deterministic" else None,
+            problem_markdown=self._problem_markdown(),
+            research_plan_json=json.dumps(plan.to_handoff_dict(), ensure_ascii=False),
+            screening_config=self._effective_config(),
         )
 
     def _provider_registry(self) -> SearchProviderRegistry:
@@ -5357,7 +5397,7 @@ class ResearchApplication:
             and asset.role in {"paper", "document", "reference", "material"}
             and Path(asset.locator).is_file()
             and (Path(asset.locator).suffix.lower() in SUPPORTED_DOCUMENT_SUFFIXES
-                 or (self._task_kind() == "writing" and asset.role == "material"
+                 or (self._task_kind() in {"writing", "survey"} and asset.role == "material"
                      and Path(asset.locator).suffix.lower() == ".json"))
         ))
 
@@ -5383,7 +5423,7 @@ class ResearchApplication:
                     # mix compact seeds with its expanded literal pairs.
                     task = dict(prepared_task)
                     for key in (
-                        "approval_note", "max_repairs", "budget_profile", "allow_large_edits",
+                        "approval_note", "max_repairs", "budget_profile", "allow_large_edits", "edit_budget_overrides",
                         "env_mode", "python_executable",
                         "validation_command", "validation_timeout_sec",
                     ):

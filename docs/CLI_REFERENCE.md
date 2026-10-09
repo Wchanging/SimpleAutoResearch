@@ -22,6 +22,13 @@ Online surveys can request new sources after reading exposes a specific gap.
 With model reading and automatic expansion enabled, one follow-up search/ingest/read
 cycle reuses the original limits and saved evidence. `--fulltext` still controls
 remote full-text permission; finding an abstract does not establish full-text support.
+`--web-extract-backend direct|tavily_basic` selects original HTML/text acquisition
+for `start` and `research-session`; it does not enable acquisition by itself or
+change PDF permissions. The optional Tavily backend requires `TAVILY_API_KEY`.
+Reading may request a data or project URL quoted in the source rather than another
+paper query. Linked-page redirects share the remaining fetch allowance, up to four
+GETs per acquisition, with public-address checks at each hop. Acquired documentation
+is not proof of runnable code, successful data download or scientific correctness.
 
 | Options | Applies to | Purpose |
 | --- | --- | --- |
@@ -86,8 +93,15 @@ On authorized preparation, confirmed new paths are initialized only in the isola
 workspace before indexing. Keep task output outside the author project; ordinary
 `--allow` paths without a creation declaration must already exist.
 
-Chat setup can propose public project/data/material downloads from quoted paper or project
-material, with separate confirmation for each asset. Projects accept a direct ZIP
+Chat setup can propose public project/data/material downloads from inspected paper or project
+material, with separate confirmation for each asset. The proposal selects a viewed
+source path; code locates its literal URL rather than requiring a copied quotation.
+PDF parsing preserves HTTP hyperlink targets. Declared lockfiles can be read on
+request through bounded source windows, but are not sent by default; static
+dependency evidence does not establish a runnable environment. If project Python
+requirements exclude the framework interpreter, supply a compatible interpreter
+with `--project-python` or confirm a named Python asset; a textual assumption does
+not change the execution environment. Projects accept a direct ZIP
 or a GitHub repository's default-branch snapshot, not a fixed commit; data stays a
 single downloaded file without automatic unpacking. Limits are 3 assets, 20 MiB
 per download, and 80 MiB / 5000 entries per project ZIP by default.
@@ -96,8 +110,9 @@ setup; ZIP expansion is limited to `4*N` MiB. Confirmation displays these limits
 and the saved receipt preserves them on recovery. ZIP format is checked from
 the archive itself, not inferred from the URL suffix. This does not authorize a
 download or installation by itself; supporting documents retain their own limits.
-Only public HTTPS URLs
-without query strings are accepted. Downloads do not authorize execution or
+Only public HTTPS URLs are accepted. Public identity/version/download query
+parameters are retained; credential-bearing or signed links, URL user information
+and fragments are rejected. Downloads do not authorize execution or
 dependency installation; this is not a security sandbox or complete SSRF protection.
 Supporting material can be an official instruction page or paper; it uses the existing
 document preview and question reads, with one public GET, no redirects and separate
@@ -112,11 +127,27 @@ excerpt; PDF downloading/raw retention requires separate permission or explicit
 `--fulltext`. The preview is limited to 8000 characters / three PDF pages, not
 full-paper understanding. When a question needs later methods or instructions,
 chat can request a read-only lookup in an already supplied document or material.
+Use `--material` for ordinary JSON/BibTeX notes and recorded results, not
+`--document`; dialogue previews retain that material role and do not verify its claims.
+Reproduction preparation can retain these notes in its task assets and use them
+to propose continuation work. This does not promote an old observation into a new
+measurement; numerical reuse must be checked against its actual raw data and conditions.
 Expanded local extraction requires confirmation (up to 40 PDF pages / 20 MiB);
 only bounded query excerpts reach the model. Saved extraction bundles and
 acquisition receipts are reused on setup recovery, without parsing or fetching
-again. Ordinary `--prepare-only` does not fetch links. Repository and
+again. On recovery, you may explicitly skip a failed paper acquisition and
+continue with other supplied material; its receipt and unresolved consumption
+remain saved, and the failed resource does not become evidence.
+Ordinary `--prepare-only` does not fetch links. Repository and
 execution proposals still need inspected source text and separate confirmation.
+New result adapters may use source-defined invocation contracts without a prose
+README; this is preparation basis, not proof of successful execution.
+When choices remain, answer them or type `accept-proposal` to adopt the displayed
+settings and assumptions explicitly. Unanswered factual questions stay unknown;
+execution still requires its own confirmation. An exhausted saved setup can
+review an already valid proposal without another model call or budget reset.
+For reproduction setup, `--fulltext` permits acquisition; the generated task
+consumes the acquired/local files rather than starting another retrieval phase.
 
 ### Existing data (no API)
 
@@ -161,10 +192,10 @@ prefill `value_column`. Unclear data semantics still require clarification, and
 user replies and units remain in `task.md`. Explanation is included; do not combine
 this path with `--with-report`, `--material` or `--project`. This routing capability
 does not establish successful real-world figure delivery.
-New scripted-analysis scaffolds use the existing `large` patch profile (16,000
-characters per new block), disclosed before execution; ordinary project repair
-keeps its existing limits. This avoids applying the normal 4,000-character block
-limit to a complete new analysis script, without claiming successful figure delivery.
+New scripted-analysis scaffolds retain the `large` profile's total limits, with
+new source blocks allowed up to the existing 32,000-character ceiling, disclosed
+before execution. Ordinary project repair keeps its existing limits. These edit
+limits do not establish analysis or figure correctness.
 
 ## Reuse deliveries
 
@@ -196,8 +227,12 @@ Select current registered `data_analysis`, `report`, `summary` or `code_analysis
 a new writing task and leaves the original session unchanged. Reports include their
 registered source text bundle, saved experiment evidence and recorded citation identities
 where present; retained passages do not trigger another download, and metadata does not
-stand in for primary source text or re-verification. Reports are drafts, not new measured
-results. Analysis packages retain their existing source-data recheck. This is distinct
+stand in for primary source text or re-verification. The reused body is retained separately
+as an earlier draft for editing, not a source-evidence choice or new measured result.
+Retained papers keep their connector identities and recorded citation aliases;
+document/chunk storage IDs do not create new references. Linked documentation
+retains its material role and available text rather than a duplicate paper handle.
+Analysis packages retain their existing source-data recheck. This is distinct
 from resuming an interrupted execution.
 
 To change the argument or chapter structure, use `--reuse report` with that goal
@@ -208,11 +243,32 @@ New validated script-analysis deliveries selected with `--reuse code_analysis` c
 their source, input data, recorded results and PNG/vector exports into writing.
 Generated projects use `analysis.py` as the entry point; helper modules and editable
 layout sources may live in `src/` and are included in the portable package.
+New generated projects retain the large edit profile's file and total-size limits,
+with its per-source-block limit set to the existing 32,000-character absolute ceiling.
+Advanced numeric overrides in the CodeTask `[budget]` table also reach research
+execution and recovery; they do not bypass the absolute limits or protected paths.
 The report can select figures for its body while retaining the complete linked package.
+Object-shaped `outputs/results.json` may include `figures` records with a package-relative
+`path` and an authored `caption`. Registration preserves these captions for writing and
+export; older path-only records retain the filename fallback. Captions are not verification.
+When source identities are supplied, `results.json` may retain a `citation_map` in the
+existing `citation_map.v1` format. Writing reuses these recorded references without
+inventing missing authors, dates or identifiers; metadata is not primary-source evidence.
 Copying script outputs is not an independent numerical recomputation. Older sessions
 without the registered package retain their text/JSON-only reuse behavior.
 
 ## Concept images
+
+Research follow-up with new searches:
+`simple-ar start --kind survey --from-session SESSION --reuse report --goal "Your new question"`.
+This creates a new task with the report's source bundle rather than its manuscript,
+excluding embedded prior drafts and derived analysis attachments. Repeated sources
+are merged without combining passages from different text versions. It
+defaults to online search. Reused sources still need relevance and fact checks.
+Both preparation and execution accept saved source bundles. Supplying local
+sources does not disable an explicitly requested online search. For legacy
+sessions, declared report-material ownership excludes untyped local drafts;
+filenames alone do not establish a source's role.
 
 ```bash
 simple-ar image --config models.toml --prompt "A clean method overview" --output figures/v1
@@ -291,6 +347,10 @@ The two report entrypoints use the same settings, with different option prefixes
 | `--report-outline-strategy auto\|template\|adaptive` | `--outline-strategy auto\|template\|adaptive` | Select template-based or evidence-led planning |
 | `--report-data-tables linked\|full` | `--data-tables linked\|full` | Link data records or also include summary tables |
 | `--max-document-review-prompt-chars N` | `--max-document-review-prompt-chars N` | Optional complete review-request character ceiling |
+
+With `auto` and figures enabled, reports containing registered supplied figures
+use evidence-led planning to select inline figures and their section owners.
+Text-only reports retain their direct template path; `template` remains an explicit override.
 
 Omitted options retain configuration or saved settings. Base defaults are section
 drafting/review, document review off, `auto` planning, `linked` data tables and no
@@ -409,6 +469,9 @@ with `--session-root PATH --recover-interrupted --model env`. This closes the
 orphaned attempt in the same budget and retries its step, retaining earlier
 evidence and valid report checkpoints. Apply input/configuration changes in a
 separate resume. Ordinary API failures with a persisted result use normal resume.
+An unavailable whole-document check pauses writing while retaining its drafts and
+revision candidate. Resolve capacity or transport before resuming; unchanged writing
+content reuses that work, but changed source/measurement inputs invalidate it.
 For a model-backed session, pass `--model env` (using the configured
 `SIMPLE_AR_MODEL`) or `--model NAME` on every resume. An omitted model fails
 before state changes instead of silently replacing model work with deterministic work.
@@ -1405,6 +1468,10 @@ uv run simple-ar code-task apply-edits runs/<run-id> --edits-file runs/<run-id>/
 **Notes**:
 
 Path, edit-scope, old-text, and large-edit checks run before file writes.
+An empty `old` creates an absent file; it never replaces an existing file.
+Model proposals may create files within an explicit edit-scope allowlist, or an
+explicit batch target. Protected paths remain read-only. Creation uses the same
+edit budgets and snapshots as replacements, including removal during rollback.
 
 #### `simple-ar code-task validate`
 

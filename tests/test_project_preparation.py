@@ -277,6 +277,10 @@ class ProjectPreparationTests(unittest.TestCase):
             self.assertFalse(facts['data_paths'][0]['available'])
             self.assertIn('uv.lock', facts['document_paths'])
             self.assertFalse(any(row['path'] == 'uv.lock' for row in facts['excerpts']))
+            self.assertIn('uv.lock', facts['source_file_paths'])
+            explicit = inspect_project_preparation(root, read_paths=('uv.lock',))
+            self.assertTrue(any(row['path'] == 'uv.lock' and 'lock body' in row['text']
+                                for row in explicit['excerpts']))
             self.assertIn('project-authored', project_preparation_markdown(facts))
             self.assertIn('> Run python main.py', project_preparation_markdown(facts))
             self.assertNotIn('installed_dependencies', facts)
@@ -459,7 +463,7 @@ class ProjectPreparationTests(unittest.TestCase):
             for name in ('justfile', 'run.sh', 'recipe.custom'):
                 self.assertIn(name, facts['source_file_paths'])
                 self.assertIn('10000', next(row['text'] for row in facts['excerpts'] if row['path'] == name))
-            for name in ('image.png', '.env', '.env.local', 'uv.lock'):
+            for name in ('image.png', '.env', '.env.local'):
                 self.assertNotIn(name, facts['source_file_paths'])
             self.assertIn('up to 8000 characters', project_preparation_markdown(facts))
             with self.assertRaisesRegex(ValueError, 'indexed'):

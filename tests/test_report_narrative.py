@@ -47,6 +47,7 @@ class NarrativeTests(unittest.TestCase):
     def test_material_writing_does_not_starve_results_behind_many_papers(self):
         handles = [SourceHandle(handle=f"paper:{i}", kind="paper", citation_key=f"P{i}") for i in range(10)]
         handles.extend([SourceHandle(handle="material:results", kind="material"),
+                        SourceHandle(handle="material:old-draft", kind="prior_draft", title="Previous report"),
                         SourceHandle(handle="chunk:results", kind="chunk")])
         template = load_report_template_bundle(report_mode="supplied_materials",
                                                config=ReportRuntimeConfig(template="experiment"))
@@ -60,8 +61,12 @@ class NarrativeTests(unittest.TestCase):
                     if budget != 1:
                         self.assertIn("paper:0", section.evidence_handles)
                     self.assertNotIn("chunk:results", section.evidence_handles)
+                    self.assertNotIn("material:old-draft", section.evidence_handles)
                     if budget > 0:
                         self.assertLessEqual(len(section.evidence_handles), budget)
+                view = evidence_outline_context(context, memory, ReportRuntimeConfig())
+                self.assertNotIn('material:old-draft', view['evidence_handle_choices'])
+                self.assertEqual(view['previous_document']['drafts'][0]['handle'], 'material:old-draft')
 
     def test_template_section_purposes_survive_planning_without_cross_section_leakage(self):
         context = ReportContext(topic="Existing observations", report_mode="supplied_materials")

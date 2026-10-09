@@ -121,8 +121,42 @@ class SearchProviderRegistryTests(unittest.TestCase):
 
         self.assertEqual(
             registry.names(),
-            ("arxiv", "local_files", "openalex", "semantic_scholar"),
+            ("arxiv", "local_files", "openalex", "semantic_scholar", "web"),
         )
+        from simple_ar.research.connectors.web import WebConnector
+        import requests
+        with patch.dict(os.environ, {"TAVILY_API_KEY": ""}), \
+             patch("simple_ar.research.connectors.web.requests.post") as post:
+            with self.assertRaisesRegex(ValueError, "TAVILY_API_KEY"):
+                registry.resolve("web").search(SearchQuery("project installation"))
+            post.assert_not_called()
+        with patch("simple_ar.research.connectors.web.requests.post") as post:
+            post.return_value.json.return_value = {"results": [
+                {"url": "https://example.org/docs", "title": "Project documentation", "content": "Install notes",
+                 "published_date": "Tue, 11 Mar 2025 17:00:00 GMT"},
+                {"url": "https://example.org/docs", "title": "duplicate"},
+                {"url": "file:///private"}, {"url": "https://example.org/repo", "published_date": "unknown"}],
+                "usage": {"credits": 1}}
+            connector = WebConnector("fixture-key")
+            response = connector.search(SearchQuery("project installation", 4))
+            self.assertEqual(len(response.papers), 2)
+            self.assertEqual(response.papers[0].source, "web")
+            self.assertEqual(response.papers[0].published, "2025-03-11")
+            self.assertIsNone(response.papers[1].published)
+            self.assertEqual(response.papers[0].authors, [])
+            self.assertEqual(response.papers[0].fulltext_url, response.papers[0].url)
+            self.assertIn("credits=1", response.message)
+            payload = post.call_args.kwargs["json"]
+            self.assertEqual(payload["search_depth"], "basic")
+            self.assertFalse(payload["auto_parameters"])
+            self.assertFalse(payload["include_answer"])
+            self.assertNotIn("fixture-key", str(payload))
+            connector.search(SearchQuery("project installation", 4, filters={"temporal_scope": {
+                "start_year": 2020, "end_year": 2025, "basis_quote": "2020 through 2025"}}))
+            self.assertTrue(post.call_args.kwargs["json"]["filter_by_published_date"])
+            post.return_value.raise_for_status.side_effect = requests.HTTPError("429")
+            with self.assertRaises(requests.HTTPError):
+                connector.search(SearchQuery("another topic"))
 
     def test_search_accepts_a_replacement_provider_registry(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

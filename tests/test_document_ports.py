@@ -33,6 +33,21 @@ class DocumentPortTests(unittest.TestCase):
 
             self.assertEqual(parsed.parser, "plain_text")
             self.assertIn("bounded method", parsed.text)
+            pdf = Path(tmp) / "paper.pdf"
+            pdf.write_bytes(b"%PDF-1.7\nfixture")
+            from types import SimpleNamespace
+            from unittest.mock import patch
+            page = {"/Annots": [SimpleNamespace(get_object=lambda: {
+                "/A": {"/S": "/URI", "/URI": "https://example.test/author-code"}})]}
+            class LinkedPage(dict):
+                def extract_text(self):
+                    return "Code is available through the linked footnote."
+            with patch.dict("sys.modules", {"pypdf": SimpleNamespace(
+                    PdfReader=lambda _: SimpleNamespace(pages=[LinkedPage(page)]))}):
+                parsed = LocalDocumentParser(max_pdf_pages=1).parse(pdf)
+            self.assertIn("https://example.test/author-code", parsed.text)
+            self.assertIn("not verified contents", parsed.text)
+            self.assertEqual(parsed.coverage["empty_text_pages"], [])
 
     def test_local_bundle_enters_read_without_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

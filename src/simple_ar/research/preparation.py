@@ -208,6 +208,11 @@ def inspect_project_preparation(
     # Entry source explains flags and emitted measurements without importing
     # the project. It shares the established index; notebooks remain unread.
     available_paths = {str(row["path"]) for row in index.get("files", [])}
+    # Preparation can inspect declared lockfiles on request without adding
+    # generated contents to the code-review index or initial model context.
+    lock_paths = {relative for relative, _ in documents if relative.endswith(".lock")
+                  and not (root / relative).is_symlink()}
+    available_paths.update(lock_paths)
     if len(read_paths) > 15 or any(path not in available_paths for path in read_paths):
         raise ValueError("Preparation reads must name indexed project text files (at most 15 extra files); no external or excluded paths.")
     # Console entries commonly have no main guard. Read their indexed source
@@ -242,8 +247,11 @@ def inspect_project_preparation(
         excerpts.append({"path": relative, "role": "entry_source", "text": text[:8000],
                          "truncated": len(text) > 8000, "has_unread_tail": len(text) > 8000, "read_limit_characters": 8000})
     from simple_ar.code_task.analysis.source_context import requested_source_context
+    read_index = {**index, "files": [*index.get("files", []), *[
+        {"path": path} for path in sorted(lock_paths)
+        if not any(row["path"] == path for row in index.get("files", []))]]}
     for relative in read_paths:
-        windows = requested_source_context(root, dict(index), {"files": [relative]}, supplied=excerpts,
+        windows = requested_source_context(root, read_index, {"files": [relative]}, supplied=excerpts,
             max_files=1, max_chars=8000)
         for window in windows:
             excerpts.append({**window, "role": "project_source", "read_limit_characters": 8000})
@@ -396,7 +404,7 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     task = dict(config["code_task"])
     if set(task) - {
         "code_root", "approval_note", "max_repairs", "allowed_patterns",
-        "budget_profile", "allow_large_edits", "workspace_mode", "protected_patterns",
+        "budget_profile", "allow_large_edits", "edit_budget_overrides", "workspace_mode", "protected_patterns",
         "env_mode", "python_executable",
         "validation_command", "validation_timeout_sec", "initial_files",
     }:

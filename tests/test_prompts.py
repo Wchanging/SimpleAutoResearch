@@ -85,7 +85,6 @@ class PromptTests(unittest.TestCase):
         self.assertIn("abstract-level pass", coarse)
         self.assertIn("coarse_relevance_score", coarse)
         self.assertIn("likely_facet", coarse)
-        self.assertIn("Rerank", rerank)
         self.assertIn("evidence_role", rerank)
         self.assertIn("synthesis_hint", rerank)
         self.assertIn("max_shortlist", rerank)

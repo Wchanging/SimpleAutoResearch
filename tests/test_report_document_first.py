@@ -11,8 +11,8 @@ from unittest.mock import patch
 from pydantic import ValidationError
 from simple_ar.cli.parser import build_parser
 from simple_ar.cli.research_config import research_defaults, validate_session_arguments
-from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
-from simple_ar.integrations.llm import LLMError
+from simple_ar.core.capabilities import ArtifactRef, ArtifactStore, AttemptManifest, CapabilityContext
+from simple_ar.integrations.llm import LLMError, LLMResponseError
 from simple_ar.report.agent import run_report_agent
 from simple_ar.report.editor import edit_joint_document
 from simple_ar.report.schema import (
@@ -78,6 +78,13 @@ class DocumentFirstTests(unittest.TestCase):
         resumed = run_report_agent(**kwargs, client=client, completed_checkpoint=saved[-1])
         self.assertEqual(result.report_body, resumed.report_body)
         self.assertEqual(len(labels), 3)
+        for topic in ("A lengthy task " * 80, "Question\nConstraints"):
+            with self.subTest(topic=topic[:30]):
+                task = self.inputs()
+                task['context'].topic = topic
+                report = run_report_agent(**task, client=self.client([]))
+                self.assertEqual(report.memory.document_plan.title, 'Supplied Material Report')
+                self.assertTrue(report.report_body.startswith('# Supplied Material Report\n'))
 
         # Auto uses the same two composition paths, with a stable full-plan
         # decision. Unknown or long plans preserve per-section recovery.
@@ -181,8 +188,45 @@ class DocumentFirstTests(unittest.TestCase):
         self.assertEqual(saved[-1], before)
 
     def test_document_failure_is_a_finding_not_a_fabricated_pass(self):
-        result = run_report_agent(**self.inputs(), client=self.client([], fail=True))
+        saved, labels = [], []
+        kwargs = self.inputs()
+        result = run_report_agent(**kwargs, client=self.client(labels, fail=True), checkpoint_sink=saved.append)
         self.assertTrue(any(row.type == "document_review_unavailable" for row in result.memory.reviewer_findings))
+        self.assertFalse(saved[-1]['document_review_done'])
+        resumed_labels = []
+        restored = run_report_agent(**kwargs, client=self.client(resumed_labels), completed_checkpoint=saved[-1])
+        self.assertEqual(restored.report_body, result.report_body)
+        self.assertEqual(resumed_labels, ['report-document-reviewer'])
+        self.assertFalse(any(row.type == 'document_review_unavailable' for row in restored.memory.reviewer_findings))
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / 'first')
+            request = ReportWritingRequest(kwargs['context'], kwargs['memory'], kwargs['config'],
+                kwargs['template'], self.client([], fail=True))
+            failed = run_report_writing_capability(context=CapabilityContext(store=store,
+                attempt=AttemptManifest('write-1'), inputs=(
+                    ArtifactRef('brief-r1.json', kind='research_brief'),
+                    ArtifactRef('measurement-1.json', kind='experiment_measurement'))), request=request)
+            self.assertEqual(failed.status, 'failed')
+            checkpoint = next(row for row in failed.artifacts if row.kind == 'report_checkpoint')
+            # Simulate a pre-normalization fingerprint; full saved content is
+            # still required to adopt its unfinished work.
+            previous = store.read_json(checkpoint)
+            previous['snapshot_id'] = 'legacy-revision-location-fingerprint'
+            store.write_json(checkpoint.path, previous)
+            labels = []
+            resumed = run_report_writing_capability(context=CapabilityContext(
+                store=ArtifactStore(Path(directory) / 'second'), attempt=AttemptManifest('write-2'),
+                inputs=(checkpoint, ArtifactRef('brief-r2.json', kind='research_brief'),
+                        ArtifactRef('measurement-1.json', kind='experiment_measurement')), input_store=store),
+                request=replace(request, llm_client=self.client(labels), resume_ref=checkpoint))
+            self.assertEqual(resumed.status, 'completed')
+            self.assertEqual(labels, ['report-document-reviewer'])
+            with patch('simple_ar.report.writing.run_report_agent', return_value=None) as writer:
+                run_report_writing_capability(context=CapabilityContext(
+                    store=ArtifactStore(Path(directory) / 'changed'), attempt=AttemptManifest('write-3'),
+                    inputs=(checkpoint, ArtifactRef('measurement-2.json', kind='experiment_measurement')),
+                    input_store=store), request=replace(request, resume_ref=checkpoint))
+            self.assertIsNone(writer.call_args.kwargs['completed_checkpoint'])
 
     def test_single_section_and_legacy_default_keep_section_review(self):
         for count, scope, draft_scope in ((1, "document", "section"),
@@ -249,6 +293,8 @@ class JointDraftingTests(unittest.TestCase):
                 if label == 'report-document-reviewer':
                     return {'section_reviews': []}
                 if label == 'report-writer-document' and bad:
+                    if isinstance(bad, Exception):
+                        raise bad
                     return bad
                 sections = [row['section'] for row in view['sections']]
                 return {'sections': [{'section_id': row['section_id'], 'heading': row['heading'],
@@ -288,14 +334,16 @@ class JointDraftingTests(unittest.TestCase):
     def test_missing_or_duplicate_set_is_corrected_without_partial_adoption(self):
         for bad in ({'sections': [{'section_id': 'comparison', 'draft_markdown': 'Partial'}]},
                     {'sections': [{'section_id': 'comparison'}, {'section_id': 'comparison'}]},
-                    {'sections': [{'section_id': 'another'}]}):
+                    {'sections': [{'section_id': 'another'}]},
+                    LLMResponseError('Completed response is not JSON')):
             with self.subTest(bad=bad):
                 labels, requests, saved = [], [], []
                 run_report_agent(**self.inputs(), client=self.client(labels, requests, bad=bad), checkpoint_sink=saved.append)
                 self.assertEqual(labels[:2], ['report-writer-document', 'report-writer-document-retry'])
                 self.assertEqual(len(saved[0]['sections']), 0)
                 self.assertEqual(len(saved[1]['sections']), 3)
-                self.assertIn('rejected_response', requests[1])
+                self.assertEqual('rejected_response' in requests[1], not isinstance(bad, Exception))
+                self.assertIn('validation_error', requests[1])
 
     def test_joint_scope_is_built_without_single_section_projection_or_table_leakage(self):
         kwargs, labels, requests = self.inputs(), [], []
@@ -389,6 +437,28 @@ class JointDraftingTests(unittest.TestCase):
             def ask_json(self, *args, **kwargs):
                 raise AssertionError('No model on completed restore')
         self.assertEqual(run_report_agent(**kwargs, client=Offline(), completed_checkpoint=complete).report_body, result.report_body)
+        # Intent was persisted but no correction response returned (e.g. the
+        # reservation was refused). Explicit resume checks the same body once.
+        pending = copy.deepcopy(prior)
+        rejection_iteration = max(row['iteration'] for row in pending['iterations']) + 1
+        pending['iterations'] += [
+            {'iteration': rejection_iteration, 'section_id': '', 'action': 'document_review_rejected',
+             'status': 'rejected', 'summary': 'Invalid review structure',
+             'rejected_review': {'label': 'report-document-reviewer', 'response': {'reviews': []}}},
+            {'iteration': rejection_iteration + 1, 'section_id': '', 'action': 'document_format_correction',
+             'status': 'started', 'summary': 'Invalid review structure',
+             'rejected_review': {'label': 'report-document-reviewer', 'format_correction': True,
+                                'rejection_iteration': rejection_iteration}},
+        ]
+        labels.clear()
+        correction_labels = []
+        class CorrectionClient:
+            def ask_json(self, *args, label='', **options):
+                correction_labels.append(label)
+                return client.ask_json(*args, label='report-document-reviewer', **options)
+        restored = run_report_agent(**kwargs, client=CorrectionClient(), completed_checkpoint=pending)
+        self.assertEqual(correction_labels, ['report-document-reviewer-format-correction'])
+        self.assertEqual(restored.report_body, result.report_body)
 
     def test_configuration_and_preflight_share_explicit_scope(self):
         with self.assertRaisesRegex(ValueError, 'requires review_scope'):
@@ -433,6 +503,41 @@ class JointDraftingTests(unittest.TestCase):
         self.assertTrue(any(row['iterations'][-1].get('tool_results', [{}])[0].get('metadata', {}).get('lookup_state') == 'allocated'
                             for row in saved if row['iterations'] and row['iterations'][-1]['action'] == 'writer_context'
                             and row['iterations'][-1]['tool_results']))
+        # Newly navigable excerpted primary text selects evidence separately
+        # from composition. Both a read and an accepted empty batch survive
+        # interruption without another selection call or refreshed allowance.
+        for kind, selected in (("paper", [call]), ("material", [call]),
+                               ("paper", []), ("material", [])):
+            kwargs, saved, labels, prompts = self.inputs(), [], [], []
+            kwargs['memory'].source_handles[0] = kwargs['memory'].source_handles[0].model_copy(update={
+                'kind': kind, 'metadata': {'source_directory': {'sections': []},
+                                             'evidence_passages_truncated': True}})
+            class Stop(BaseException):
+                pass
+            class Selector:
+                def ask_json(self, system, prompt, *, label='', **options):
+                    self_payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                    self.assert_contract = self_payload
+                    if label != 'report-source-selection':
+                        raise AssertionError('Composition must follow saved selection')
+                    return {'context_requests': selected}
+            selector = Selector()
+            def save_selection(row):
+                saved.append(copy.deepcopy(row))
+                if any(event['action'] == 'writer_context' and event['status'] == 'completed'
+                       for event in row['iterations']):
+                    raise Stop()
+            with patch.object(kwargs['gateway'], 'call', return_value=evidence) as read:
+                with self.assertRaises(Stop):
+                    run_report_agent(**kwargs, client=selector, checkpoint_sink=save_selection)
+                self.assertEqual(read.call_count, len(selected))
+            self.assertNotIn('sections', selector.assert_contract)
+            self.assertIn('tool_name', selector.assert_contract['context_request_schema']['properties'])
+            with patch.object(kwargs['gateway'], 'call', side_effect=AssertionError('Do not replay reads')):
+                resumed = run_report_agent(**kwargs, client=self.client(labels, prompts),
+                                           completed_checkpoint=saved[-1])
+            self.assertNotIn('report-source-selection', labels)
+            self.assertEqual(len(resumed.tool_results), len(selected))
 
     def planning_inputs(self, *, scope='document'):
         kwargs = self.inputs()
@@ -468,9 +573,20 @@ class JointDraftingTests(unittest.TestCase):
         return Client()
 
     def test_planned_definition_reads_reach_both_draft_scopes_and_document_review(self):
-        for scope in ('document', 'section'):
-            with self.subTest(scope=scope):
+        for scope, strategy in (('document', 'adaptive'), ('section', 'adaptive'),
+                                ('document', 'auto'), ('section', 'auto')):
+            with self.subTest(scope=scope, strategy=strategy):
                 kwargs, plan = self.planning_inputs(scope=scope)
+                kwargs['config'] = kwargs['config'].model_copy(update={'outline_strategy': strategy})
+                kwargs['context'].results['supplied_analyses'] = [{
+                    'schema_version': 'code_analysis.v1', 'document_id': 'measurement',
+                    'evidence_role': 'recorded_script_results',
+                    'figures': [{'path': 'outputs/comparison.png', 'caption': 'Observed counts and rates.'}]}]
+                plan['visual_intents'] = [{'kind': 'figure', 'view': 'supplied-data',
+                    'section_heading': kwargs['memory'].section_plan[0].heading,
+                    'title': 'Counts and rates', 'purpose': 'Show the observed comparison',
+                    'evidence_handles': ['material:comparison'],
+                    'figure_paths': ['outputs/comparison.png']}]
                 labels, prompts, saved = [], [], []
                 original = copy.deepcopy(kwargs['gateway'].documents.to_handoff_dict())
                 result = run_report_agent(**kwargs, client=self.planned_client(plan, labels, prompts),
@@ -479,6 +595,8 @@ class JointDraftingTests(unittest.TestCase):
                 self.assertEqual(labels.count('report-outline-planner'), 1)
                 self.assertEqual(kwargs['gateway'].call_counts['search_source_chunks'], 1)
                 self.assertEqual(len(result.tool_results), 1)
+                self.assertEqual(result.memory.document_plan.visual_intents[0].figure_paths,
+                                 ['outputs/comparison.png'])
                 for payload in prompts[1:-1]:
                     self.assertIn('divided by exposure time', json.dumps(payload['extra_tool_context']))
                 self.assertIn('divided by exposure time', json.dumps(prompts[-1]['supplementary_evidence']))
@@ -486,6 +604,23 @@ class JointDraftingTests(unittest.TestCase):
                 self.assertEqual(kwargs['gateway'].documents.to_handoff_dict(), original)
                 self.assertTrue(saved[0]['memory']['outline_planning']['context_requests'])
                 self.assertEqual(saved[0]['tool_results'], [])
+        # No figures, disabled figures, explicit templates and accepted plans
+        # do not create a new planning obligation on the direct writing path.
+        for mode in ('text', 'disabled', 'off', 'template'):
+            kwargs, _ = self.planning_inputs()
+            kwargs['config'].outline_strategy = 'template' if mode == 'template' else 'auto'
+            if mode != 'text':
+                kwargs['context'].results['supplied_analyses'] = [{
+                    'schema_version': 'code_analysis.v1', 'document_id': 'measurement',
+                    'evidence_role': 'recorded_script_results',
+                    'figures': [{'path': 'outputs/comparison.png', 'caption': 'Observed counts and rates.'}]}]
+            if mode == 'disabled':
+                kwargs['config'].figures.enabled = False
+            elif mode == 'off':
+                kwargs['config'].figures.mode = 'off'
+            labels, prompts = [], []
+            run_report_agent(**kwargs, client=self.client(labels, prompts))
+            self.assertNotIn('report-outline-planner', labels)
 
     def test_planned_read_failure_restore_uses_same_plan_and_confirmed_results(self):
         kwargs, plan = self.planning_inputs()
@@ -498,6 +633,41 @@ class JointDraftingTests(unittest.TestCase):
         with patch.object(kwargs['gateway'], 'call', side_effect=AssertionError('Do not replay confirmed reads')):
             result = run_report_agent(**kwargs, client=self.planned_client(plan, labels, prompts), completed_checkpoint=saved[-1])
         self.assertNotIn('report-outline-planner', labels)
+        self.assertIn('divided by exposure time', json.dumps(prompts[0]['extra_tool_context']))
+        self.assertEqual(len(result.tool_results), 1)
+        # Excerpted sources need their conditions before planning, not only
+        # after an answer has been proposed. A planning transport failure
+        # retains those reads without freezing an unevidenced fallback plan.
+        kwargs, plan = self.planning_inputs()
+        kwargs['memory'].source_handles[0].metadata.update(
+            source_directory={'sections': []}, evidence_passages_truncated=True)
+        kwargs['context'].source_handles = kwargs['memory'].source_handles
+        requests = plan.pop('context_requests')
+        labels, prompts, saved = [], [], []
+        delegate = self.planned_client(plan, labels, prompts)
+        class BeforePlanner:
+            def ask_json(inner, system, prompt, *, label='', **options):
+                payload = json.JSONDecoder().raw_decode(prompt[prompt.index('{'):])[0]
+                if label == 'report-source-selection':
+                    labels.append(label)
+                    return {'context_requests': requests}
+                if label == 'report-outline-planner':
+                    labels.append(label)
+                    self.assertIn('divided by exposure time', json.dumps(payload['extra_tool_context']))
+                    self.assertNotIn('context_requests', payload['output_schema'])
+                    raise LLMError('Planning transport stopped after source selection')
+                raise AssertionError('Do not compose before evidence-informed planning')
+        with self.assertRaisesRegex(LLMError, 'Outline planner failed'):
+            run_report_agent(**kwargs, client=BeforePlanner(),
+                checkpoint_sink=lambda row: saved.append(copy.deepcopy(row)))
+        self.assertEqual(labels, ['report-source-selection', 'report-outline-planner'])
+        self.assertIsNone(saved[-1]['memory']['document_plan'])
+        self.assertEqual(kwargs['gateway'].call_counts['search_source_chunks'], 1)
+        labels.clear()
+        with patch.object(kwargs['gateway'], 'call', side_effect=AssertionError('Do not replay source selection')):
+            result = run_report_agent(**kwargs, client=delegate, completed_checkpoint=saved[-1])
+        self.assertNotIn('report-source-selection', labels)
+        self.assertEqual(labels.count('report-outline-planner'), 1)
         self.assertIn('divided by exposure time', json.dumps(prompts[0]['extra_tool_context']))
         self.assertEqual(len(result.tool_results), 1)
 
@@ -748,7 +918,8 @@ class JointRevisionTests(unittest.TestCase):
                             'draft_quotes': draft_quotes(prompt, sid)}]} for sid in ('method', 'result')]}
                 if label.startswith('report-document-joint-reviser'):
                     assert view['task'] == 'jointly_revise_report_sections'
-                    assert {row['section']['section_id'] for row in view['sections']} == {'method', 'result'}
+                    expected = {'result'} if reject and labels.count('report-document-joint-reviser') > 1 else {'method', 'result'}
+                    assert {row['section']['section_id'] for row in view['sections']} == expected
                     assert all(row['previous_draft']['draft_markdown'] for row in view['sections'])
                     assert all(row['revision_request']['findings'] for row in view['sections'])
                     return {'sections': [{'section_id': row['section']['section_id'], 'heading': row['section']['heading'],
@@ -907,6 +1078,20 @@ class JointRevisionTests(unittest.TestCase):
         self.assertNotIn(candidate_issue, memory.reviewer_findings)
         self.assertIn(candidate_issue, history)
         self.assertTrue(any(candidate_issue in review.findings for event in iterations for review in event.section_reviews))
+        # Resuming after rejection follows the latest complete inspection;
+        # resolved instructions remain history rather than being reissued.
+        def correct(event, baseline):
+            pending = [finding for review in event.section_reviews for finding in review.findings]
+            self.assertEqual(pending, [candidate_issue])
+            self.assertEqual(baseline[0].draft_markdown, 'Candidate')
+            return [baseline[0].model_copy(update={'draft_markdown': 'Corrected candidate'})]
+        edit_joint_document(memory=memory, config=ReportRuntimeConfig(max_review_iterations=2), sections=sections,
+            iterations=iterations, reviews=reviews, all_findings=history, checkpoint=lambda: None,
+            draft=correct, inspect=lambda *args: [ReportSectionReview(section_id='method', verdict='pass')])
+        self.assertEqual(sections[0].draft_markdown, 'Corrected candidate')
+        self.assertNotIn(original, memory.reviewer_findings)
+        self.assertNotIn(candidate_issue, memory.reviewer_findings)
+        self.assertTrue(iterations[-2].adopted)
 
     def test_legacy_rounds_and_unchecked_old_findings_are_not_erased(self):
         for legacy in (False, True):

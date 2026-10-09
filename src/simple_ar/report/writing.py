@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import hashlib
 import json
+from pathlib import Path
 from typing import Any, Callable
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
@@ -24,6 +25,22 @@ class ReportWritingRequest:
     emit: Callable[[str], None] | None = None
 
 
+def _writing_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Content owns recovery; repeated configuration locations do not.
+
+    Brief/assets/runtime contents are already projected into context, memory
+    and config. Opaque source/measurement refs remain part of the identity.
+    """
+    identity = {key: value for key, value in snapshot.items() if key != 'snapshot_id'}
+    identity['template'] = {key: value for key, value in identity['template'].items()
+                            if key not in {'template_path', 'criteria_path'}}
+    identity['config'] = {key: value for key, value in identity['config'].items()
+                          if not (key in {'review_scope', 'draft_scope'} and value == 'section')}
+    identity['sources'] = [row for row in identity['sources'] if row['kind'] not in {
+        'research_brief', 'research_brief_markdown', 'research_assets', 'runtime_config'}]
+    return identity
+
+
 def run_report_writing_capability(*, context: CapabilityContext, request: ReportWritingRequest) -> CapabilityResult:
     if request.llm_client is None:
         raise ValueError("Report writing requires an LLM client; no offline paper is invented.")
@@ -34,24 +51,23 @@ def run_report_writing_capability(*, context: CapabilityContext, request: Report
                 "memory": memory.model_dump(mode="json"), "config": request.config.model_dump(mode="json"),
                 "template": request.template.model_dump(mode="json"),
                 "sources": [ref.to_dict() for ref in context.inputs if ref != request.resume_ref]}
-    # Locations are provenance, not writing input: identical installed and
-    # checkout templates must share a checkpoint identity.
-    identity = {**snapshot, "template": request.template.model_dump(
-        mode="json", exclude={"template_path", "criteria_path"},
-    )}
-    # The new default is exactly the old section-first behavior. Keep its
-    # fingerprint compatible with checkpoints created before the option
-    # existed; an explicit document-first change must still invalidate reuse.
-    for field in ("review_scope", "draft_scope"):
-        if identity["config"].get(field) == "section":
-            identity["config"] = {key: value for key, value in identity["config"].items() if key != field}
+    identity = _writing_identity(snapshot)
     snapshot["snapshot_id"] = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     source = context.store.write_json("report_inputs.json", snapshot, kind="report_snapshot", schema="report_snapshot.v1")
     completed = None
     reused_ref = None
     if request.resume_ref is not None:
         previous = context.read_input_json(request.resume_ref)
-        if previous["snapshot_id"] == snapshot["snapshot_id"]:
+        compatible = previous['snapshot_id'] == snapshot['snapshot_id']
+        if not compatible and previous.get('source_attempt'):
+            # Old checkpoints include redundant revision-path refs in their
+            # fingerprint. Compare their full retained inputs, not a guessed
+            # match or just the unchanged goal text.
+            input_store = context.input_store or context.store
+            prior_path = Path(request.resume_ref.path).with_name('report_inputs.json')
+            prior_inputs = input_store.read_json(prior_path) if input_store.resolve(prior_path).is_file() else None
+            compatible = prior_inputs is not None and _writing_identity(prior_inputs) == identity
+        if compatible:
             completed = previous["completed"]
             reused_ref = request.resume_ref
     checkpoint_ref = context.store.ref("sections.json", kind="report_checkpoint", schema="report_checkpoint.v1")
@@ -90,4 +106,10 @@ def run_report_writing_capability(*, context: CapabilityContext, request: Report
     diagnostics = (f"Draft delivered with {pending} unresolved writing review finding(s); inspect {writer.path} before relying on it.",) if pending else ()
     if diagnostics and request.emit is not None:
         request.emit(diagnostics[0])
+    if any(row.type in {"document_review_unavailable", "document_revision_unavailable"}
+           for row in result.memory.reviewer_findings):
+        # Preserve usable drafts and candidates, but let the controller pause
+        # and resume this same checkpoint rather than finalize a failed check.
+        return CapabilityResult(status="failed", artifacts=(*artifacts, writer),
+            diagnostics=(*diagnostics, "Writing inspection was unavailable; resume the saved checkpoint after resolving capacity or transport, without redrafting."))
     return CapabilityResult(status="completed", artifacts=(*artifacts, writer), diagnostics=diagnostics)

@@ -4,32 +4,201 @@
 
 This file records implemented, user-visible changes in reverse chronological order. Usage and technical references live in `docs/`; future plans and private acceptance records are not release claims.
 
+## 2026-10-09
+
+- Guided setup uses Rich function and task panels, lists named text connections
+  from the model catalog, and saves the chosen profile for execution and recovery.
+  Streaming, timeout and credential availability are visible before starting;
+  legacy environment fallback is explicitly labelled instead of only showing `env`.
+- Bug-fix repair receives diagnostics from both stdout and stderr within the
+  existing bounded log allowance, rather than hiding stdout whenever stderr
+  contains a failure summary.
+  Partial edit proposals no longer suppress explicit requests for missing
+  source context; bounded follow-up reads retain unapplied draft edits for a
+  complete replacement proposal before application.
+- Literature search stops live queries to a provider after HTTP 429 within the
+  current batch, while preserving failures, checking query-specific caches and
+  continuing other configured providers instead of repeating quota failures.
+  Rate-limit detection also follows wrapped standard-library HTTP errors,
+  including providers using urllib instead of the SDK HTTP transport.
+  Reading preserves distinct follow-up questions and requested source links
+  for selection under the existing source budget, rather than silently truncating them to two.
+  Follow-up searches prioritize missing question evidence and take one query
+  per question before second queries, so early questions cannot consume every slot.
+  Follow-up candidates use the existing ranked selection policy after excluding
+  retained sources, rather than taking new sources in provider-return order.
+  Newly scheduled follow-ups select linked references and discovered sources
+  within one shared reading allowance, retaining parent quotations and source
+  roles instead of reserving every slot for links before selecting new results.
+  Semantic reranking compares up to 48 plausible metadata candidates independently
+  of the final reading shortlist, avoiding premature exclusion when few originals can be acquired.
+  Model-assisted surveys select from eligible discovery metadata before acquiring
+  originals; reading reuses those decisions instead of screening the reduced pool again.
+  Provider responses survive failed selection, and model usage remains on the task ledger.
+  Small pre-acquisition metadata pools use one comparison; larger pools use up to
+  eight rows per coarse batch by default. Reading does not re-summarize screened
+  metadata when original acquisition failed, and records that evidence remains partial.
+  Optional `web` search adds Tavily-based discovery of project documentation,
+  repositories and dataset pages, preserving webpage identity and leaving
+  existing default sources unchanged; it requires its own `TAVILY_API_KEY`.
+  Original HTML/text acquisition can separately select Tavily basic extraction,
+  preserving source identity, reported usage and reusable text caches without
+  changing PDF permissions or silently switching acquisition backends.
+  PDF download paths ending in `/pdf`, including versioned query URLs, retain
+  PDF permissions rather than being sent to the webpage extraction backend.
+  Public document acquisition retains identity and version query parameters;
+  credential-bearing and signed links remain rejected.
+  Follow-up reading preserves distinct batch screening judgments without treating
+  them as source-identity conflicts; conflicting source text and evidence still fail.
+  Report inputs retain referenced original passages instead of sampling them
+  again into six windows. Writing and independent review share one bounded
+  passage view, while derived reading notes remain separate from source evidence.
+- Task-venv preparation no longer inherits the controller's Python search path
+  or Python home, preventing unrelated framework packages from contaminating
+  dependency checks. Selected package indexes and resource settings are preserved.
+  CodeTask execution likewise uses only its workspace and source directory as
+  injected Python paths, rather than inheriting controller packages.
+  CodeTask checks and experiments now share invocation-owned output binding;
+  `{output_dir}` and `SIMPLE_AR_OUTPUT_DIR` refer to the same directory, rather
+  than creating a literal placeholder directory during preparation checks.
+  Experiment diagnosis distinguishes missing-output investigation from repair
+  advice, preserving valid measurements and scientific conditions instead of
+  recommending smaller benchmarks or clamped values to satisfy checks.
+  Model-assisted result analysis retains registered output previews and guard
+  evidence, so saved raw data and resource limitations do not disappear during input compression.
+- Reusing a report preserves its body as an earlier draft, separate from source
+  evidence. Planning and writing can use it for revision without treating old
+  prose as proof; the original report and its underlying materials remain intact.
+  Retained papers keep their original citation identities; linked documentation
+  keeps its own text and coverage instead of gaining duplicate paper-evidence entries.
+  New surveys can reuse a saved report's source bundle while searching a new
+  question, without copying the previous manuscript into their material inputs.
+  Survey reuse filters drafts and derived analyses inside mixed bundles; reading
+  no longer turns these records into paper cards. Repeated sources are merged
+  as complete text versions, preserving retained text when search returns only metadata.
+  Reused source bundles no longer consume the current acquisition allowance a
+  second time, leaving reserved capacity for question-driven documentation followup.
+  The execution CLI accepts these source bundles too; supplied sources no longer
+  override an explicitly online investigation with a local-only search default.
+  Legacy untyped local drafts are excluded when the saved session declares them
+  as report material, without guessing their role from filenames.
+- Preparation can inspect declared lockfiles through the same bounded source
+  lookup, without sending their generated contents by default. Public download
+  proposals select an inspected source path; code locates the exact URL instead
+  of requiring the model to recopy prose. PDF reading preserves HTTP link targets
+  when visible addresses are missing or split across lines. These links do not
+  verify contents or authorize downloads, installation or execution. Reproduction
+  setup requires an explicit compatible interpreter when inspected project
+  requirements exclude the framework Python; a prose assumption is not a binding.
+  Dialogue previews and question reads now accept explicitly supplied JSON/BibTeX
+  materials without presenting them as papers or independently verified results.
+  Reproduction setup retains such preparation notes through the shared configuration,
+  without treating prior observations as newly executed measurements.
+  Equivalent path-only project read objects are normalized before indexed-path
+  validation instead of requiring a model format-correction call.
+  Result attachments no longer have an eight-file ceiling, so multi-method runs
+  can retain their declared outputs without dropping evidence; path and read limits remain.
+- Joint revision continues from the latest complete candidate and its current
+  review, including after interruption. Resolved instructions stay in history;
+  later edits preserve improvements in other sections until whole-document adoption.
+  Unavailable document checks retain drafts and pause writing rather than mark
+  inspection complete. Unchanged writing content can reuse old checkpoints
+  across configuration revisions; actual source and measurement refs still bind recovery.
+  A format-correction checkpoint saved before a budget or transport interruption
+  can resume the same rejected response; an unfinished request no longer consumes
+  the correction allowance as though it returned an invalid answer.
+- New report plans use a template title when an unplanned task description is too
+  long or multiline to serve as a heading, keeping writing and delivery previews aligned.
+- Template-based reports can fill missing citation details during joint or section
+  drafting, including format recovery. Source-matched fields are retained across
+  checkpoints and shared by review and export without a separate planning call.
+- Reused experiment evidence keeps its recorded declarations, execution observations
+  and verification scope in writing and review, with attribution to the saved run.
+  Material-based writing also exposes retained section locations and passage headings
+  for targeted reading beyond the initial excerpts.
+  Evidence selection can inspect excerpted saved materials as well as papers,
+  using the same read allowance and recovery trace. For newly planned reports,
+  this selection precedes argument planning; the planner sees the returned
+  passages instead of forming its answer only from overviews. Interrupted
+  planning reuses the saved reads, while accepted plans remain unchanged.
+  Word-count planning also supports excluding the bibliography while retaining
+  title and headings, with one counting rule shared by previews and final audit.
+  Recorded script-result fields retain their JSON structure and file locations
+  as separate source sections rather than one long narrative line.
+- Automatic writing with supplied figures uses the existing evidence planner
+  to select inline charts and their section owners; explicit templates remain unchanged.
+  ACM export accepts self-contained PNG/JPEG content inside SVG image elements
+  while still rejecting external resources and embedded SVG content.
+- Controlled edit proposals can create absent files in the authorized scope, so
+  generated analysis projects can use helper modules without writing them at runtime.
+  Existing-file replacements, protected paths, batch targets and rollback remain checked.
+  Generated analysis and figure projects allow complete source blocks up to the
+  existing 32,000-character ceiling while retaining large-profile total limits;
+  configured numeric edit limits now reach research preparation, execution and recovery,
+  and remain attached when a validated project is reused for feedback changes.
+- Audit-stopped deliveries can authorize further capacity without reopening the
+  task, changing its saved findings or spending a model call.
+- Setup recovery can explicitly skip an unavailable paper resource without
+  losing its receipt or refetching it. Reproduction adapters accept inspected
+  implementation as basis without requiring a prose README classification;
+  authorization, protected author files and independent validation remain separate.
+  Users can explicitly adopt a displayed proposal and review saved valid settings
+  after generation capacity is exhausted, without a further call or budget reset.
+  Reproduction setup's paper-acquisition permission no longer enables another
+  retrieval phase in the generated execution task.
+
 ## 2026-10-08
 
 - Saved tasks permit timeout, output-limit and retry tuning without changing their
   model or endpoint. Capped text stream deadlines support bounded same-API retries,
   retaining uncertain consumption and the full failed-attempt reservation.
+  Chat setup inherits its model connection's output limit instead of imposing a
+  separate 3,000-token cap on task proposals.
+  ACM exports fit oversized figures to both page width and height while preserving
+  aspect ratio, preventing tall figures from extending beyond the page.
+  Adding a report to a settled fixed-protocol task extends delivery without
+  requiring a new research design or stopping before the next action is resolved.
   Code edit and repair prompts omit the plan's exact duplicate task section while
   retaining the complete task separately and leaving approved plans unchanged.
   Named-connection reading checkpoints completed structured responses per
   attempt, so an explicit retry can reuse unchanged reads after another batch
   item fails. Changed inputs, prompts or generation bindings are not reused;
   technical failures still pause rather than silently skipping sources.
+  Review field selections preserve empty recorded values, allowing missing-content
+  observations without rejecting a valid review as an empty quotation; literal
+  quotes and saved-value bindings remain strictly checked.
   Outline correction retries malformed responses only; provider failures remain
   subject to the connection's retry limit rather than a second application retry.
+  Joint writing also uses its existing single correction attempt for an unparseable
+  completed response, without adopting partial text or retrying transport failures.
+  The LiteLLM compatibility backend loads only when called, so SDK tasks and CLI
+  startup no longer trigger its unrelated model-price refresh.
   Stream errors identify explicit provider overload without exposing the provider's
   error body; interrupted responses retain unknown consumption.
 - Scripted analysis supports table-only results and multiple named figures, preserving
   output attachments and matching figure exports in portable packages. Validated
   revisions publish these packages without requiring a legacy `figure.png`.
+  Figure registration retains authored captions from script result records instead
+  of replacing them with filenames; existing path-only records remain compatible.
+  New and reused registered analysis projects receive the same figure-record contract.
+  Analysis packages can retain supplied source identities through the existing citation
+  map format for subsequent writing; unknown bibliographic fields are not inferred.
+  Saved-delivery selection accepts equivalent session paths containing parent segments.
   Generated projects can keep helper modules and editable layouts under `src/`;
   portable packages preserve this directory alongside the entry script and data.
   Saved reports and portable analyses remain reusable when an old code workspace
-  is no longer available; project editing still requires a valid registered workspace. Retrieval
+  is no longer available; project editing still requires a valid registered workspace.
+  Report reuse includes the assembler's recorded experiment-evidence package,
+  not only the manuscript and references. Saved citation maps supply reference
+  identities rather than presenting embedded reading notes as original passages. Retrieval
   keeps query/facet memberships when deduplicating papers. Survey review evaluates
   evidence and comparison without requiring a particular table or heading format.
   Full-text acquisition uses the source plan's allowance without a second implicit
   reservation that leaves selected papers unread; total limits and permissions remain intact.
+  HTML extraction separates displayed URLs from following text, keeping footnote
+  numbers out of source links without altering legitimate numeric URL suffixes.
+  Newly linked materials keep stable source identities across different link
+  selections, preventing unrelated documents from colliding during report reuse.
   Guided reproduction can reuse a validated project with its saved single-command
   protocol, result selectors, checker and interpreter in a new isolated task.
   Chat setup also accepts an explicit project/data download capacity, displayed
@@ -52,10 +221,17 @@ This file records implemented, user-visible changes in reverse chronological ord
 - Linked public materials support an explicit proxy and trusted CA route for
   exact source hosts, separate from model connections. Default direct access,
   TLS verification and acquisition limits remain unchanged.
+  Linked-page redirects are bounded and debit the remaining fetch allowance at
+  each extra GET; public-address and host-route checks apply at every hop.
+  Retained-passage lookup uses transient SQLite BM25 over existing lexical anchors,
+  improving short-condition retrieval without a persistent index or new dependency.
   Report references identify linked documentation separately from its parent
   paper, retaining its own URL without inventing authors, dates or release identity.
   Reusing a report carries the source bundle consumed by its Writer, including
   later linked-document reading, instead of only the first ingest.
+  Experiment writing and review also retain the saved implementation reading
+  context and validation excerpts, with their original scope and truncation;
+  these records do not certify the scientific method.
 - Code tasks report rejected edit budgets rather than misclassifying them as
   missing designs. The existing one-shot correction receives the rejection
   reason while retaining edit-size limits and protected files.
@@ -111,8 +287,10 @@ This file records implemented, user-visible changes in reverse chronological ord
   removes external SVG DTD declarations from export copies without fetching
   them; entity definitions and external rendered resources remain rejected.
 - Automatic investigations leave document and fetch slots for evidence followup
-  within the configured total. Explicit repository links take precedence over
-  generic links; guided full-text setup defaults to six remote resources.
+  within the configured total. Reading can request source-quoted data, licensing
+  or project URLs separately from scholarly keyword searches. Repository-first
+  selection remains the fallback without explicit URL requests; guided full-text
+  setup defaults to six remote resources.
 - Document extraction recovers valid Unicode surrogate pairs from parser output
   and records unpaired-character replacement as an extraction limitation, rather
   than aborting the whole acquisition or silently dropping source symbols.

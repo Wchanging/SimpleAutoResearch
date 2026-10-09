@@ -205,13 +205,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             print_line("Revise code/figure: simple-ar start --from-session SESSION --reuse code_project --goal 'Your changes'")
         return
     if args.command == "start":
-        from simple_ar.cli.start import prepare_start, reuse_session_materials
+        from simple_ar.cli.start import prepare_start, reuse_session_materials, select_start_model
         from simple_ar.core.locking import SessionLockError
         try:
             reuse_session_materials(args)
             if args.chat or args.resume_setup:
                 from simple_ar.cli.intake_dialogue import discuss_start
                 args._explicit_start_destinations = _explicit_session_option_destinations(parser, arguments, set(), command="start")
+                select_start_model(args, interactive=sys.stdin.isatty())
                 args = discuss_start(args)
                 if args is None:
                     return
@@ -546,6 +547,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
             "allowed_patterns": list(code_task_spec.edit_scope_allowed_patterns),
             "protected_patterns": list(code_task_spec.edit_scope_protected_patterns),
             "budget_profile": execute_options.budget_profile,
+            "edit_budget_overrides": execute_options.edit_budget_overrides,
             "allow_large_edits": bool(
                 execute_options.allow_large_edits or code_task_spec.allow_large_edits
             ),
@@ -646,7 +648,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         config["research_queries"] = list(args.queries)
     if args.providers:
         config["research_sources"] = list(args.providers)
-    for name in ("research_use_fulltext", "research_allow_pdf_download", "research_keep_raw_pdf", "research_materials_only"):
+    for name in ("research_use_fulltext", "research_allow_pdf_download", "research_keep_raw_pdf", "research_materials_only", "research_web_extract_backend"):
         value = getattr(args, name, None)
         if value is not None:
             config[name] = value
@@ -1205,6 +1207,9 @@ def _changed_resume_research_settings(
         "research_keep_raw_pdf": (
             getattr(args, "research_keep_raw_pdf", None), saved.get("research_keep_raw_pdf"),
         ),
+        "research_web_extract_backend": (
+            getattr(args, "research_web_extract_backend", None), saved.get("research_web_extract_backend"),
+        ),
     }
     changed = [
         name for name, (requested, previous) in checks.items()
@@ -1270,9 +1275,10 @@ def _print_research_report(args: argparse.Namespace) -> None:
                 reason="Resume the canonical report lifecycle within the persisted session budget.",
             )
         for _ in range(app.controller.manifest.budget.max_attempts + 8):
-            if view.next_action is None:
+            if view.next_action is None and view.status != "running":
                 break
-            print_line(f"Action: {view.next_action}")
+            if view.next_action is not None:
+                print_line(f"Action: {view.next_action}")
             view = app.advance(max_actions=1)
             print_line(
                 f"Status: {view.status}; next: {view.next_action or 'none'}"

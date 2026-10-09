@@ -19,6 +19,19 @@ MAX_DATA_BYTES = 20 * 1024 * 1024
 PROTECTED_PATTERNS = ("data/**", "tests/**")
 SCRIPT_EDIT_PATTERNS = ("analysis.py", "src/**", "outputs/**")
 VALIDATION_COMMAND = ("python", "tests/verify_delivery.py")
+SCRIPT_RESULT_REQUIREMENTS = (
+    'In object-shaped outputs/results.json, record each figure as '
+    '{"path": "outputs/<filename>", "caption": "<one paragraph>"} in the figures list. '
+    'Use an actual package-relative exported image path. Explain the displayed comparison, '
+    'units and meaning of lines, markers or uncertainty. These authored captions accompany '
+    'registered figures into later reports; they are not independent scientific checks.'
+    ' When supplied source identities are available, preserve them in results.json citation_map '
+    'using the existing citation_map.v1 format: {"schema_version":"citation_map.v1",'
+    '"entries":[{"paper_id":"stable-source-id","title":"recorded title",'
+    '"url":"recorded public URL","bibliography":{"authors":[],"year":"", "doi":""}}]}. '
+    'Copy only supplied identity fields; unknown authors, dates and DOI stay empty. '
+    'This metadata is source-reported, not verification of the source or its claims.'
+)
 
 
 def copy_code_analysis_package(source: Path, destination: Path | None, *, workspace: bool = False) -> dict:
@@ -80,6 +93,15 @@ def copy_code_analysis_package(source: Path, destination: Path | None, *, worksp
     recorded = read_json(root / "outputs/results.json")
     if not isinstance(recorded, (dict, list)) or not recorded:
         raise ValueError("Code analysis results must be a nonempty JSON object or array.")
+    if workspace and isinstance(recorded, dict) and isinstance(recorded.get("figures"), list):
+        # Captions belong to the producing analysis, not filename inference.
+        # Match only inventoried exports; legacy path-only entries still work.
+        captions = {row["path"]: row["caption"].strip() for row in recorded["figures"]
+                    if isinstance(row, dict) and isinstance(row.get("path"), str)
+                    and isinstance(row.get("caption"), str) and row["caption"].strip()}
+        for figure in figures:
+            figure["caption"] = next((captions[name] for name in
+                (figure["path"], *figure.get("exports", {}).values()) if name in captions), figure["caption"])
     result = {**result, "results": recorded}
     if destination is None:
         return result
@@ -246,6 +268,7 @@ def prepare_script_project(root: Path, data: Path | None, goal: str, *,
   Use descriptive filenames under outputs/ for each figure/table, and link every
   delivered figure/table from outputs/report.md with its meaning and source.
   Additional figures and SVG/PDF exports are supported. Use readable labels and units.
+  {SCRIPT_RESULT_REQUIREMENTS}
   When using Matplotlib, select a noninteractive backend for unattended runs.
 - Keep all generated files in this project, with deliverables under outputs/.
   No dependency installation, network access or destructive actions are authorized.

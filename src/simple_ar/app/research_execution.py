@@ -481,12 +481,12 @@ def implementation_request(
 ) -> ImplementationRequest:
     task = config.get("code_task")
     if not isinstance(task, Mapping) or set(task) - {
-        "run_dir", "approval_note", "max_repairs", "budget_profile", "allow_large_edits",
+        "run_dir", "approval_note", "max_repairs", "budget_profile", "allow_large_edits", "edit_budget_overrides",
         "env_mode", "python_executable", "validation_command", "validation_timeout_sec",
     }:
         raise ValueError(
             "execution.code_task accepts run_dir, approval_note, max_repairs, "
-            "budget_profile, allow_large_edits, env_mode, python_executable, validation_command and validation_timeout_sec."
+            "budget_profile, edit_budget_overrides, allow_large_edits, env_mode, python_executable, validation_command and validation_timeout_sec."
         )
     repair_limit(config)
     run_dir = Path(str(task.get("run_dir", "")))
@@ -501,6 +501,8 @@ def implementation_request(
             raise ValueError("code_task.budget_profile must be normal, large or absolute.")
         budget_profile = budget_profile.strip().lower()
     allow_large_edits = task.get("allow_large_edits", False)
+    from simple_ar.code_task.editing.budget import validated_edit_budget_overrides
+    overrides = validated_edit_budget_overrides(task.get("edit_budget_overrides", {}))
     if not isinstance(allow_large_edits, bool):
         raise ValueError("code_task.allow_large_edits must be a boolean.")
     execution = execution_request(config, task_text=task_text, contract=contract)
@@ -518,6 +520,7 @@ def implementation_request(
         max_repairs=repair_limit(config) if command else 0,
         revision_instruction=revision_instruction.strip(),
         budget_profile=budget_profile,
+        edit_budget_overrides=overrides,
         allow_large_edits=allow_large_edits,
     )
 

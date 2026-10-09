@@ -18,7 +18,8 @@ import stat
 import time
 import zipfile
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote, urljoin, urlsplit
+from typing import Callable
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
 import httpx
 
@@ -53,9 +54,17 @@ def _remaining(deadline: float) -> float:
 def _url(url: str, *, dns: bool = False) -> str:
     parsed = urlsplit(url)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
-            or parsed.password is not None or parsed.fragment or parsed.query or parsed.port not in (None, 443)
+            or parsed.password is not None or parsed.fragment or parsed.port not in (None, 443)
             or "\\" in url or any(ord(c) <= 32 or ord(c) == 127 for c in url)):
         raise _AssetError("public_https_url_required")
+    # Public document identities often live in the query (paper IDs, versions,
+    # download selectors). Preserve them; a query is not itself authentication.
+    # Credential-bearing/signed links remain unsuitable for public task records.
+    for name, _ in parse_qsl(parsed.query, keep_blank_values=True):
+        key = name.casefold().replace("-", "").replace("_", "")
+        if key in {"key", "apikey", "token", "accesstoken", "auth", "authorization",
+                   "password", "secret", "signature", "credential"} or key.startswith("xamz"):
+            raise _AssetError("public_https_url_required")
     if dns:
         try:
             addresses = [ipaddress.ip_address(parsed.hostname)]
@@ -72,39 +81,54 @@ def validate_public_url(url: str, *, dns: bool = False) -> str:
     return _url(url, dns=dns)
 
 
-def public_document_response(url: str, *, max_bytes: int) -> BytesIO:
-    """One bounded public GET, no redirects, cookies, implicit proxies or retry.
+def public_document_response(url: str, *, max_bytes: int,
+                             on_redirect: Callable[[], None] | None = None) -> BytesIO:
+    """Bounded public GETs, no cookies, implicit proxies or retry.
 
-    Reject redirects rather than spending unaccounted GETs. The caller owns
-    attempt/document budgets and cache history; zero bytes denies acquisition.
+    Redirects require the caller to account for each extra GET before sending it.
+    Without that callback only one GET is allowed. Address/route checks apply
+    to every hop; the same deadline and byte cap cover the whole acquisition.
     """
     if max_bytes <= 0:
         raise _AssetError("document_byte_budget_exhausted")
     deadline = time.monotonic() + LIMITS["deadline_seconds"]
     try:
-        validate_public_url(url, dns=True)
-        with httpx.Client(trust_env=False, follow_redirects=False,
-                          headers={"Accept-Encoding": "identity"},
-                          **_document_transport(url)) as client:
-            with client.stream("GET", url, timeout=min(30, _remaining(deadline))) as response:
-                if response.is_redirect:
-                    raise _AssetError("document_redirect_requires_explicit_url")
-                response.raise_for_status()
-                if response.headers.get("content-encoding", "identity").lower() != "identity":
-                    raise _AssetError("encoded_download_rejected")
-                if int(response.headers.get("content-length", "0")) > max_bytes:
-                    raise _AssetError("document_byte_limit")
-                body = bytearray()
-                for chunk in response.iter_raw():
-                    _remaining(deadline)
-                    if len(body) + len(chunk) > max_bytes:
+        target = url
+        for hop in range(LIMITS["max_gets"]):
+            validate_public_url(target, dns=True)
+            _remaining(deadline)
+            if hop:
+                try:
+                    on_redirect()
+                except RuntimeError:
+                    raise _AssetError("document_request_budget_exhausted") from None
+            with httpx.Client(trust_env=False, follow_redirects=False,
+                              headers={"Accept-Encoding": "identity"},
+                              **_document_transport(target)) as client:
+                with client.stream("GET", target, timeout=min(30, _remaining(deadline))) as response:
+                    if response.is_redirect:
+                        if on_redirect is None:
+                            raise _AssetError("document_redirect_requires_explicit_url")
+                        if hop == LIMITS["max_gets"] - 1:
+                            raise _AssetError("redirect_limit")
+                        target = validate_public_url(urljoin(target, response.headers["location"]))
+                        continue
+                    response.raise_for_status()
+                    if response.headers.get("content-encoding", "identity").lower() != "identity":
+                        raise _AssetError("encoded_download_rejected")
+                    if int(response.headers.get("content-length", "0")) > max_bytes:
                         raise _AssetError("document_byte_limit")
-                    body.extend(chunk)
-                if not body:
-                    raise _AssetError("empty_download")
-                result = BytesIO(body)
-                result.headers = response.headers.copy()
-                return result
+                    body = bytearray()
+                    for chunk in response.iter_raw():
+                        _remaining(deadline)
+                        if len(body) + len(chunk) > max_bytes:
+                            raise _AssetError("document_byte_limit")
+                        body.extend(chunk)
+                    if not body:
+                        raise _AssetError("empty_download")
+                    result = BytesIO(body)
+                    result.headers = response.headers.copy()
+                    return result
     except _AssetError:
         raise
     except Exception as error:

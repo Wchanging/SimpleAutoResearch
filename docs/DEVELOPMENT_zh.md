@@ -32,6 +32,9 @@ src/simple_ar/
 `from simple_ar.cli.main import main`。入口变更后先重新安装，再使用
 `--no-sync`；不要恢复依赖子模块导入顺序的包级同名转发。
 
+保存原文的段落排序使用 Python `sqlite3` 的 FTS5/BM25；自定义 Python 运行环境须提供
+FTS5。词项表仅在本次检索内存中存在，用后关闭，不增加数据库文件或索引服务。
+
 ## 工程原则与代码审查标准
 
 代码提示共用 `scope.prompt_file_inventory`，全部索引路径保留编辑/证据权限，详细

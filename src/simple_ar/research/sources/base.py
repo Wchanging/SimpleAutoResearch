@@ -154,6 +154,11 @@ def _budget(config: dict[str, object]) -> dict[str, object]:
     if isinstance(keep_raw_pdf, bool):
         budget["keep_raw_pdf"] = keep_raw_pdf
     parser_backend = _string(config.get("research_parser_backend"))
+    web_backend = _string(config.get("research_web_extract_backend"))
+    if web_backend:
+        if web_backend not in {"direct", "tavily_basic"}:
+            raise ValueError("research_web_extract_backend must be direct or tavily_basic")
+        budget["web_extract_backend"] = web_backend
     if parser_backend:
         budget["parser_backend"] = parser_backend
     novelty_backend = _string(config.get("research_novelty_backend"))

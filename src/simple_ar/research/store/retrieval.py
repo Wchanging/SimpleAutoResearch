@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import math
 import re
+import sqlite3
 from collections import Counter
 from collections.abc import Mapping
+from contextlib import closing
 from typing import Any
 
 from simple_ar.research.contracts import TextChunk
@@ -48,30 +50,36 @@ def source_query_terms(query: str) -> set[str]:
 
 
 def rank_source_chunks(chunks: list[TextChunk], query: str, *, limit: int) -> list[TextChunk]:
-    """Rank retained source text without creating another index or opening files."""
+    """Rank retained passages with transient SQLite BM25; no files or persistent index."""
     terms = source_query_terms(query)
     if not terms:
         return []
     # Section headings are retained navigation metadata, not body evidence.
     # Searching "Proofs" must not require the proof text to repeat its heading.
     headings = [str(chunk.metadata.get("heading") or "") for chunk in chunks]
-    overlaps = [(source_query_terms(chunk.text) | source_query_terms(heading)) & terms
-                for chunk, heading in zip(chunks, headings)]
-    weights = {term: 1 + math.log((len(chunks) + 1) / (1 + sum(term in row for row in overlaps)))
-               for term in terms}
+    passage_terms = [source_query_terms(chunk.text) | source_query_terms(heading)
+                     for chunk, heading in zip(chunks, headings)]
+    # Shared lexical anchors preserve Chinese bigrams and decimal boundaries.
+    # BM25 adds passage-length normalization, so a long generic introduction
+    # does not systematically displace a short, directly relevant statement.
+    with closing(sqlite3.connect(":memory:")) as database:
+        database.execute('''CREATE VIRTUAL TABLE passages USING fts5(
+            terms, tokenize="unicode61 remove_diacritics 0 tokenchars '.'")''')
+        database.executemany("INSERT INTO passages(rowid, terms) VALUES (?, ?)",
+                             [(index + 1, " ".join(sorted(row))) for index, row in enumerate(passage_terms)])
+        expression = " OR ".join('"' + term + '"' for term in sorted(terms))
+        scored = [(score, index - 1) for index, score in database.execute(
+            "SELECT rowid, bm25(passages) FROM passages WHERE passages MATCH ?", (expression,))
+            if passage_terms[index - 1] & terms]
     phrase = " ".join(re.findall(r"\w+", query.casefold()))
-    phrase_weight = math.fsum(weights[term] for term in sorted(terms))
-    scored = [(math.fsum(weights[term] for term in sorted(matches)) +
-               (phrase_weight if phrase and any(f" {phrase} " in
-                " " + " ".join(re.findall(r"\w+", text.casefold())) + " "
-                for text in (chunk.text, heading)) else 0), index)
-              for index, (chunk, heading, matches) in enumerate(zip(chunks, headings, overlaps)) if matches]
     # Full quoted prose can score above the numbered definition or caption.
     # Explicit labels route there first; ordinary queries keep lexical order.
     scored.sort(key=lambda row: (
         _source_label_match(chunks[row[1]].text, query) is None,
         " ".join(re.findall(r"\w+", headings[row[1]].casefold())) != phrase,
-        -row[0], row[1],
+        not (phrase and any(f" {phrase} " in " " + " ".join(re.findall(r"\w+", text.casefold())) + " "
+                            for text in (chunks[row[1]].text, headings[row[1]]))),
+        row[0], row[1],
     ))
     ranked = [chunks[index] for _, index in scored]
     labelled = [row for row in ranked if _source_label_match(row.text, query)]

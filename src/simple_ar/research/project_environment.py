@@ -114,6 +114,14 @@ def prepare_project_environment(*, context: CapabilityContext, request: Any,
         steps.append(check)
     observed = []
     refs = []
+    environment = request.run.env
+    if isolated:
+        # A task venv must not discover the controller's packages/interpreter
+        # through inherited Python search paths. Preserve explicitly selected
+        # indexes, proxies and resource settings, not the host Python runtime.
+        environment = dict(os.environ if environment is None else environment)
+        environment.pop("PYTHONPATH", None)
+        environment.pop("PYTHONHOME", None)
     selected_backend = backend or LocalExecutionBackend()
     limitations = [("Task venv; not an OS sandbox. Approved installation may run build code, access package indexes and write build metadata in the execution workspace." if isolated else "Current environment; no dependency installation or interpreter replacement. Checks execute project code, not in an OS sandbox."),
                    "Successful installation and pip check do not prove project imports, binary/GPU compatibility, data splits or scientific validity.",
@@ -127,6 +135,7 @@ def prepare_project_environment(*, context: CapabilityContext, request: Any,
         context.store.write_json("environment_setup.json", {"profile": profile, "steps": observed,
             "limitations": limitations}, kind="environment_setup", schema="environment_setup.v1")
         result = selected_backend.run(replace(request.run, command=argv, timeout_sec=profile["timeout_sec"],
+            env=environment,
             label=f"environment:{number}", output_dir=context.store.root / "environment_processes"))
         observed[-1] = result.to_json()
         refs.extend((context.store.write_text(f"environment_logs/{number}.stdout.txt", result.stdout, kind="execution_log"),

@@ -96,6 +96,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(services.config["report"]["template"], "experiment")
             self.assertNotIn("execution", services.config)
             self.assertIn("Implementation: not requested (supplied-material writing)", stream.getvalue())
+            bundle = Path(tmp) / "sources.json"
+            write_json(bundle, {"schema_version": "document_bundle.v1", "documents": [{
+                "document_id": "source", "source": "arxiv", "source_id": "1234.5678",
+                "title": "Original source", "kind": "paper", "evidence_role": "original_source"}],
+                "sections": [], "chunks": []})
+            with patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()), \
+                 patch("simple_ar.app.research_application.create_session", return_value=app) as creator, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                main(["research-session", "--topic", "Investigate a new question", "--task-kind", "survey",
+                      "--material", str(bundle), "--output-root", str(Path(tmp) / "survey")])
+            self.assertEqual(creator.call_args.args[0].asset_requests[0]["role"], "material")
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, "original-source"):
+                main(["research-session", "--topic", "Do not treat notes as sources", "--task-kind", "survey",
+                      "--material", str(material)])
 
     def test_code_task_init_same_second_reuses_unique_directory_owner(self):
         from datetime import datetime
@@ -957,7 +971,7 @@ class CliTests(unittest.TestCase):
                 session_root=session_root,
                 status="running",
                 status_reason="",
-                next_action="report_write",
+                next_action=None,
                 state_refs={},
                 attempts=(),
             )

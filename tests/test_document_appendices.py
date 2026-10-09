@@ -83,6 +83,12 @@ class DocumentAppendixTests(unittest.TestCase):
         self.assertIn('pretrain on 10,000 rows; loss = x2.', text)
         self.assertIn('Other conditions apply.', text)
         self.assertNotIn('10\n', text)
+        url = 'https://example.test/records/314'
+        linked = _html_to_text(f'<p>Data <a href="{url}">{url}</a><sup>15</sup>; '
+                              f'code <a href="{url}/source">repository</a>.</p>')
+        self.assertIn(url + ' 15', linked)
+        self.assertNotIn(url + '15', linked)
+        self.assertIn(f'repository ({url}/source)', linked)
 
     def test_explicit_sentence_case_headings_exclude_fenced_examples(self):
         text = ('# Study\nAda Example\n## What changes under distribution shift\nEvidence.\n'

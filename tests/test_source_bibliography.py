@@ -201,6 +201,19 @@ class MaterialBibliographyTests(unittest.TestCase):
 
     def test_observed_identifier_is_usable_without_a_model_or_filename_guess(self):
         context, _, bundle, _, _ = self.inputs()
+        from simple_ar.report.narrative import _prompt_handle_view, review_source_evidence
+        bundle.chunks.extend(TextChunk(f"span-{index}", "doc", "A retained passage.",
+            metadata={"section_id": f"part-{index}", "heading": f"Independent experiment {index}"})
+            for index in range(9))
+        navigable, _ = build_material_report_inputs(topic="Explain results", documents=bundle,
+            documents_ref=ArtifactRef("documents.json"), assets=[])
+        source_view = _prompt_handle_view(navigable.source_handles[0])
+        directory = source_view['metadata']['source_directory']
+        self.assertEqual(directory['total_sections'], 10)
+        self.assertEqual(directory['sections'][-1]['heading'], 'Independent experiment 8')
+        self.assertNotIn('span-8', [row['chunk_id'] for row in source_view['metadata']['evidence_passages']])
+        self.assertEqual(review_source_evidence([source_view])[0]['metadata']['source_directory'], directory)
+        self.assertEqual(len(bundle.chunks), 10)  # Navigation does not rewrite the source.
         paper = Paper.from_row(context.papers[0])
         self.assertEqual(paper.url, "https://arxiv.org/abs/2501.12345v2")
         self.assertEqual(paper.title, "paper input")
@@ -218,7 +231,9 @@ class MaterialBibliographyTests(unittest.TestCase):
             path = Path(directory) / "recorded-identities.json"
             source = Paper("study-2025", "Recorded study", ["Ada"], "", "https://example.org/study", published="2025")
             path.write_text(json.dumps(citation_map_artifact({source.id: 1}, [source], {"P8": source.id})), encoding="utf-8")
-            bundle = build_document_bundle(papers=[], source_plan=SourcePlan([], local_documents=[str(path)]),
+            draft = Path(directory) / "draft.md"
+            draft.write_text("A supplied draft is not evidence of its cited original sources.", encoding="utf-8")
+            bundle = build_document_bundle(papers=[], source_plan=SourcePlan([], local_documents=[str(path), str(draft)]),
                 cache_dir=None, extraction_dir=Path(directory))
             context, memory = build_material_report_inputs(topic="Revise the supplied draft", documents=bundle,
                 documents_ref=ArtifactRef("documents.json"), assets=[SimpleNamespace(locator=str(path), role="material")])
@@ -231,12 +246,58 @@ class MaterialBibliographyTests(unittest.TestCase):
             self.assertIn("primary text was not rechecked", retained.bibliographic_notes[0])
             self.assertEqual(memory.source_handles[-1].metadata["document_chunk_count"], 0)
             self.assertEqual(memory.source_handles[-1].metadata["evidence_role"], "reused_reference_metadata_not_primary_text")
+            self.assertFalse(any(row.title == "recorded identities" for row in memory.source_handles))
+            self.assertEqual(len(memory.source_handles), 2)  # Draft plus typed reference; no duplicate map-as-document.
+            for index in (1, 2):
+                dataset = Paper(f"dataset-{index}", f"Recorded dataset {index}", [], "", "")
+                bundle.records.append(DocumentRecord(document_id=f"analysis-{index}", title=dataset.title,
+                    source="local_analysis", metadata={"code_analysis": {"schema_version": "code_analysis.v1",
+                        "artifact": f"analysis-{index}/analysis.json", "results": {"citation_map":
+                            citation_map_artifact({dataset.id: 1}, [dataset], {"P8": dataset.id})}}}))
+            combined, _ = build_material_report_inputs(topic="Combine supplied results", documents=bundle,
+                documents_ref=ArtifactRef("documents.json"), assets=[SimpleNamespace(locator=str(path), role="material")])
+            self.assertEqual(combined.citation_key_map, {"P8": source.id, "P1": "dataset-1", "P2": "dataset-2"})
+            # Retrieved source identity survives bundle reuse. Same-title
+            # sources with different explicit identities must remain distinct.
+            for storage_id, paper_id in (("storage-42", source.id), ("storage-99", "distinct-study")):
+                bundle.records.append(DocumentRecord(document_id=storage_id, title=source.title,
+                    source="fixture", authors=source.authors, url=source.url, published=source.published,
+                    metadata={"paper_id": paper_id, "retained_source_role": "paper",
+                              "retained_bundle": str(path)}))
+                bundle.chunks.append(TextChunk(f"chunk-{storage_id}", storage_id, "Original source conditions."))
+            before = copy.deepcopy(bundle.to_handoff_dict())
+            reused, _ = build_material_report_inputs(topic="Check the original conditions", documents=bundle,
+                documents_ref=ArtifactRef("documents.json"), assets=[SimpleNamespace(locator=str(path), role="material")])
+            self.assertEqual(sum(p['id'] == source.id for p in reused.papers), 1)
+            self.assertEqual(sum(p['id'] == "distinct-study" for p in reused.papers), 1)
+            primary = [h for h in reused.source_handles if h.paper_id == source.id]
+            self.assertEqual(len(primary), 1)
+            self.assertEqual(primary[0].metadata['document_id'], "storage-42")
+            self.assertEqual(primary[0].metadata['document_chunk_count'], 1)
+            self.assertEqual(primary[0].citation_key, "P8")
+            self.assertEqual(bundle.to_handoff_dict(), before)
+            linked_id = "material-" + "repo-snapshot".encode().hex()
+            linked = Paper(linked_id, "Linked docs", [], "", "https://example.org/repo")
+            path.write_text(json.dumps(citation_map_artifact({source.id: 1, linked.id: 2},
+                [source, linked], {"P8": source.id, "P9": linked.id})), encoding="utf-8")
+            bundle.records.append(DocumentRecord(document_id="repo-snapshot", title=linked.title,
+                source="supporting_material", url=linked.url, metadata={"kind": "supporting_material"}))
+            bundle.chunks.append(TextChunk("repo-text", "repo-snapshot", "Public installation instructions."))
+            linked_context, _ = build_material_report_inputs(topic="Reuse sources and software docs", documents=bundle,
+                documents_ref=ArtifactRef("documents.json"), assets=[SimpleNamespace(locator=str(path), role="material")])
+            linked_handles = [h for h in linked_context.source_handles if h.paper_id == linked.id]
+            self.assertEqual(len(linked_handles), 1)
+            self.assertEqual(linked_handles[0].kind, "material")
+            self.assertEqual(linked_handles[0].metadata['document_chunk_count'], 1)
+            self.assertEqual(linked_context.citation_key_map['P9'], linked.id)
 
     def test_projection_assembly_and_bibtex_use_the_same_accepted_fields(self):
         context, memory, bundle, note, _ = self.inputs()
         original = copy.deepcopy((context.model_dump(), memory.model_dump(), bundle.to_handoff_dict()))
         memory.source_handles.append(SourceHandle(handle="extra", kind="material"))
-        projected, saved = apply_report_bibliography(context, memory, documents=bundle, notes=[note])
+        # A planner and a later writer may fill different fields for one source.
+        notes = [{**note, "bibliographic_fields": [field]} for field in note["bibliographic_fields"]]
+        projected, saved = apply_report_bibliography(context, memory, documents=bundle, notes=notes)
         paper = Paper.from_row(projected.papers[0])
         self.assertEqual(paper.authors, ["Ada Example", "Bo Example"])
         self.assertEqual(projected.source_handles[0].title, "A supplied study")
@@ -247,6 +308,37 @@ class MaterialBibliographyTests(unittest.TestCase):
         self.assertEqual(context.model_dump(), original[0])
         self.assertEqual(bundle.to_handoff_dict(), original[2])
         self.assertEqual(projected.source_handles[0].metadata["bibliography"]["verification_status"], "not_independently_verified")
+        partial, partial_memory = context, memory
+        for proposal in notes:
+            partial, partial_memory = apply_report_bibliography(partial, partial_memory,
+                documents=bundle, notes=[proposal])
+        self.assertEqual(partial.papers, projected.papers)
+        self.assertEqual(partial.source_handles[0].metadata["bibliographic_sources"],
+                         projected.source_handles[0].metadata["bibliographic_sources"])
+        # A registered execution package keeps its typed roles when reused;
+        # it must not become this writing task's own execution or paper.
+        import tempfile
+        from pathlib import Path
+        from simple_ar.report.narrative import _prompt_handle_view, review_source_evidence
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "observations.json"
+            payload = {"schema_version": "report_experiment_evidence.v1", "records": {
+                "experiment_plan": {"hypothesis": "A configured comparison"},
+                "results": {"execution_record": {"invocation_id": "saved-run", "duration_sec": 12.5},
+                            "implementation": {"method_validation": {"status": "not_checked"}}}}}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            bundle.records.append(DocumentRecord(document_id="observations", title="Saved run",
+                source="local_files", source_id=str(path), local_path=str(path), extraction_status="parsed"))
+            bundle.chunks.append(TextChunk("observed", "observations", json.dumps(payload)))
+            projected, _ = build_material_report_inputs(topic="Explain saved observations", documents=bundle,
+                documents_ref=ArtifactRef("documents.json"), assets=[])
+            view = _prompt_handle_view(next(row for row in projected.source_handles if row.paper_id == "observations"))
+            evidence = view["metadata"]["recorded_execution_evidence"]
+            self.assertEqual(evidence["declared_protocol"]["hypothesis"], "A configured comparison")
+            self.assertEqual(evidence["execution_records"][0]["duration_sec"], 12.5)
+            self.assertEqual(review_source_evidence([view])[0], view)
+            self.assertEqual(projected.results["session_execution"], "not_requested")
+            self.assertNotIn("observations", [row["id"] for row in projected.papers])
 
     def test_foreign_unsupported_and_recorded_fields_cannot_be_promoted(self):
         context, memory, bundle, note, _ = self.inputs()
@@ -324,3 +416,46 @@ class MaterialBibliographyTests(unittest.TestCase):
                 config=config, gateway=ReportToolGateway(context, documents=bundle), completed_checkpoint=saved)
         self.assertEqual(len(resumed.sections), 2)
         self.assertTrue(all("outline" not in label for label in labels))
+        # Template-only writing must retain the same bibliography responsibility
+        # in joint, single-section and format-recovery paths, without a new call.
+        for scope in ("document", "section"):
+            with self.subTest(scope=scope):
+                context, memory, bundle, note, _ = self.inputs()
+                memory.section_plan.append(ReportSectionPlan(section_id="limits", heading="Limits", goal="Qualify"))
+                config = ReportRuntimeConfig(template="source_review", outline_strategy="template",
+                    draft_scope=scope, review_scope="document", document_review=True, max_review_iterations=0)
+                calls, snapshots = [], []
+                class TemplateClient:
+                    def ask_json(self, system, prompt, *, label="", **unused):
+                        calls.append(label)
+                        view = json.JSONDecoder().raw_decode(prompt[prompt.index("{"):])[0]
+                        if "reviewer" in label:
+                            self_test.assertIn("A supplied study", prompt)
+                            self_test.assertIn("Ada Example", prompt)
+                            return {"section_reviews": []}
+                        self_test.assertNotIn("outline", label)
+                        if len(calls) == 1:
+                            self_test.assertIn("source_front_matter", view)
+                            return {"source_notes": [{**note, "title": "REJECTED"}]}  # No valid body.
+                        if len(calls) == 2:
+                            self_test.assertIn("source_front_matter", view)
+                        rows = view.get("sections", [{"section": view.get("section")}])
+                        drafts = [{"section_id": row["section"]["section_id"],
+                                   "draft_markdown": "A bounded observation."} for row in rows]
+                        return {**({"sections": drafts} if "sections" in view else drafts[0]),
+                                "source_notes": [note]}
+                template = load_report_template_bundle(report_mode=context.report_mode, config=config)
+                gateway = ReportToolGateway(context, documents=bundle)
+                result = run_report_agent(client=TemplateClient(), context=context, memory=memory,
+                    template=template, config=config, gateway=gateway, checkpoint_sink=snapshots.append)
+                self.assertEqual(result.memory.outline_planning["source_notes"], [note])
+                self.assertEqual(gateway.context.papers[0]["title"], "A supplied study")
+                self.assertEqual(context.papers[0]["title"], "paper input")
+                projected, _ = apply_report_bibliography(context, result.memory, documents=bundle,
+                    notes=result.memory.outline_planning["source_notes"])
+                self.assertEqual(projected.papers[0]["authors"], ["Ada Example", "Bo Example"])
+                count = len(calls)
+                run_report_agent(client=TemplateClient(), context=context, memory=memory,
+                    template=template, config=config, gateway=ReportToolGateway(context, documents=bundle),
+                    completed_checkpoint=snapshots[-1])
+                self.assertEqual(len(calls), count)

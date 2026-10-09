@@ -106,6 +106,7 @@ class TaskPlanTests(unittest.TestCase):
                     "allowed_patterns": ["adapter.py"], "initial_files": ["adapter.py"],
                     "protected_patterns": ["check.py", "formal.py"],
                     "approval_note": "Authorize isolated fixture adaptation", "env_mode": "current",
+                    "edit_budget_overrides": {"max_new_chars": 32000},
                     "validation_command": ["python", "check.py"], "validation_timeout_sec": 10}}
             app = create_session(ResearchBrief(request_text="Connect the fixture output without changing conditions.",
                 requested_outputs=("experiments",)), root=root / "session",
@@ -142,6 +143,11 @@ class TaskPlanTests(unittest.TestCase):
             self.assertNotIn("initial_files", recovered._effective_config()["execution"]["code_task"])
             self.assertEqual((workspace / "adapter.py").read_text(), INITIAL_ADAPTER_SOURCE)
             independent = implementation_request(prepared, None, require_validation=True)
+            self.assertEqual(independent.edit_budget_overrides, {"max_new_chars": 32000})
+            for invalid in ({"max_new_chars": True}, {"unknown_limit": 1}, {"max_new_chars": 0}):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    implementation_request({**prepared, "code_task": {
+                        **prepared["code_task"], "edit_budget_overrides": invalid}}, None)
             self.assertEqual(independent.validation_command, (sys.executable, "check.py"))
             with patch.object(app, "_pause_action", return_value=False), patch.object(app, "_execute") as execute:
                 self.assertFalse(app._run_measurement_action("experiment"))

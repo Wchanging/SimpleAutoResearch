@@ -189,6 +189,8 @@ def build_parser(
                                 default=None, help="Maximum remote full-text documents to fetch; omit for no document count cap.")
     session_parser.add_argument("--max-pdf-mb", dest="research_max_pdf_mb", type=int,
                                 default=None, help="Maximum size of each fetched PDF in MiB; omit for no PDF size cap.")
+    session_parser.add_argument("--web-extract-backend", dest="research_web_extract_backend",
+                                choices=("direct", "tavily_basic"), default=None)
     session_parser.add_argument("--idea-limit", type=int, default=3)
     session_parser.add_argument(
         "--max-research-iterations", type=int, default=1,

@@ -94,6 +94,25 @@ class ReportLengthAuditTests(unittest.TestCase):
             self.check(preview.report_markdown, context, memory, body="word " * 13).reviewer_findings))
         self.assertTrue(any(f.finding_id == "document-length-unavailable" for f in
             self.check(preview.report_markdown, context, memory, body="").reviewer_findings))
+        # Excluding only references is not the same contract as excluding
+        # headings as well. Preview and final audit use the same canonical
+        # body field, even when bibliography text contains a heading-like title.
+        quote = 'Deliver 8–50 words, excluding references but including headings.'
+        context.problem_markdown = quote
+        request = dict(unit='words', scope='manuscript', request_quote=quote,
+            min_words=8, max_words=50, target_words=12)
+        memory.document_plan = budget_document_plan(context, memory, config,
+            ReportDocumentPlan(sections=[section]), request)
+        preview = preview_report_document(ReportAssemblyRequest(title=context.topic,
+            sections=tuple(drafts), config=config, document_plan=memory.document_plan))
+        observation = delivery_text_observation(context, memory, drafts, config)
+        self.assertEqual(observation['markdown_token_count'], len(preview.report_body_markdown.split()))
+        self.assertGreater(observation['markdown_token_count'], 10)
+        self.assertFalse(any(f.type == 'delivery_length' for f in self.check(
+            preview.report_markdown + '\n## References\n' + 'reference ' * 80,
+            context, memory, body=preview.report_body_markdown).reviewer_findings))
+        self.assertTrue(any(f.finding_id == 'document-length-outside-budget' for f in
+            self.check(preview.report_markdown, context, memory, body='word ' * 51).reviewer_findings))
 
     def objects(self):
         quote = "Deliver 8–12 words for the whole document, including references."

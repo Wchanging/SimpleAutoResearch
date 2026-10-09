@@ -118,7 +118,7 @@ def analysis_material_paths(paths: Iterable[Path]) -> tuple[Path, ...]:
     return tuple(packages)
 
 
-def retained_document_materials(paths: Iterable[Path]) -> dict[Path, DocumentBundle]:
+def retained_document_materials(paths: Iterable[Path], *, original_sources_only: bool = False) -> dict[Path, DocumentBundle]:
     """Restore declared source bundles, not serialized prose or old judgments.
 
     Embedded records/sections/chunks are reused. Source paths are provenance,
@@ -138,6 +138,13 @@ def retained_document_materials(paths: Iterable[Path]) -> dict[Path, DocumentBun
             raise ValueError("Retained document bundle requires distinct source identities.")
         if any(row.document_id not in identifiers for row in [*bundle.sections, *bundle.chunks]):
             raise ValueError("Retained source text refers to an unknown document.")
+        if original_sources_only:
+            identifiers = {row.document_id for row in bundle.records if row.is_original_source}
+            if not identifiers:
+                raise ValueError("Retained document bundle has no original sources for a survey.")
+            bundle = replace(bundle, records=[row for row in bundle.records if row.document_id in identifiers],
+                sections=[row for row in bundle.sections if row.document_id in identifiers],
+                chunks=[row for row in bundle.chunks if row.document_id in identifiers])
         retained[path.resolve()] = bundle
     return retained
 
@@ -155,6 +162,7 @@ class DocumentIngestRequest:
     parser: DocumentParser | None = None
     analysis_paths: tuple[Path, ...] = ()
     supporting_records: tuple[DocumentRecord, ...] = ()
+    original_sources_only: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "papers", tuple(self.papers))
@@ -286,6 +294,23 @@ def build_local_document_bundle(
     )
 
 
+def build_draft_document_bundle(path: Path, *, extraction_dir: Path, identity: str) -> DocumentBundle:
+    """Keep an explicitly selected draft readable but separate from evidence.
+
+    The caller owns draft selection; neither filenames nor prose determine its
+    role. Use the ordinary parser and retained-bundle handoff, not a new store.
+    """
+    bundle = build_local_document_bundle([path], extraction_dir=extraction_dir)
+    identifiers = {row.document_id: f"{identity}:{row.document_id}" for row in bundle.records}
+    bundle.records[:] = [replace(row, document_id=identifiers[row.document_id], metadata={
+        **row.metadata, "kind": "prior_draft", "evidence_role": "prior_draft_not_primary_evidence",
+    }) for row in bundle.records]
+    bundle.sections[:] = [replace(row, document_id=identifiers[row.document_id],
+        section_id=f"{identity}:{row.section_id}") for row in bundle.sections]
+    bundle.chunks[:] = build_text_chunks(bundle.records, sections=bundle.sections)
+    return bundle
+
+
 def run_document_ingest_capability(
     *,
     context: CapabilityContext,
@@ -298,8 +323,8 @@ def run_document_ingest_capability(
     stable status mapping for downstream Read capabilities.
     """
 
-    packages = analysis_material_paths(request.analysis_paths)
-    retained = retained_document_materials(request.analysis_paths)
+    packages = () if request.original_sources_only else analysis_material_paths(request.analysis_paths)
+    retained = retained_document_materials(request.analysis_paths, original_sources_only=request.original_sources_only)
     package_paths = list(packages)
     for path, saved in list(retained.items()):
         analyses = [record for record in saved.records
@@ -338,7 +363,6 @@ def run_document_ingest_capability(
             from simple_ar.result_analysis.script_project import copy_code_analysis_package
             result = copy_code_analysis_package(path, context.store.root / prefix)
             text = (context.store.root / prefix / "outputs/report.md").read_text(encoding="utf-8")
-            text += "\nRecorded script outputs (not independently recomputed):\n" + json.dumps(result["results"], ensure_ascii=False)
         else:
             result = copy_analysis_package(path, context.store.root / prefix)
             text = table_markdown({**result, "figures": []})
@@ -354,6 +378,17 @@ def run_document_ingest_capability(
                           "evidence_role": "validated_script_output_not_independently_recomputed"}))
             bundle.sections.append(DocumentSection(section_id=f"{document_id}:results", document_id=document_id,
                 section="results", heading="Supplied script results", text=text, source_path=f"{prefix}/outputs/report.md"))
+            # Numeric outputs are structured source material, not one long
+            # narrative line. Keep field identity on every derived chunk so
+            # later groups remain discoverable after the initial excerpt.
+            values = result["results"]
+            fields = values.items() if isinstance(values, dict) else [(None, values)]
+            for field_index, (key, value) in enumerate(fields, 1):
+                bundle.sections.append(DocumentSection(
+                    section_id=f"{document_id}:output-{field_index}", document_id=document_id,
+                    section="results", heading="Recorded script outputs" + (f": {key}" if key is not None else ""),
+                    text=json.dumps({key: value} if key is not None else value, ensure_ascii=False, indent=2),
+                    source_path=f"{prefix}/outputs/results.json"))
             imported.extend(context.store.ref(item.relative_to(context.store.root), kind="code_analysis_attachment")
                 for item in (context.store.root / prefix).rglob("*") if item.is_file())
             continue
@@ -373,16 +408,32 @@ def run_document_ingest_capability(
     if packages:
         bundle.chunks[:] = build_text_chunks(bundle.records, sections=bundle.sections, max_chunks=request.max_chunks)
     for path, saved in retained.items():
-        existing = {record.document_id for record in bundle.records}
-        if existing.intersection(record.document_id for record in saved.records):
-            raise ValueError("Retained document identities conflict with another supplied source.")
+        existing = {record.document_id: record for record in bundle.records}
+        # A follow-up naturally retrieves previously read sources. Choose one
+        # complete text version; never mix old chunks with new sections.
+        keep_saved = set()
+        for record in saved.records:
+            current = existing.get(record.document_id)
+            if current is not None:
+                if (current.source != record.source or current.is_original_source != record.is_original_source
+                        or any(getattr(current, key) and getattr(record, key)
+                               and getattr(current, key) != getattr(record, key) for key in ("source_id", "doi"))):
+                    raise ValueError("Retained document identities conflict with another supplied source.")
+                current_text = any(row.document_id == record.document_id for row in bundle.chunks)
+                saved_text = any(row.document_id == record.document_id for row in saved.chunks)
+                if current_text and (current.extraction_status == "parsed" or not saved_text):
+                    continue
+            keep_saved.add(record.document_id)
+        bundle.records[:] = [row for row in bundle.records if row.document_id not in keep_saved]
+        bundle.sections[:] = [row for row in bundle.sections if row.document_id not in keep_saved]
+        bundle.chunks[:] = [row for row in bundle.chunks if row.document_id not in keep_saved]
         bundle.records.extend(replace(record, metadata={**record.metadata,
             "retained_bundle": str(path),
             "retained_source_role": "paper" if record.metadata.get("paper_id") else "material",
-            "evidence_role": "retained_source_text_not_reverified"})
-            for record in saved.records)
-        bundle.sections.extend(saved.sections)
-        bundle.chunks.extend(saved.chunks)
+            "evidence_role": record.metadata.get("evidence_role") or "retained_source_text_not_reverified"})
+            for record in saved.records if record.document_id in keep_saved)
+        bundle.sections.extend(row for row in saved.sections if row.document_id in keep_saved)
+        bundle.chunks.extend(row for row in saved.chunks if row.document_id in keep_saved)
     output = context.store.write_json(
         "document_bundle.json",
         bundle.to_handoff_dict(),

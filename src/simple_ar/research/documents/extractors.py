@@ -253,9 +253,22 @@ def _read_pdf(path: Path, *, max_pages: int | None, coverage: dict[str, object] 
     parts: list[str] = []
     empty_pages: list[int] = []
     for page in reader.pages[:max_pages]:
-        parts.append(page.extract_text() or "")
-        if not parts[-1].strip():
-            empty_pages.append(len(parts))
+        text = page.extract_text() or ""
+        if not text.strip():
+            empty_pages.append(len(parts) + 1)
+        # Link annotations carry exact targets that visible text may omit or
+        # split across lines. Preserve them as attributed resources, not claims
+        # or permission to fetch/execute their contents.
+        links = []
+        for annotation in page.get("/Annots", []):
+            action = annotation.get_object().get("/A")
+            if hasattr(action, "get") and action.get("/S") == "/URI":
+                uri = str(action.get("/URI") or "").strip()
+                if uri.startswith(("https://", "http://")) and uri not in links:
+                    links.append(uri)
+        if links:
+            text += "\nPDF hyperlink targets (not verified contents):\n" + "\n".join(links)
+        parts.append(text)
     if coverage is not None:
         coverage.update(total_pages=len(reader.pages), extracted_pages=len(parts), page_limit=max_pages,
                         truncated=len(parts) < len(reader.pages), empty_text_pages=empty_pages)
@@ -319,6 +332,9 @@ class _HTMLTextParser(HTMLParser):
             label = "".join(self.parts[start:]).strip()
             if target and target != label:
                 self.parts.append(f" ({target})")
+            elif target.startswith(("https://", "http://")):
+                # A displayed URL ends at its anchor, not at the next text node.
+                self.parts.append(" ")
             self.anchor = None
         elif not self.skip_depth and tag in self.BLOCK_TAGS:
             self.parts.append("\n")

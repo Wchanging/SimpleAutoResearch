@@ -12,7 +12,7 @@ import re
 
 from simple_ar.research.contracts import CLAIM_SCOPE_RULES, COMPARISON_SCOPE_RULE
 from simple_ar.report.execution_evidence import report_execution_evidence
-from simple_ar.report.document_plan import ARGUMENT_PLAN_SCHEMA, ARGUMENT_PLANNING_RULES, LENGTH_REQUEST_RULE, LENGTH_REQUEST_SCHEMA, check_document_length, manuscript_body_tokens, reserve_document_words, supplied_figure_sources, validate_length_request
+from simple_ar.report.document_plan import ARGUMENT_PLAN_SCHEMA, ARGUMENT_PLANNING_RULES, LENGTH_REQUEST_RULE, LENGTH_REQUEST_SCHEMA, check_document_length, document_tokens, manuscript_body_tokens, reserve_document_words, supplied_figure_sources, validate_length_request
 from simple_ar.report.data_delivery import DELIVERY_RULES, attach_delivery_block, supplied_data_delivery
 
 from simple_ar.report.schema import (
@@ -93,6 +93,17 @@ def report_objective(context: ReportContext, memory: ReportMemory) -> str:
         context.problem_markdown, context.goal_markdown,
     ) if text.strip()))
     return "\n\n".join(requests) or memory.objective or context.topic
+
+
+def prior_draft_context(context: ReportContext) -> dict[str, Any]:
+    """Expose selected old prose for editing, never as an evidence choice."""
+    return {
+        "drafts": [_prompt_handle_view(row) for row in context.source_handles if row.kind == "prior_draft"],
+        "use": "These are earlier drafts selected for revision or reorganization, not primary evidence. "
+               "Use them to identify what to preserve or change. Resolve factual claims from the actual sources "
+               "and recorded results; new supported evidence can supersede old prose. Do not cite a draft "
+               "as proof or keep both an obsolete statement and its correction. Retained read tools can inspect its full text.",
+    }
 
 
 def report_tool_context(
@@ -214,7 +225,7 @@ def evidence_outline_context(
     metrics = _prompt_metrics(memory, detail="summary")
     objective = report_objective(context, memory)
     metric_rows = metrics["rows"]
-    handles = memory.source_handles
+    handles = [row for row in memory.source_handles if row.kind != "prior_draft"]
     claims = memory.claims_evidence_matrix
     adaptive_builtin = (template is not None and template.name in BUILTIN_TEMPLATE_NAMES
         and config.template in {"", "auto", *BUILTIN_TEMPLATE_NAMES}
@@ -235,6 +246,7 @@ def evidence_outline_context(
              "target_words": section.target_words} for section in memory.section_plan if not adaptive_builtin
         ],
         "sources": [_prompt_handle_view(handle) for handle in handles[:40]],
+        "previous_document": prior_draft_context(context),
         "sources_omitted": max(0, len(handles) - 40),
         "evidence_handle_choices": [handle.handle for handle in handles[:40]],
         "supplied_figures": supplied_figure_sources(context),
@@ -381,9 +393,11 @@ def delivery_text_observation(
         budget = memory.document_plan.length_budget if memory.document_plan else {}
         body_count = manuscript_body_tokens(preview.report_body_markdown)
         delivery_count = len(preview.report_markdown.split())
-        selected_count = body_count if budget.get("scope") == "manuscript_body" else delivery_count
+        selected_count = document_tokens(preview.report_body_markdown, preview.report_markdown, budget.get("scope", ""))
         if budget.get("scope") == "manuscript_body":
             result["counting_rule"] = "whitespace-separated tokens in canonical body Markdown, including tables, captions and body attachments, excluding ATX title/section headings and appended bibliography; not a language-independent word-limit verifier"
+        elif budget.get("scope") == "manuscript":
+            result["counting_rule"] = "whitespace-separated tokens in canonical body Markdown, including title, headings, tables, captions and body attachments, excluding appended bibliography; not a language-independent word-limit verifier"
         result.update(preview_status="pre_render_text_preview",
                       markdown_token_count=selected_count,
                       full_delivery_markdown_token_count=delivery_count,
@@ -772,12 +786,16 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
                 if key in integrity
             }
         evidence = _mapping(implementation.get("evidence"))
-        if evidence is not None and "patch" in evidence:
+        if evidence is not None:
             # Patches are already bounded at the artifact boundary. Keep the
             # cumulative lineage when a repair attempt stores only a delta;
-            # Keep bounded method-validation facts separately; omit bulky
-            # validation/review logs from the report prompt.
-            compact_evidence: dict[str, Any] = {"patch": evidence["patch"]}
+            # Keep observed reading/check records as well as the patch.
+            # Their absence from a preview is not proof that no check occurred.
+            # All excerpts retain the projection owner's bounds/provenance.
+            compact_evidence: dict[str, Any] = {
+                key: evidence[key] for key in ("patch", "source_context", "validation", "validation_report", "validation_stdout")
+                if key in evidence
+            }
             patches = evidence.get("patches")
             if isinstance(patches, list):
                 compact_evidence["patches"] = [
@@ -1055,6 +1073,24 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
     # Writer and Reviewer must see the same evidence, not just an abstract.
     # Keep source excerpts distinct from model-derived reading notes.
     source_metadata = handle.metadata
+    if handle.kind == "prior_draft":
+        data["attribution_guidance"] = "Earlier prose selected for editing, not primary evidence or a bibliography source."
+        data["metadata"]["evidence_role"] = "prior_draft_not_primary_evidence"
+    directory = source_metadata.get("source_directory")
+    if isinstance(directory, dict):
+        data["metadata"]["source_directory"] = directory
+        data["source_navigation"] = (
+            "This directory locates retained sections; headings are not evidence. "
+            "When the requested experiment, definition or comparison is absent from the overview, "
+            "use search_source_chunks with its specific heading or get_neighbor_chunks with its chunk_id "
+            "before concluding that the retained source lacks it."
+        )
+    if isinstance(source_metadata.get("recorded_execution_evidence"), dict):
+        data["metadata"]["recorded_execution_evidence"] = source_metadata["recorded_execution_evidence"]
+        data["attribution_guidance"] = (
+            "These supplied records describe a previous execution, not work performed in this writing task. "
+            "Use their declaration/observation roles and exact verification scope; do not cite them as a paper."
+        )
     title_source = source_metadata.get("title_source")
     if isinstance(title_source, dict):
         data["metadata"]["title_source"] = {
@@ -1153,14 +1189,31 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
         data["metadata"]["reading_notes_truncated"] = notes_truncated
     passages = source_metadata.get("evidence_passages")
     if isinstance(passages, list):
+        # A single presentation budget, not a second six-passage sample of
+        # referenced evidence. Both Writer and independent Reviewer use this view.
+        selected_passages = []
+        remaining = 24000
+        for row in passages:
+            if not isinstance(row, dict):
+                continue
+            text = str(row.get("text", ""))[:min(1400, remaining)]
+            if not text:
+                continue
+            selected_passages.append({**row, "text": text,
+                "truncated": bool(row.get("truncated")) or len(str(row.get("text", ""))) > len(text)})
+            remaining -= len(text)
+            if not remaining:
+                break
         data["metadata"]["evidence_passages"] = [
             {"chunk_id": str(row.get("chunk_id", "")), "text": str(row.get("text", ""))[:1400],
              "character_start": row.get("character_start"), "character_end": row.get("character_end"),
              "total_characters": row.get("total_characters"), "selection": row.get("selection", ""),
+             **{key: row[key] for key in ("heading", "section_id") if key in row},
              "truncated": bool(row.get("truncated")) or len(str(row.get("text", ""))) > 1400}
-            for row in passages[:6] if isinstance(row, dict)
+            for row in selected_passages
         ]
-        data["metadata"]["evidence_passages_truncated"] = bool(source_metadata.get("evidence_passages_truncated")) or len(passages) > 6
+        data["metadata"]["evidence_passages_truncated"] = (bool(source_metadata.get("evidence_passages_truncated"))
+            or len(selected_passages) < len(passages) or any(row["truncated"] for row in selected_passages))
     if "section" in data:
         data["section"] = str(data["section"])[:240]
     citation_key = data.get("citation_key") or ""

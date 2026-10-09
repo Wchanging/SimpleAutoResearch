@@ -17,10 +17,13 @@ class ResearchImplementationCorrectionTests(unittest.TestCase):
                 messages = []
                 with patch("simple_ar.research.implementation.implement_code_task", side_effect=[first, second]) as call:
                     outcome, steps = _implement_with_patch_correction(
-                        Path("run"), approval_note="approved", message_callback=messages.append)
+                        Path("run"), approval_note="approved", message_callback=messages.append,
+                        edit_budget_overrides={"max_new_chars": 32000})
                 self.assertIs(outcome, second)
                 self.assertEqual(steps, ("failed", "still rejected"))
                 self.assertEqual(call.call_count, 2)
+                for recorded in call.call_args_list:
+                    self.assertEqual(recorded.kwargs['edit_budget_overrides'], {"max_new_chars": 32000})
                 self.assertIn("retrying once", messages[0])
                 self.assertIn("unchanged limits", messages[0])
 

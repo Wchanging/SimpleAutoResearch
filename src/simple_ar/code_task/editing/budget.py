@@ -7,6 +7,17 @@ from typing import Any
 VALID_BUDGET_PROFILES = {"normal", "large", "absolute"}
 
 
+def validated_edit_budget_overrides(value: object) -> dict[str, int]:
+    """Validate numeric settings shared by CLI and research execution."""
+    keys = {"max_files", "max_edits", "max_old_chars", "max_new_chars",
+            "max_total_edit_chars", "max_proposal_chars"}
+    if not isinstance(value, dict) or set(value) - keys:
+        raise ValueError("Edit budget overrides must contain only numeric edit-limit fields.")
+    if any(type(number) is not int or number <= 0 for number in value.values()):
+        raise ValueError("Edit budget overrides must be positive integers.")
+    return dict(value)
+
+
 @dataclass(frozen=True)
 class EditBudget:
     """Limits for one controlled patch proposal.

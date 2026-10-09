@@ -74,6 +74,17 @@ def edit_joint_document(
         if row.action == "document_revise").values(), default=0)
     event = attempts[-1] if attempts and attempts[-1].status == "drafted" and not attempts[-1].adopted else None
     active = coalesce_document_reviews([row for row in reviews if needs_change(row)])
+    def next_reviews(rows: list[ReportSectionReview]) -> list[ReportSectionReview]:
+        # Only a complete inspection can supersede the previous instructions.
+        pending = [row for row in rows if needs_change(row) or row.context_requests]
+        complete = {row.section_id for row in rows} == {row.section_id for row in sections}
+        return coalesce_document_reviews(pending if complete else [*active, *pending])
+
+    if event is None and attempts and attempts[-1].status == "rejected":
+        checks = [row for row in iterations if row.iteration > attempts[-1].iteration
+                  and row.action == "document_joint_verify" and row.status == "completed"]
+        if checks:
+            active = next_reviews(checks[-1].section_reviews)
     for review in reviews:
         all_findings.extend(review.findings)
         memory.reviewer_findings.extend(row for row in review.findings if row not in memory.reviewer_findings)
@@ -119,10 +130,11 @@ def edit_joint_document(
         targets = {row.section_id for row in active}
         originals = {row.section_id: row for row in sections}
         try:
+            prior_by_id = {row.section_id: row for attempt in attempts if attempt.iteration < event.iteration
+                           for row in attempt.drafts}
+            baseline = [prior_by_id.get(row.section_id, row) for row in sections]
             if not event.drafts:
-                previous = next((row for row in reversed(attempts[:-1]) if row.drafts), None)
-                prior_by_id = {row.section_id: row for row in previous.drafts} if previous else {}
-                event.drafts = draft(event, [prior_by_id.get(row.section_id, row) for row in sections])
+                event.drafts = draft(event, baseline)
                 event.status = "drafted"
                 checkpoint()
             candidate_by_id = {row.section_id: row for row in event.drafts}
@@ -130,7 +142,7 @@ def edit_joint_document(
                     or not targets.issubset(originals)
                     or any(not row.draft_markdown.strip() for row in event.drafts)):
                 raise ValueError("Joint revision must retain each eligible section exactly once with complete prose.")
-            candidate = [candidate_by_id.get(row.section_id, row) for row in sections]
+            candidate = [candidate_by_id.get(row.section_id, row) for row in baseline]
             prior = [finding for review in active for finding in review.findings
                      if finding.type not in DOCUMENT_CONTROL_FINDING_TYPES]
             # Judge the complete candidate against the request, sources and
@@ -157,7 +169,7 @@ def edit_joint_document(
             if acceptable:
                 sections[:] = candidate
                 event.status, event.adopted = "verified", True
-                resolved = [row for review in active for row in review.findings]
+                resolved = [row for attempt in attempts for review in attempt.section_reviews for row in review.findings]
                 memory.reviewer_findings = [row for row in memory.reviewer_findings if row not in resolved]
                 # Candidate observations belong to the delivered manuscript
                 # only after atomic adoption. Rejected observations remain in
@@ -172,7 +184,7 @@ def edit_joint_document(
             # A rejected candidate can be corrected in the same remaining
             # round allowance. Never adopt only the apparently good sections.
             rejected_reviews = verified.section_reviews
-            active = coalesce_document_reviews([*active, *[row for row in rejected_reviews if needs_change(row)]])
+            active = next_reviews(rejected_reviews)
         except (LLMError, ValidationError, ValueError) as exc:
             event.status = "drafted" if event.drafts else "unavailable"
             finding = ReviewerFinding(finding_id=f"joint-revision-{event.iteration}-unavailable",

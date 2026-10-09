@@ -69,6 +69,7 @@ class CodeTaskTests(unittest.TestCase):
             _write_toy_project(project)
             write_text(project / "tests" / "test_prize.py", (
                 "import unittest\n"
+                "print('stdout diagnostic: prize classification')\n"
                 "from spam_model import predict\n"
                 "class PrizeTest(unittest.TestCase):\n"
                 "    def test_prize(self):\n"
@@ -99,6 +100,10 @@ class CodeTaskTests(unittest.TestCase):
             class Client(_FakeCodeTaskClient):
                 def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
                     if label == "code-task-repair":
+                        # A stderr failure summary must not hide diagnostics
+                        # emitted by a runner to stdout.
+                        self_outer.assertIn("stdout diagnostic: prize classification", user)
+                        self_outer.assertIn("AssertionError", user)
                         return {"summary": "Correct the near-miss keyword", "edits": [{
                             "path": "spam_model.py", "old": "('win', 'prizex')",
                             "new": "('win', 'prize')", "reason": "The failed test uses prize.",
@@ -109,6 +114,7 @@ class CodeTaskTests(unittest.TestCase):
                         edit["new"] = edit["new"].replace("('win', 'prize')", "('win', 'prizex')")
                     return result
 
+            self_outer = self
             client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat"))
             with patch.object(LLMClient, "ask_json", side_effect=Client().ask_json):
                 result = run_implementation_capability(context=context, request=ImplementationRequest(
@@ -2810,7 +2816,11 @@ protected_patterns = ["pyproject.toml"]
                     {"module": "example_embeddings", "symbols": ["compute_bins"]},
                 ]}},
                 {"edits": [], "summary": "Need the remainder of the selected source."},
-                {"edits": [], "context_request": {"files": ["config/calibration.py"],
+                {"edits": [{"path": "spam_model.py",
+                    "old": "return 'spam' if 'win' in text.lower() else 'ham'",
+                    "new": "return 'spam' if 'prize' in text.lower() else 'ham'",
+                    "reason": "Draft local change; calibration remains unread."}],
+                 "context_request": {"files": ["config/calibration.py"],
                     "query": "FACTOR", "reason": "The newly read implementation depends on calibration."}},
                 {"edits": [{
                     "path": "spam_model.py",
@@ -2831,6 +2841,8 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(client.ask_json.call_count, 4)
             self.assertIn("def predict", client.ask_json.call_args_list[2].args[1])
             self.assertIn("FACTOR = 2", client.ask_json.call_args_list[3].args[1])
+            self.assertIn("Unapplied draft edits", client.ask_json.call_args_list[3].args[1])
+            self.assertIn("Draft local change; calibration remains unread.", client.ask_json.call_args_list[3].args[1])
             followup = read_json(run_dir / "code_task/meta/edit_context_followup.json")
             self.assertEqual(len(followup["rounds"]), 3)
             self.assertEqual(followup["rounds"][0]["snippets"], [])
@@ -3599,6 +3611,8 @@ protected_patterns = ["pyproject.toml"]
                             "new": "VALUE = 2\n",
                             "reason": "This file is outside the current batch.",
                         },
+                        {"path": "src/new_helper.py", "old": "", "new": "VALUE = 1\n",
+                         "reason": "An absent file does not bypass batch scope."},
                     ],
                     "validation": ["Run unit tests."],
                     "risks": [],
@@ -3861,7 +3875,8 @@ protected_patterns = ["pyproject.toml"]
             _write_toy_project(code_root)
             write_text(task_file, "# Task\n\nAlso detect prize as spam.\n")
             run_dir = root / "runs" / "code-task-run"
-            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file)
+            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file,
+                                 edit_scope_allowed_patterns=("spam_model.py", "src/**"))
             generate_patch_plan(run_dir, use_llm=False)
             proposal_path = _write_valid_edit_proposal(run_dir)
 
@@ -3900,6 +3915,29 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["patch"]["editor"]["backend"], "controlled_patch")
             self.assertNotIn("pre_patch_manifest", manifest["patch"])
             self.assertNotIn("post_patch_manifest", manifest["patch"])
+
+            # Creation uses the same approval, scope, snapshot and index path,
+            # rather than requiring generated programs to write their own modules.
+            fake = _FakeRepairClient({"edits": [
+                {"path": "src/helpers.py", "old": "", "new": "VALUE = 1\n", "reason": "Add a helper."},
+                {"path": "tests/new_test.py", "old": "", "new": "pass\n", "reason": "Forbidden."},
+                {"path": "../outside.py", "old": "", "new": "pass\n", "reason": "Forbidden."},
+            ]})
+            with patch("simple_ar.code_task.editing.patching.LLMClient.from_env", return_value=fake):
+                proposed = propose_patch_edits(run_dir, use_llm=True, force=True)
+            self.assertEqual(proposed.edit_count, 1)
+            proposal_path = proposed.proposal_path
+            created = apply_patch_edits(run_dir, edits_file=proposal_path)
+            self.assertEqual(created.changed_files, ("src/helpers.py",))
+            helper = run_dir / "code_task/workspace/src/helpers.py"
+            self.assertEqual(read_text(helper), "VALUE = 1\n")
+            applied = read_json(run_dir / "code_task/meta/applied_edits.json")
+            self.assertIsNone(applied["edits"][0]["old_sha256"])
+            captured = read_json(Path(applied["snapshot"]["manifest"]))
+            self.assertFalse(captured["files"][0]["existed"])
+            with self.assertRaises(PatchValidationError):
+                apply_patch_edits(run_dir, edits_file=proposal_path)
+            self.assertEqual(read_text(helper), "VALUE = 1\n")
 
     def test_apply_large_edits_records_apply_time_approval(self) -> None:
         from simple_ar.code_task.editing.patching import EditBudgetApprovalRequired
@@ -4350,6 +4388,23 @@ protected_patterns = ["pyproject.toml"]
             latest_report = read_json(run_dir / "code_task" / "run" / "patched" / "execution_report.json")
             self.assertEqual(latest_report["history_attempt"], "attempt-002")
 
+            workspace = run_dir / "code_task" / "workspace"
+            write_text(workspace / "output_probe.py",
+                "import os, sys\nfrom pathlib import Path\n"
+                "root = Path(os.environ['SIMPLE_AR_OUTPUT_DIR'])\n"
+                "target = Path(sys.argv[1])\n"
+                "assert target.parent == root\n"
+                "assert '{output_dir}' not in str(target)\n"
+                "target.write_text('observed')\nprint(target)\n")
+            output_check = run_code_task_benchmark(run_dir,
+                command='python output_probe.py "{output_dir}/shortcheck.txt"',
+                timeout_sec=10, skip_validation=True)
+            self.assertEqual(output_check.status, "passed")
+            owned_file = Path(output_check.stdout_path.read_text().strip())
+            self.assertTrue(owned_file.is_relative_to(run_dir / "code_task" / "run" / "patched" / "process"))
+            self.assertEqual(owned_file.read_text(), "observed")
+            self.assertFalse((workspace / "{output_dir}").exists())
+
     def test_run_code_task_benchmark_stops_warning_flood_with_watchdog(self) -> None:
         with _temporary_root() as root:
             code_root = root / "toy_project"
@@ -4742,9 +4797,13 @@ protected_patterns = ["pyproject.toml"]
 
             result = probe_code_task_environment(run_dir)
             self.assertIn(result.status, {"ok", "warning"})
-            baseline = run_code_task_baseline(run_dir, timeout_sec=10)
+            controller_packages = root / "controller_packages"
+            write_text(controller_packages / "unittest.py", "raise RuntimeError('controller import leaked')\n")
+            with patch.dict("os.environ", {"PYTHONPATH": str(controller_packages)}):
+                baseline = run_code_task_baseline(run_dir, timeout_sec=10)
 
             report = read_json(baseline.report_path)
+            self.assertEqual(report["returncode"], 0)
             self.assertEqual(report["environment"]["mode"], "external")
             self.assertEqual(report["environment"]["python_executable"], expected_python)
             self.assertEqual(report["command"][0], expected_python)

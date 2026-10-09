@@ -142,7 +142,8 @@ class ReportExportTests(unittest.TestCase):
             self.assertLess(main.index("\\begin{abstract}"), main.index("\\maketitle"))
             self.assertIn("\\authorsaddresses{}", main)
             self.assertIn("\\Gin@nat@width>\\linewidth", main)
-            self.assertIn("\\setkeys{Gin}{width=\\sarmaxwidth,keepaspectratio}", main)
+            self.assertIn("\\Gin@nat@height>0.8\\textheight", main)
+            self.assertIn("\\setkeys{Gin}{width=\\sarmaxwidth,height=\\sarmaxheight,keepaspectratio}", main)
             self.assertNotIn("\\setkeys{Gin}{width=\\linewidth,keepaspectratio}", main)
             self.assertTrue((root / "acm/export.json").is_file())
 
@@ -240,6 +241,17 @@ class ReportExportTests(unittest.TestCase):
             image.write_text('<!DOCTYPE svg [<!ENTITY value "expanded">]><svg><text>&value;</text></svg>', encoding="utf-8")
             with self.assertRaisesRegex(ReportExportError, "external resource"):
                 _copy_image(image, output, 4, convert_svg=False)
+            image.write_text('<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
+                             '<image xlink:href="data:image/png;base64,\niVBORw0KGgo="/></svg>', encoding="utf-8")
+            self.assertEqual(_copy_image(image, output, 5, convert_svg=False), "figures/figure-5.svg")
+            for reference in ('data:image/svg+xml;base64,PHN2Zz4=', 'file:///tmp/image.png',
+                              'https://example.test/image.png'):
+                image.write_text(f'<svg><image href="{reference}"/></svg>', encoding="utf-8")
+                with self.assertRaisesRegex(ReportExportError, "external resource"):
+                    _copy_image(image, output, 6, convert_svg=False)
+            image.write_text('<svg><use href="data:image/png;base64,aGVsbG8="/></svg>', encoding="utf-8")
+            with self.assertRaisesRegex(ReportExportError, "external resource"):
+                _copy_image(image, output, 7, convert_svg=False)
 
     def test_compile_failure_retains_diagnostics_and_limits_file_access(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

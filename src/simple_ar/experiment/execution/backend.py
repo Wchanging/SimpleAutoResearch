@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
-import os
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from simple_ar.experiment.metrics import parse_metric_lines
-from simple_ar.core.process import ProcessSpec, run_process
+from simple_ar.core.process import ProcessSpec, run_process, with_process_outputs
 from simple_ar.core.process_output import ProcessOutput
 from simple_ar.core.budget import BudgetLedger
 
@@ -85,14 +84,7 @@ class LocalExecutionBackend:
             env=request.env, output_dir=request.output_dir,
             session_id=request.session_id, attempt_id=request.attempt_id,
         )
-        if spec.output_dir:
-            invocation_dir = (spec.output_dir / spec.invocation_id).absolute()
-            outputs_dir = invocation_dir / "outputs"
-            outputs_dir.mkdir(parents=True, exist_ok=True)
-            environment = dict(os.environ if request.env is None else request.env)
-            environment["SIMPLE_AR_OUTPUT_DIR"] = str(outputs_dir)
-            spec = replace(spec, output_dir=invocation_dir, env=environment,
-                           argv=[arg.replace("{output_dir}", str(outputs_dir)) for arg in spec.argv])
+        spec = with_process_outputs(spec)
         if self.message_callback:
             self.message_callback(f"Experiment {request.label}: cwd={request.cwd}; timeout={request.timeout_sec}s")
             if spec.output_dir:

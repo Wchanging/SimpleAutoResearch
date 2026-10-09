@@ -79,6 +79,19 @@ class ReadBoundaryTests(unittest.TestCase):
                     self.assertEqual(new_source_queries(result), (query, "Paper-local replication"))
                     self.assertEqual(len(client.labels), 3)  # Existing coarse + rerank + notes only.
                     self.assertIn("Whole-candidate question observations", client.rerank_prompt)
+                    selected_client = Client()
+                    with patch("simple_ar.research.evidence.reader.screen_papers_with_llm",
+                               side_effect=AssertionError("Selection must not run twice")):
+                        selected_read = read_documents(ReadRequest(result.bundle, topic="Intervals under shift",
+                            research_plan_json=plan, use_llm=True, llm_client=selected_client,
+                            source_selection={"decisions": list(result.screening_decisions),
+                                              "question_assessments": list(result.question_assessments)}))
+                    self.assertEqual(selected_read.bundle.records, result.bundle.records)
+                    self.assertEqual(selected_read.question_assessments, result.question_assessments)
+                    self.assertFalse(any(label.startswith("read-coarse-") or label == "read-rerank"
+                                         for label in selected_client.labels))
+                    self.assertEqual(selected_client.labels, [])  # No new text beyond screened metadata.
+                    self.assertEqual(selected_read.paper_notes, ())
                 else:
                     self.assertEqual(result.bundle.records, [])
                     self.assertEqual(result.paper_notes, ())
@@ -105,7 +118,16 @@ class ReadBoundaryTests(unittest.TestCase):
         self.assertEqual(result.status, "empty")
 
     def test_question_assessment_combines_batches_without_mistaking_local_absence_for_global_gap(self):
-        from simple_ar.research.evidence.screening import screen_papers_with_llm
+        from simple_ar.research.evidence.screening import _rerank_input_papers, screen_papers_with_llm
+        # Comparing metadata is not limited to twice the acquisition shortlist.
+        # A lower-scored, potentially complementary source still reaches rerank.
+        candidates = [{"paper_id": f"p{i:02}"} for i in range(60)]
+        coarse = [{"paper_id": p["paper_id"], "coarse_relevance_score": 5 if i < 6 else 3}
+                  for i, p in enumerate(candidates)]
+        ranked = _rerank_input_papers(list(reversed(candidates)), coarse)
+        self.assertEqual(len(ranked), 48)
+        self.assertIn(candidates[6], ranked)
+        self.assertEqual(ranked, _rerank_input_papers(candidates, coarse))
         class Client:
             def ask_json_many(self, requests, **kwargs):
                 return [{"decisions": [{"paper_id": pid, "decision": "keep"}],
@@ -126,6 +148,15 @@ class ReadBoundaryTests(unittest.TestCase):
         self.assertEqual(assessments[0]["status"], "direct_candidate")
         self.assertEqual(assessments[0]["paper_ids"], ["q"])
         self.assertEqual(assessments[0]["new_source_queries"], [])
+        with patch("simple_ar.research.evidence.screening._coarse_screen",
+                   side_effect=AssertionError("Bounded metadata does not need coarse calls")), patch(
+                "simple_ar.research.evidence.screening._rerank",
+                return_value=[{"paper_id": "q", "decision": "keep"}]) as rerank:
+            direct = screen_papers_with_llm(Client(), topic="Methods", problem_markdown="",
+                research_plan_json="{}", papers=[{"paper_id": "p"}, {"paper_id": "q"}],
+                config={"read_screening_max_shortlist": 1}, metadata_pool=True)
+        rerank.assert_called_once()
+        self.assertEqual([r["paper_id"] for r in direct if r["decision"] == "keep"], ["q"])
 
     def _source_batches(self, root, budgets=None):
         bundles = []
@@ -243,6 +274,12 @@ class ReadBoundaryTests(unittest.TestCase):
                 with self.subTest(fresh=fresh), self.assertRaisesRegex(ValueError, "Conflicting read evidence identity"):
                     merge_read_results(old, fresh)
             note = {"paper_id": first.records[0].document_id, "open_questions": ["Old question"]}
+            decisions = ({"paper_id": "candidate", "decision": "drop", "reason": "Earlier shortlist"},
+                         {"paper_id": "candidate", "decision": "keep", "reason": "New question"})
+            merged = merge_read_results(replace(old, screening_decisions=(decisions[0],)),
+                                        replace(old, screening_decisions=(decisions[1],)))
+            self.assertEqual(merged.screening_decisions, decisions)
+            self.assertEqual(merged.bundle, first)
             with self.assertRaisesRegex(ValueError, "paper_id"):
                 merge_read_results(replace(old, paper_notes=(note,)),
                                    replace(old, paper_notes=({**note, "open_questions": []},)))

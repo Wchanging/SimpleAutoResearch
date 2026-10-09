@@ -56,9 +56,9 @@ def _copy_image(source: Path, output: Path, index: int | str, *, convert_svg: bo
         # Framework figures are self-contained. Do not follow external image or
         # stylesheet references while converting a supplied SVG.
         text = source.read_text(encoding="utf-8")
-        references = re.findall(r"(?:href\s*=\s*['\"]([^'\"]*)['\"])|(?:url\(([^)]*)\))", text, re.I)
-        if re.search(r"<!DOCTYPE[^>]*\[|<!ENTITY|@import", text, re.I) or any(
-            not (href or css).strip().strip("'\"").startswith("#") for href, css in references
+        references = re.findall(r"url\(([^)]*)\)", text, re.I)
+        if re.search(r"<!DOCTYPE[^>]*\[|<!ENTITY|@import|<\?xml-stylesheet", text, re.I) or any(
+            not css.strip().strip("'\"").startswith("#") for css in references
         ):
             raise ReportExportError("SVG contains external resource references; use a self-contained figure.")
         # Plotting libraries can emit an external DTD declaration even when
@@ -74,6 +74,18 @@ def _copy_image(source: Path, output: Path, index: int | str, *, convert_svg: bo
             element.tag.rsplit("}", 1)[-1] in {"script", "foreignObject"} for element in svg.iter()
         ):
             raise ReportExportError("Export requires a static SVG figure.")
+        # Rasterized plot components (for example a heatmap) are still
+        # self-contained when embedded in an image element. They are not
+        # external fetches or a promise that every mark is editable vector art.
+        for element in svg.iter():
+            for name, value in element.attrib.items():
+                if name.rsplit("}", 1)[-1] != "href":
+                    continue
+                value = value.strip()
+                if not (value.startswith("#") or (
+                        element.tag.rsplit("}", 1)[-1] == "image"
+                        and re.fullmatch(r"data:image/(?:png|jpeg);base64,[A-Za-z0-9+/=\s]+", value, re.I))):
+                    raise ReportExportError("SVG contains external resource references; use a self-contained figure.")
         if normalized != text:
             target.write_text(normalized, encoding="utf-8")
         if not convert_svg:
@@ -336,11 +348,12 @@ def export_acm_report(report_dir: Path, output_dir: Path, *, title: str | None =
             "\\providecommand{\\passthrough}[1]{#1}\n"
             "\\providecommand{\\pandocbounded}[1]{#1}\n"
             # Preserve intrinsic figure sizing (e.g. column-width SVG/PDF),
-            # only shrinking oversized assets to the current text width.
+            # Shrink to both page dimensions, reserving space for captions.
             "\\makeatletter\n"
             "\\def\\sarmaxwidth{\\ifdim\\Gin@nat@width>\\linewidth\\linewidth\\else\\Gin@nat@width\\fi}\n"
+            "\\def\\sarmaxheight{\\ifdim\\Gin@nat@height>0.8\\textheight0.8\\textheight\\else\\Gin@nat@height\\fi}\n"
             "\\makeatother\n"
-            "\\setkeys{Gin}{width=\\sarmaxwidth,keepaspectratio}\n"
+            "\\setkeys{Gin}{width=\\sarmaxwidth,height=\\sarmaxheight,keepaspectratio}\n"
             "\\settopmatter{printacmref=false}\n"
             "\\citestyle{acmnumeric}\n"
             # No author metadata was supplied. Suppress acmart's empty default

@@ -37,6 +37,7 @@ def select_retrieval_candidates(
     negative_terms: list[str] | None = None,
     priority_facets: list[str] | None = None,
     temporal_scope: dict[str, Any] | None = None,
+    include_low_relevance: bool = False,
 ) -> tuple[list[Paper], list[dict[str, Any]]]:
     """Deduplicate, score, and keep retrieval candidates within budget.
 
@@ -128,7 +129,7 @@ def select_retrieval_candidates(
         key = paper_identity_key(candidate.paper)
         if key in selected_keys:
             continue
-        if score > 0 or not kept_rows:
+        if include_low_relevance or score > 0 or not kept_rows:
             selected_keys.add(key)
             kept_rows.append((rank, candidate, score, "top_ranked"))
 

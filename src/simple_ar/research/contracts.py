@@ -181,6 +181,18 @@ class DocumentRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "document_record.v1"
 
+    @property
+    def is_prior_draft(self) -> bool:
+        return (self.metadata.get("kind") == "prior_draft"
+                or self.metadata.get("evidence_role") == "prior_draft_not_primary_evidence")
+
+    @property
+    def is_original_source(self) -> bool:
+        """Source text rather than a previous draft or a derived analysis."""
+        return (not self.is_prior_draft
+                and self.source != "local_analysis"
+                and not any(key in self.metadata for key in ("table_analysis", "code_analysis")))
+
     def to_row(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
         return asdict(self)
@@ -213,6 +225,7 @@ class FulltextHint:
     status: str = "hint_only"
     reason: str = ""
     size_bytes: int | None = None
+    acquisition: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "fulltext_hint.v1"
 
     def to_row(self) -> dict[str, Any]:

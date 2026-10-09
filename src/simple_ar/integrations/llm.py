@@ -21,7 +21,6 @@ from uuid import uuid4
 from PIL import Image
 
 os.environ.setdefault("LITELLM_LOG", "ERROR")
-import litellm
 from dotenv import load_dotenv
 
 from simple_ar.core.budget import BudgetError, BudgetLedger
@@ -252,8 +251,6 @@ class LLMClient:
         self._budget_call_sequence = 0
         self._budget_reservation_sequence = 0
         self._usage_lock = threading.Lock()
-        if self._settings.transport_backend == "litellm":
-            litellm.suppress_debug_info = True
 
     @classmethod
     def from_env(
@@ -1673,6 +1670,9 @@ def _call_provider(backend: str, api_mode: str, request: dict[str, Any], *, http
 
 
 def _call_litellm(api_mode: str, request: dict[str, Any]) -> object:
+    import litellm
+
+    litellm.suppress_debug_info = True
     if api_mode == "responses":
         return litellm.responses(**request)
     if api_mode == "chat":

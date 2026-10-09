@@ -35,7 +35,7 @@ from simple_ar.report.narrative import (
     _prompt_handle_view,
     _prompt_metrics,
     adopted_claims, adopted_memory_notes, budget_document_plan, delivery_text_observation, effective_revision_instructions, evidence_outline_context, narrative_context, pending_document_revisions, _experiment_delivery_view,
-    pending_revision_review, revision_context, report_objective, report_tool_context, review_source_evidence,
+    pending_revision_review, revision_context, report_objective, report_tool_context, review_source_evidence, prior_draft_context,
 )
 from simple_ar.report.schema import (
     finding_requires_resolution,
@@ -210,15 +210,6 @@ def run_report_agent(
         return None
 
     current = memory.model_copy(deep=True)
-    current = _maybe_adapt_outline(
-        client=client,
-        context=context,
-        template=template,
-        memory=current,
-        config=config,
-        emit=emit,
-        documents=gateway.documents,
-    ) if completed_checkpoint is None else current
     sections: list[ReportSectionDraft] = []
     iterations: list[ReportIterationRecord] = []
     all_findings: list[ReviewerFinding] = []
@@ -230,6 +221,11 @@ def run_report_agent(
         sections = [ReportSectionDraft.model_validate(row) for row in completed_checkpoint["sections"]]
         iterations = [ReportIterationRecord.model_validate(row) for row in completed_checkpoint["iterations"]]
         all_findings = [ReviewerFinding.model_validate(row) for row in completed_checkpoint["reviewer_findings"]]
+        # Old checkpoints marked an unavailable inspection as finished. Keep
+        # its drafts and consumed rounds, but resume the unfinished work.
+        if any(row.type in {"document_review_unavailable", "document_revision_unavailable"}
+               for row in current.reviewer_findings):
+            document_review_done = False
         all_tool_results = [ReportToolResult.model_validate(row) for row in completed_checkpoint["tool_results"]]
         # Reuse the persisted results as the read-call ledger. Resuming must
         # not silently grant another full tool allowance.
@@ -243,7 +239,6 @@ def run_report_agent(
         context, current = apply_report_bibliography(context, current, documents=gateway.documents,
             notes=current.outline_planning.get("source_notes", []))
         gateway.set_context(context)
-    current = _resolve_document_plan(current, config=config, context=context)
     completed_count = len(sections)
     pending = completed_checkpoint.get("pending_draft") if completed_checkpoint else None
     pending_draft = ReportSectionDraft.model_validate(pending) if pending is not None else None
@@ -274,17 +269,59 @@ def run_report_agent(
                              "pending_draft": pending_draft.model_dump(mode="json") if pending_draft else None,
                              "document_review_done": document_review_done})
 
-    # Planning already spent an actual call and defines section/argument
-    # identity. Freeze it even when the very first Writer request fails; an
-    # empty adopted prefix is valid, not a reason to regenerate the plan.
-    if completed_checkpoint is None:
-        checkpoint()
-
+    # Save the seed before selecting reads. Until document_plan is resolved,
+    # an empty prefix can resume source selection/planning; accepted plans
+    # and drafts retain their original identities on recovery.
     def writer_reads(requests: list[ReportToolCall] | None) -> list[ReportToolResult]:
         return _writer_evidence_reads(owner="initial_document", requests=requests,
             gateway=gateway, iterations=iterations, all_results=all_tool_results, checkpoint=checkpoint)
 
     try:
+        # Composition and deciding what to read compete in one response: a
+        # fluent draft can bypass the only experiment needed by its argument.
+        # For navigable, excerpted sources, select reads first. Saved analysis
+        # results need the same access as papers; document kind is not coverage.
+        # Reuse the outline read trace/allowance, including an accepted empty
+        # batch; old inputs and accepted checkpoints keep their prior flow.
+        if (current.document_plan is None and completed_count == 0 and pending_draft is None
+                and config.allow_source_backtracking
+                and config.max_backtracking_calls > 0
+                and not current.outline_planning.get("context_requests")
+                and not any(row.action == "writer_context" for row in iterations)
+                and any(h.metadata.get("source_directory")
+                        and h.metadata.get("evidence_passages_truncated") for h in current.source_handles)):
+            checkpoint()
+            selection = client.ask_json(WRITER_SYSTEM, _json_prompt({
+                "task": "Identify the reader's decisions and questions, then select necessary source reads before planning an answer; do not draft sections or an outline.",
+                "objective": report_objective(context, current),
+                "sources": [_prompt_handle_view(h) for h in current.source_handles if h.kind != "prior_draft"][:40],
+                "tools": [spec.model_dump(mode="json") for spec in report_tool_specs()],
+                "context_request_schema": ReportToolCall.model_json_schema(),
+                "output_schema": {"context_requests": []},
+                "rules": [f"Return at most {min(6, config.max_backtracking_calls)} registered read-only requests.",
+                          "Choose queries for missing definitions, comparison objects, experimental conditions or feasibility evidence needed by the user's questions. Do not merely repeat a draft's headline or numbers to confirm its conclusion.",
+                          "An empty list is valid if visible passages already cover those needs. Headings locate text; they do not prove claims."],
+            }), label="report-source-selection")
+            calls = validate_report_reads(selection.get("context_requests"), limit=min(6, config.max_backtracking_calls))
+            _writer_evidence_reads(owner="outline_evidence", requests=calls, gateway=gateway,
+                iterations=iterations, all_results=all_tool_results, checkpoint=checkpoint)
+        preplanning_reads = _writer_evidence_reads(owner="outline_evidence", requests=None,
+            gateway=gateway, iterations=iterations, all_results=all_tool_results, checkpoint=checkpoint)
+        selected_before_plan = current.document_plan is None and any(
+            row.action == "writer_context" and row.summary == "outline_evidence" for row in iterations)
+        if completed_checkpoint is None or selected_before_plan:
+            current = _maybe_adapt_outline(client=client, context=context, template=template,
+                memory=current, config=(config.model_copy(update={"allow_source_backtracking": False})
+                    if selected_before_plan else config), emit=emit, documents=gateway.documents,
+                extra_context=preplanning_reads)
+            if gateway.documents is not None:
+                context, current = apply_report_bibliography(context, current, documents=gateway.documents,
+                    notes=current.outline_planning.get("source_notes", []))
+                gateway.set_context(context)
+        current = _resolve_document_plan(current, config=config, context=context,
+            fallback_title=template.template_markdown.splitlines()[0].lstrip("# ").strip())
+        # Freeze the evidence-informed plan before any composition call.
+        checkpoint()
         # The accepted argument can identify evidence missing from the overview.
         # Consume the same initial read batch before composing, not another
         # planning call or a second read/recovery ledger.
@@ -312,7 +349,12 @@ def run_report_agent(
             _emit(emit, f"Writer jointly drafting {len(remaining)} remaining section(s).")
             joint = _draft_document_with_recovery(client=client, context=context, template=template,
                 memory=current, config=config, sections=remaining, adopted_sections=sections, emit=emit,
-                extra_context=initial_evidence, read_context=writer_reads)
+                extra_context=initial_evidence, read_context=writer_reads,
+                source_front_matter=bibliography_planning_views(context, gateway.documents))
+            if gateway.documents is not None:
+                context, current = apply_report_bibliography(context, current, documents=gateway.documents,
+                    notes=current.outline_planning.get("source_notes", []))
+                gateway.set_context(context)
             # Validate the whole returned set before adopting anything. The
             # existing checkpoint is the sole commit/recovery boundary.
             for section_index, (section, draft) in enumerate(zip(remaining, joint), start=completed_count + 1):
@@ -350,7 +392,12 @@ def run_report_agent(
                     source_batch_count=len(source_batches),
                     adopted_sections=sections,
                     emit=emit,
+                    source_front_matter=bibliography_planning_views(context, gateway.documents),
                 )
+                if gateway.documents is not None:
+                    context, current = apply_report_bibliography(context, current, documents=gateway.documents,
+                        notes=current.outline_planning.get("source_notes", []))
+                    gateway.set_context(context)
                 iterations.append(_iteration(section_index, section, "draft", draft.status, draft.used_sources, draft=draft))
 
                 if config.source_strategy == "batch_refine" and len(source_batches) > 1:
@@ -549,7 +596,10 @@ def run_report_agent(
                 all_findings=all_findings, emit=emit,
                 checkpoint=checkpoint, gateway=gateway, all_tool_results=all_tool_results,
             )
-            document_review_done = True
+            document_review_done = not any(
+                row.type in {"document_review_unavailable", "document_revision_unavailable"}
+                for row in current.reviewer_findings
+            )
         # Final section-review reconciliation also matters when whole-document
         # review is disabled or inapplicable. Persist the memory we return,
         # not the earlier append-only history from the last section checkpoint.
@@ -658,6 +708,13 @@ def _edit_whole_document(
 
         def call(review_label: str) -> list[ReportSectionReview]:
             rejected = pending_rejections.pop(review_label, None)
+            if (rejected and rejected.status == "started"
+                    and rejected.rejected_review.get("format_correction")):
+                # A checkpoint records intent before budget/transport. Only a
+                # returned invalid response consumes the bounded correction.
+                rejection_iteration = rejected.rejected_review["rejection_iteration"]
+                rejected = next(row for row in iterations
+                                if row.iteration == rejection_iteration)
             if rejected and rejected.status == "completed" and "validated_reviews" in rejected.rejected_review:
                 return [ReportSectionReview.model_validate(row) for row in rejected.rejected_review["validated_reviews"]]
             if rejected and rejected.rejected_review.get("partial_ready"):
@@ -1094,6 +1151,7 @@ def _maybe_adapt_outline(
     config: ReportRuntimeConfig,
     emit: Callable[[str], None] | None,
     documents: DocumentBundle | None = None,
+    extra_context: list[ReportToolResult] | None = None,
 ) -> ReportMemory:
     contract = memory.survey_contract if isinstance(memory.survey_contract, dict) else {}
     if memory.document_plan is not None:
@@ -1106,9 +1164,15 @@ def _maybe_adapt_outline(
     strategy = str(contract.get("outline_strategy") or config.outline_strategy or "auto").lower()
     if strategy == "template":
         return memory
-    # Non-survey planning is explicit until real-content validation supports
-    # changing its default. Custom templates keep their author's topology.
-    if not survey and (config.outline_strategy != "adaptive" or template.name not in BUILTIN_TEMPLATE_NAMES):
+    # Supplied visuals need the existing planner to select exact paths and a
+    # prose owner. Skipping it in auto mode leaves every chart linked-only,
+    # even when the user asks for an illustrated analysis. Text-only reports
+    # keep their direct path; explicit/custom templates retain their topology.
+    needs_visual_selection = (strategy == "auto" and config.figures.enabled
+                              and config.figures.mode != "off"
+                              and bool(supplied_figure_sources(context)))
+    if not survey and (template.name not in BUILTIN_TEMPLATE_NAMES
+                       or (strategy != "adaptive" and not needs_visual_selection)):
         return memory
     if not memory.section_plan or (survey and len(memory.section_plan) < 3):
         return memory
@@ -1128,6 +1192,7 @@ def _maybe_adapt_outline(
                 retry_error=errors[-1] if errors else "",
                 rejected_response=rejected_response,
                 documents=documents,
+                extra_context=extra_context,
             )
             break
         except (LLMError, ValidationError, ValueError, TypeError) as exc:
@@ -1184,20 +1249,27 @@ def _maybe_adapt_outline(
     )
 
 
-def _resolve_document_plan(memory: ReportMemory, *, config: ReportRuntimeConfig, context: ReportContext | None = None) -> ReportMemory:
+def _resolve_document_plan(memory: ReportMemory, *, config: ReportRuntimeConfig, context: ReportContext | None = None,
+                           fallback_title: str = "Research Report") -> ReportMemory:
     """Freeze the only plan that Writer, Reviewer, renderer, and audit consume."""
     if memory.document_plan is not None:
         return memory
     candidates = memory.outline_planning.get("visual_candidates", [])
     if not isinstance(candidates, list):
         candidates = []
+    title = str(memory.outline_planning.get("title") or "")
+    if not title and context is not None:
+        # Topic may be the entire natural-language task, not an article title.
+        # Use the same single-line/240-character title contract as planning.
+        topic = context.topic.strip()
+        title = topic if len(topic) <= 240 and not any(ord(char) < 32 for char in topic) else fallback_title
     plan = resolve_document_plan(
         sections=memory.section_plan,
         contract=memory.survey_contract,
         config=config,
         visual_candidates=[row for row in candidates if isinstance(row, dict)],
         status=str(memory.outline_planning.get("status") or "resolved"),
-        title=str(memory.outline_planning.get("title") or ""),
+        title=title,
         supplied_figure_handles=[row["handle"] for row in supplied_figure_sources(context)],
         argument_plan=(ReportArgumentPlan.model_validate(memory.outline_planning["argument_plan"])
                        if memory.outline_planning.get("argument_plan") else None),
@@ -1238,6 +1310,7 @@ def _plan_topic_specific_outline(
     retry_error: str = "",
     rejected_response: Mapping[str, Any] | None = None,
     documents: DocumentBundle | None = None,
+    extra_context: list[ReportToolResult] | None = None,
 ) -> tuple[list[ReportSectionPlan], dict[str, Any]]:
     front_matter = bibliography_planning_views(context, documents)
     if not (memory.survey_contract.get("enabled") and is_survey_report(
@@ -1247,6 +1320,8 @@ def _plan_topic_specific_outline(
             evidence_outline_context(context, memory, config, retry=retry, retry_error=retry_error,
                 rejected_response=rejected_response, template=template), front_matter, config=config),
             memory.source_handles)
+        if extra_context:
+            payload["extra_tool_context"] = [report_tool_context(row) for row in extra_context]
         response = client.ask_json(
             OUTLINE_PLANNER_SYSTEM,
             _json_prompt(payload),
@@ -1266,6 +1341,7 @@ def _plan_topic_specific_outline(
             retry_error=retry_error,
             rejected_response=rejected_response,
             source_front_matter=front_matter,
+            extra_context=extra_context,
         ),
         label="report-outline-planner-retry" if retry else "report-outline-planner",
     )
@@ -1337,17 +1413,36 @@ def _outline_source_context(payload: dict[str, Any], views: list[dict[str, Any]]
             "planning_rules": [*payload["planning_rules"],
                 "Plan from the supplied evidence, and optionally return context_requests for definitions, transformations, assumptions or comparison conditions needed by that argument but not visible in its overview. Use specific same-source queries or retained chunk anchors, not the broad task repeated as a query. These existing read-only tools read retained inputs; they do not retrieve new papers or certify a claim. Include the complete outline in this response. One shared initial read batch will be supplied to writing and review; do not request material already visible."],
             "output_schema": {**payload["output_schema"], "context_requests": [{"tool_name": "registered read-only tool", "arguments": {}}]}}
+    return _source_bibliography_context(payload, views, rules_key="planning_rules")
+
+
+def _source_bibliography_context(payload: dict[str, Any], views: list[dict[str, Any]],
+                                 *, rules_key: str) -> dict[str, Any]:
+    """The same source-matched field contract, without requiring a planning call."""
     if not views:
         return payload
     from simple_ar.research.evidence.bibliography import CITATION_FIELD_VALUE_RULE
     return {**payload, "source_front_matter": views,
-        "planning_rules": [*payload["planning_rules"],
+        rules_key: [*payload[rules_key],
             CITATION_FIELD_VALUE_RULE,
             "Return source_notes in this same response for the supplied source_front_matter, using [] for fields not established by that view. Copy only requested missing fields with an exact same-source quote and section_id. A filename placeholder title is a missing title, not an established publication title. Do not guess from filenames, another source or memory, overwrite recorded metadata, or certify publication identity. Every author name must occur in its exact quote, including source punctuation and affiliation markers. Prefer a short contiguous byline subset with complete=false over an unreliable full-list transcription; complete=true only if the entire author list is visible and copied exactly. Use the published date rather than received/accepted dates, copying the literal date or visible publication year without inventing a full date. Missing or truncated evidence stays unknown. Bibliography is assembled from these fields, not from free-text section goals or a Writer-generated References section."],
         "output_schema": {**payload["output_schema"], "source_notes": [
             {"paper_id": "supplied paper_id", "bibliographic_fields": [
                 {"field": "title|authors|published|doi|url", "value": "literal string or authors array",
                  "quote": "exact original source quotation", "section_id": "supplied section_id", "complete": False}]}]}}
+
+
+def _retain_bibliography_notes(memory: ReportMemory, response: dict[str, Any],
+                               views: list[dict[str, Any]] | None) -> None:
+    """Commit optional proposals only after the corresponding draft validates."""
+    if not views or not isinstance(response.get("source_notes"), list):
+        return
+    requested = {row["paper_id"] for row in views}
+    notes = memory.outline_planning.setdefault("source_notes", [])
+    for row in response["source_notes"][:len(views)]:
+        if (isinstance(row, dict) and isinstance(row.get("paper_id"), str)
+                and row["paper_id"] in requested and row not in notes):
+            notes.append(row)
 
 
 class _RejectedOutline(ValueError):
@@ -1493,6 +1588,7 @@ def _outline_planner_prompt(
     retry_error: str = "",
     rejected_response: Mapping[str, Any] | None = None,
     source_front_matter: list[dict[str, Any]] | None = None,
+    extra_context: list[ReportToolResult] | None = None,
 ) -> str:
     compact_contract = _compact_survey_contract(memory.survey_contract)
     # Role groups help the Writer balance sources, but exposing them as
@@ -1521,6 +1617,7 @@ def _outline_planner_prompt(
             "body_requirement": "For broad long-form surveys derive 4-7 topic-specific body sections. An explicit task-scoped length takes priority; use only the sections needed for the requested review.",
         },
         "available_source_brief": _outline_source_brief(context),
+        "previous_document": prior_draft_context(context),
         "synthesis_excerpt": context.synthesis_markdown[:2500],
         "synthesis_status": dict(DERIVED_CONTEXT_STATUS),
         "evidence_summary_excerpt": context.evidence_summary[:2500],
@@ -1581,6 +1678,8 @@ def _outline_planner_prompt(
             "Return valid reader-facing sections with the required JSON fields and respect the original task length; do not pad to the broad-survey defaults."
             " Check every exact section and evidence pointer in the rejected response, including those not named in the first error. Return the complete corrected proposal, not a new unrelated outline."
         )
+    if extra_context:
+        payload["extra_tool_context"] = [report_tool_context(row) for row in extra_context]
     return _json_prompt(_outline_source_context(payload, source_front_matter or [], config=config))
 
 
@@ -1717,6 +1816,7 @@ def _draft_section(
     draft_mode: str = "section",
     recovery: bool = False,
     adopted_sections: list[ReportSectionDraft] | None = None,
+    source_front_matter: list[dict[str, Any]] | None = None,
 ) -> ReportSectionDraft:
     if recovery:
         prompt = _writer_recovery_prompt(
@@ -1729,6 +1829,7 @@ def _draft_section(
             draft_mode=draft_mode,
             extra_context=extra_context,
             adopted_sections=adopted_sections,
+            source_front_matter=source_front_matter,
         )
     else:
         prompt = _writer_prompt(
@@ -1745,6 +1846,7 @@ def _draft_section(
             include_previous_draft=include_previous_draft,
             draft_mode=draft_mode,
             adopted_sections=adopted_sections,
+            source_front_matter=source_front_matter,
         )
     if prompt_suffix:
         prompt = prompt + "\n\n" + prompt_suffix
@@ -1754,7 +1856,9 @@ def _draft_section(
         label=label,
         max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
     )
-    return _parse_section_draft(response, section)
+    draft = _parse_section_draft(response, section)
+    _retain_bibliography_notes(memory, response, source_front_matter)
+    return draft
 
 
 def _parse_section_draft(response: dict[str, Any], section: ReportSectionPlan) -> ReportSectionDraft:
@@ -1800,12 +1904,15 @@ def _draft_document_with_recovery(
     extra_context: list[ReportToolResult] | None = None,
     reviews: list[ReportSectionReview] | None = None,
     read_context: Callable[[list[ReportToolCall] | None], list[ReportToolResult]] | None = None,
+    source_front_matter: list[dict[str, Any]] | None = None,
 ) -> list[ReportSectionDraft]:
     """Joint composition, not a second Writer lifecycle or manuscript format."""
     payload = _writer_payload(context=context, template=template, memory=memory,
         section=None, document_sections=sections, config=config, extra_context=extra_context or [], previous_draft=None, review=None,
         source_batch_index=1, source_batch_count=1, include_previous_draft=False,
         draft_mode="document", adopted_sections=adopted_sections)
+    if reviews is None:
+        payload = _source_bibliography_context(payload, source_front_matter or [], rules_key="response_rules")
     if reviews is not None:
         requests = {row.section_id: row for row in reviews}
         baselines = {row.section_id: row for row in adopted_sections}
@@ -1883,12 +1990,16 @@ def _draft_document_with_recovery(
             if any(not isinstance(sid, str) for sid in identities) or len(set(identities)) != len(rows) or set(identities) != set(wanted):
                 raise LLMResponseError(f"Joint Writer must return each requested section exactly once: {list(wanted)}; received {identities!r}.")
             drafts = {row["section_id"]: _parse_section_draft(row, wanted[row["section_id"]]) for row in rows}
+            if reviews is None and source_front_matter:
+                _retain_bibliography_notes(memory, response, source_front_matter)
             return [drafts[row.section_id] for row in sections]
         except (LLMError, ValueError) as exc:
-            if response is None or attempt or (isinstance(exc, LLMError) and not isinstance(exc, LLMResponseError)):
+            if attempt or (response is None and not isinstance(exc, LLMResponseError)) or (isinstance(exc, LLMError) and not isinstance(exc, LLMResponseError)):
                 raise
-            payload.update(validation_error=str(exc), rejected_response=response,
+            payload.update(validation_error=str(exc),
                 correction="Correct the entire section set against the same inputs; no partial draft has been adopted.")
+            if response is not None:
+                payload["rejected_response"] = response
             _emit(emit, f"Joint Writer correcting its rejected section set once: {exc}")
     raise AssertionError("Joint Writer correction did not terminate")
 
@@ -1973,6 +2084,7 @@ def _draft_section_with_recovery(
     include_previous_draft: bool = True,
     draft_mode: str = "section",
     adopted_sections: list[ReportSectionDraft] | None = None,
+    source_front_matter: list[dict[str, Any]] | None = None,
 ) -> ReportSectionDraft:
     for attempt in range(2):
         try:
@@ -1986,6 +2098,7 @@ def _draft_section_with_recovery(
                 include_previous_draft=include_previous_draft, draft_mode=draft_mode,
                 recovery=bool(attempt),
                 adopted_sections=adopted_sections,
+                source_front_matter=source_front_matter,
             )
         except (LLMError, ValueError) as exc:
             failure = exc
@@ -2113,6 +2226,7 @@ def _writer_task_context(
     view = {
         "objective": report_objective(context, memory),
         "document_plan": document_plan_context(memory),
+        "previous_document": prior_draft_context(context),
         "source_comparisons": context.source_comparisons,
         "comparison_status": dict(DERIVED_CONTEXT_STATUS),
         "assembly_owned_content": additions,
@@ -2156,6 +2270,7 @@ def _writer_payload(
     draft_mode: str,
     adopted_sections: list[ReportSectionDraft] | None = None,
     document_sections: list[ReportSectionPlan] | None = None,
+    source_front_matter: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     task_context = _writer_task_context(context=context, memory=memory, section=section,
         config=config, extra_context=extra_context, previous_draft=previous_draft if include_previous_draft else None,
@@ -2245,7 +2360,7 @@ def _writer_payload(
             "Place `**Table: <planned title>**` immediately above it, preserve the planned comparison purpose, "
             "and use only evidence-supported cells with adjacent citations. Do not create placeholder rows."
         )
-    return payload
+    return _source_bibliography_context(payload, source_front_matter or [], rules_key="response_rules")
 
 
 def _writer_recovery_prompt(
@@ -2259,6 +2374,7 @@ def _writer_recovery_prompt(
     draft_mode: str,
     extra_context: list[ReportToolResult] | None = None,
     adopted_sections: list[ReportSectionDraft] | None = None,
+    source_front_matter: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build a small, schema-first retry after a Writer output mismatch.
 
@@ -2312,7 +2428,7 @@ def _writer_recovery_prompt(
         payload["style_rules"].append(
             "Include every required visual_requirements table using a `**Table: <planned title>**` caption and a compact Markdown table."
         )
-    return _json_prompt(payload)
+    return _json_prompt(_source_bibliography_context(payload, source_front_matter or [], rules_key="style_rules"))
 
 
 def _writer_response_contract(section: ReportSectionPlan) -> dict[str, Any]:
@@ -2697,7 +2813,7 @@ def _run_context_requests(
 
 
 def _handles_for_section(memory: ReportMemory, section: ReportSectionPlan) -> list[dict[str, Any]]:
-    handles = {handle.handle: handle for handle in memory.source_handles}
+    handles = {handle.handle: handle for handle in memory.source_handles if handle.kind != "prior_draft"}
     selected: list[str] = []
     for handle in section.evidence_handles:
         if handle in handles:

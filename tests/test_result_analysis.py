@@ -233,13 +233,19 @@ class ResultAnalysisTests(unittest.TestCase):
                       "candidate": {"metrics": {"accuracy": 0.9}},
                       "baseline_ref": {"path": "baseline/results.json"}}
         execution = {"status": "passed", "metrics": {"accuracy": 0.9},
-                     "comparisons": [comparison], "execution": {"stdout": "large process log"}}
+                     "comparisons": [comparison], "execution": {"stdout": "large process log"},
+                     "guard": {"status": "failed", "issues": [{"code": "missing_required_metric"}]},
+                     "diagnosis": {"status": "failed", "summary": "Partial measurement"},
+                     "output_evidence": [{"name": "resource_record", "status": "available",
+                         "artifact": "outputs/resources.json", "preview": "A resource deadline stopped later conditions."}]}
         context = AnalysisContext(task_id="comparison", metrics={"accuracy": 0.9},
                                   project_results={"execution_result": execution})
         prompt = build_prompt(context, build_metric_summary(context), run_result_analysis(context))
         payload = json.loads(prompt.split("\n\n")[-1])
         projected = payload["context"]["project_results"]["execution_result"]
         self.assertEqual(projected["comparisons"], [comparison])
+        for key in ("guard", "diagnosis", "output_evidence"):
+            self.assertEqual(projected[key], execution[key])
         self.assertNotIn("execution", projected)
 
     def test_prompt_carries_the_accepted_seed_extension_boundary(self) -> None:

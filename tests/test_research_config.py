@@ -581,7 +581,7 @@ class ResearchConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "research.toml"
             path.write_text(
-                '[task]\ngoal="Bounded rounds"\n[research]\nmax_iterations=3\n',
+                '[task]\ngoal="Bounded rounds"\n[research]\nmax_iterations=3\nweb_extract_backend="tavily_basic"\n',
                 encoding="utf-8",
             )
             explicit = set()
@@ -590,6 +590,9 @@ class ResearchConfigTests(unittest.TestCase):
             args = build_parser(research_defaults=defaults).parse_args(argv)
             self.assertEqual(args.max_research_iterations, 3)
             self.assertIn("max_research_iterations", explicit)
+            self.assertEqual(args.research_web_extract_backend, "tavily_basic")
+            self.assertEqual(build_parser(research_defaults=defaults).parse_args(
+                [*argv, "--web-extract-backend", "direct"]).research_web_extract_backend, "direct")
 
     def test_read_shortlist_limit_is_available_in_task_config(self):
         with tempfile.TemporaryDirectory() as directory:

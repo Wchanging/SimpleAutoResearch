@@ -38,6 +38,7 @@ def screen_papers_with_llm(
     config: Mapping[str, object] | None = None,
     emit: EmitMessage | None = None,
     question_assessments: list[dict[str, Any]] | None = None,
+    metadata_pool: bool = False,
 ) -> list[dict[str, Any]]:
     """Coarse-screen and rerank papers using bounded structured LLM calls.
 
@@ -68,6 +69,21 @@ def screen_papers_with_llm(
             question_assessments.extend(_question_assessments(
                 assessment_rows, research_plan_json, decisions))
         return decisions
+    if metadata_pool and len(paper_rows) <= 48:
+        # A bounded metadata pool already fits the comparison window. Repeating
+        # its abstracts in coarse calls provides no new source evidence.
+        decisions = _rerank(client, topic=topic, problem_markdown=problem_markdown,
+            research_plan_json=research_plan_json, papers=paper_rows, coarse_decisions=[],
+            max_shortlist=max_shortlist, min_shortlist=min_shortlist, emit=emit,
+            question_assessments=assessment_rows)
+        coarse = [{"paper_id": _paper_id(p, i), "decision": "drop"}
+                  for i, p in enumerate(paper_rows, start=1)]
+        return finish(_merge_decisions(coarse_decisions=coarse, rerank_decisions=decisions,
+            reranked_ids={r["paper_id"] for r in coarse}, max_shortlist=max_shortlist,
+            min_shortlist=0, required_facets=required_facets,
+            papers_by_id={_paper_id(p, i): p for i, p in enumerate(paper_rows, start=1)}))
+    if metadata_pool and not any(name in settings for name in ("read_screening_batch_size", "research_read_batch_size")):
+        settings["read_screening_batch_size"] = 8
     coarse_decisions = _coarse_screen(
         client,
         topic=topic,
@@ -106,7 +122,6 @@ def screen_papers_with_llm(
     rerank_input = _rerank_input_papers(
         kept_papers,
         valid_coarse,
-        max_shortlist=max_shortlist,
     )
     reranked = _rerank(
         client,
@@ -215,7 +230,11 @@ def read_paper_notes_with_llm(
             ) + "\nOptional new_source_queries: at most two nonempty strings, each <=500 characters. "
             "Request other sources only for a user subquestion whose needed evidence is missing "
             "from this source's available original text; otherwise []. This is a request, not "
-            "permission to search or proof of absence. followup_queries still locates passages "
+            "permission to search or proof of absence. Use a search phrase for other papers, or "
+            "an exact HTTP(S) URL quoted in the supplied source for missing data, licensing, "
+            "implementation or project documentation. Choose links for the user's missing evidence, "
+            "not merely because they are code repositories; never invent or rewrite a URL. "
+            "followup_queries still locates passages "
             "in saved local text only; never repurpose it as external search.",
             label=_paper_id(paper, index),
         )
@@ -545,14 +564,17 @@ def _optional_int(value: object) -> int | None:
 def _rerank_input_papers(
     papers: list[dict[str, Any]],
     coarse_decisions: list[dict[str, Any]],
-    *,
-    max_shortlist: int,
 ) -> list[dict[str, Any]]:
+    """Bound metadata comparison separately from the final reading shortlist.
+
+    A small acquisition budget must not hide plausible implementation or data
+    sources from the final relevance judgment. Keep the existing 48-row context
+    ceiling; the reranker and merger still enforce the reading budget.
+    """
     score_by_id = {
         str(row.get("paper_id") or ""): int(row.get("coarse_relevance_score") or 0)
         for row in coarse_decisions
     }
-    limit = max(max_shortlist, min(max_shortlist * 2, 48))
     indexed = list(enumerate(papers, start=1))
     indexed.sort(
         key=lambda item: (
@@ -560,7 +582,7 @@ def _rerank_input_papers(
             _paper_id(item[1], item[0]),
         )
     )
-    return [paper for _, paper in indexed[:limit]]
+    return [paper for _, paper in indexed[:48]]
 
 
 def _coarse_decisions_with_priorities(

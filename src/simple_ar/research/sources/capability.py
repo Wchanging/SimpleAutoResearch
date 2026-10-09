@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping
+from urllib.error import HTTPError
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.literature.cache import get_cached, put_cache
@@ -34,6 +35,10 @@ class SearchRequest:
     filters: dict[str, object] = field(default_factory=dict)
     cache_dir: Path | None = None
     cache_enabled: bool = True
+    llm_client: Any | None = field(default=None, repr=False, compare=False)
+    problem_markdown: str = ""
+    research_plan_json: str = "{}"
+    screening_config: Mapping[str, object] = field(default_factory=dict)
     stop_after_papers: int | None = None
     cache_get: Callable[..., list[dict[str, Any]] | None] | None = field(
         default=None,
@@ -246,7 +251,10 @@ class SearchResult:
 def provided_materials_result(records: Iterable[DocumentRecord]) -> SearchResult:
     """Read-only compatibility projection, never a persisted search result."""
     papers = tuple(Paper(
-        id=record.document_id, title=record.title, authors=record.authors,
+        # Storage/chunk IDs are not a new bibliographic identity when the
+        # original connector identity was retained with the document.
+        id=record.metadata.get("paper_id") or record.document_id,
+        title=record.title, authors=record.authors,
         abstract=record.abstract, url=record.url or "",
         published=record.published, source=record.source,
         source_id=record.source_id or record.document_id, doi=record.doi,
@@ -279,10 +287,14 @@ def search_sources(
 
     stop = False
     for provider_name in request.providers:
+        rate_limited: SearchResponse | None = None
         for query in request.queries:
             if emit:
                 emit(f"Searching {provider_name}: {query}")
-            response = _run_provider(
+            response = SearchResponse(
+                source=provider_name, query=query, papers=[], status="rate_limited",
+                message=f"Skipped live query after this provider returned HTTP 429 in the current batch: {rate_limited.message}",
+            ) if rate_limited is not None else _run_provider(
                 registry,
                 provider_name,
                 SearchQuery(
@@ -291,6 +303,8 @@ def search_sources(
                     filters=dict(request.filters),
                 ),
             )
+            if response.status == "rate_limited" and rate_limited is None:
+                rate_limited = response
             response = _apply_optional_cache(
                 response,
                 query=query,
@@ -396,6 +410,8 @@ def run_search_capability(
     request: SearchRequest,
     registry: SearchProviderRegistry,
     selection_policy: SearchSelectionPolicy | None = None,
+    excluded_paper_keys: frozenset[str] = frozenset(),
+    linked_records: tuple[DocumentRecord, ...] = (),
     emit: Callable[[str], None] | None = None,
 ) -> CapabilityResult:
     """Persist one explicit search handoff for a controller-managed attempt.
@@ -407,6 +423,16 @@ def run_search_capability(
     """
 
     result = search_sources(request, registry=registry, emit=emit)
+    if linked_records:
+        supplied = provided_materials_result(linked_records)
+        candidates = tuple(replace(paper, abstract=str(record.metadata.get("parent_quote") or record.abstract))
+                           for paper, record in zip(supplied.papers, linked_records, strict=True))
+        response = SearchResponse(source="supporting_material", query="Linked references in acquired sources",
+            papers=list(candidates), status="ok",
+            message="Locally supplied linked references with parent quotations; no provider request or original-page acquisition.")
+        result = replace(result, papers=(*result.papers, *candidates),
+            responses=(*result.responses, response),
+            status=_result_status([*result.responses, response], [*result.papers, *candidates]))
     if selection_policy is not None:
         from simple_ar.research.evidence.retrieval import paper_identity_key
 
@@ -420,7 +446,8 @@ def run_search_capability(
         while True:
             current_identities = {paper_identity_key(paper) for paper in result.papers}
             new_candidates = len(current_identities - identities)
-            result = select_search_result(result, policy=policy, filters=request.filters)
+            result = select_search_result(result, policy=policy, filters=request.filters,
+                                          excluded_paper_keys=excluded_paper_keys)
             if last_round_status == "failed":
                 stop_reason = "providers_failed"
             elif not new_candidates:
@@ -491,6 +518,37 @@ def run_search_capability(
                          "decision": "discard" if reason else "keep",
                          "reason": reason or "within_temporal_scope"})
         result = replace(result, selected_papers=tuple(eligible), selection_rows=tuple(rows))
+    if selection_policy is not None and request.llm_client is not None:
+        from simple_ar.research.evidence.screening import screen_papers_with_llm
+        # Save discovery before any paid judgment: a failed selection must not
+        # erase provider responses, and retries can use the existing query cache.
+        context.store.write_json("search_result.json", result.to_handoff_dict(),
+            kind="search_result", schema="search_handoff.v1", producer="research.search")
+        pool = select_search_result(result, policy=replace(selection_policy,
+            max_documents=max(1, len(result.papers))), filters=request.filters,
+            excluded_paper_keys=excluded_paper_keys, include_low_relevance=True)
+        assessments: list[dict[str, Any]] = []
+        settings = {**request.screening_config,
+                    "read_screening_max_shortlist": selection_policy.max_documents,
+                    "read_screening_min_shortlist": 0}
+        decisions = screen_papers_with_llm(request.llm_client,
+            topic=selection_policy.topic, problem_markdown=request.problem_markdown,
+            research_plan_json=request.research_plan_json, config=settings,
+            papers=[p.to_row() for p in pool.selected_papers], emit=emit,
+            question_assessments=assessments, metadata_pool=True)
+        kept = {r["paper_id"] for r in decisions if r.get("decision") == "keep"}
+        selected = tuple(p for p in pool.selected_papers if p.id in kept)
+        rows = tuple({**r, "decision": "keep" if r.get("paper_id") in kept else "discard"}
+                     if r.get("decision") == "keep" else r for r in pool.selection_rows)
+        from simple_ar.research.evidence.coverage import build_coverage_report
+        coverage = build_coverage_report(topic=selection_policy.topic,
+            questions=list(selection_policy.questions), query_plan=selection_policy.query_plan,
+            selection_rows=list(rows), retrieval_rows=result.coverage_report["retrieval"]["attempts"],
+            max_documents=selection_policy.max_documents, next_query_limit=0)
+        coverage.update(scope="search_metadata_only", semantic_verification="not_performed",
+            semantic_selection={"decisions": decisions, "question_assessments": assessments,
+                                "scope": "candidate_metadata_not_read_evidence"})
+        result = replace(result, selected_papers=selected, selection_rows=rows, coverage_report=coverage)
     diagnostics = list(result.diagnostics)
     if emit:
         emit(f"Search selection: {len(result.selected_papers)} papers retained.")
@@ -534,6 +592,8 @@ def select_search_result(
     *,
     policy: SearchSelectionPolicy,
     filters: Mapping[str, object] | None = None,
+    excluded_paper_keys: frozenset[str] = frozenset(),
+    include_low_relevance: bool = False,
 ) -> SearchResult:
     """Apply the canonical retrieval policy while retaining raw responses.
 
@@ -546,6 +606,7 @@ def select_search_result(
     from simple_ar.research.evidence.coverage import build_coverage_report
     from simple_ar.research.evidence.retrieval import (
         RetrievalCandidate,
+        paper_identity_key,
         select_retrieval_candidates,
     )
 
@@ -561,6 +622,7 @@ def select_search_result(
         if isinstance(row, Mapping) and str(row.get("query") or "").strip()
     }
     candidates: list[RetrievalCandidate] = []
+    excluded_rows = []
     retrieval_rows: list[dict[str, Any]] = []
     for response_index, response in enumerate(result.responses, start=1):
         query = response.query.strip()
@@ -579,10 +641,15 @@ def select_search_result(
                 "message": response.message,
             }
         )
-        if response.status.strip().lower() in {"failed", "error", "blocked"}:
+        if not _response_succeeded(response):
             continue
         facet = str(query_spec.get("facet") or "").strip()
         for paper in response.papers:
+            if paper_identity_key(paper) in excluded_paper_keys:
+                excluded_rows.append({"paper_id": paper.id, "source": response.source,
+                                      "query": query, "decision": "discard",
+                                      "reason": "already_retained_source"})
+                continue
             candidates.append(
                 RetrievalCandidate(
                     paper=paper,
@@ -600,6 +667,7 @@ def select_search_result(
         negative_terms=list(policy.query_plan.negative_terms),
         priority_facets=list(policy.query_plan.required_facets),
         temporal_scope=scope,
+        include_low_relevance=include_low_relevance,
     )
     coverage = build_coverage_report(
         topic=policy.topic,
@@ -615,7 +683,7 @@ def select_search_result(
     return replace(
         result,
         selected_papers=tuple(selected),
-        selection_rows=tuple(selection_rows),
+        selection_rows=tuple([*excluded_rows, *selection_rows]),
         coverage_report=coverage,
     )
 
@@ -650,6 +718,19 @@ def _run_provider(
             )
         return response
     except Exception as exc:
+        # Inspect the transport cause, not provider-specific error wording.
+        # Query changes cannot overcome a provider/IP quota within this batch.
+        cause: BaseException | None = exc
+        seen: set[int] = set()
+        status = "failed"
+        while cause is not None and id(cause) not in seen:
+            seen.add(id(cause))
+            status_code = (cause.code if isinstance(cause, HTTPError)
+                           else getattr(getattr(cause, "response", None), "status_code", None))
+            if status_code == 429:
+                status = "rate_limited"
+                break
+            cause = cause.__cause__ or cause.__context__
         message = (
             f"Search provider {provider_name!r} failed for query {request.query!r}: "
             f"{type(exc).__name__}: {exc}"
@@ -658,13 +739,13 @@ def _run_provider(
             source=provider_name,
             query=request.query,
             papers=[],
-            status="failed",
+            status=status,
             message=message,
         )
 
 
 def _response_succeeded(response: SearchResponse) -> bool:
-    return response.status.strip().lower() not in {"failed", "error", "blocked"}
+    return response.status.strip().lower() not in {"failed", "error", "blocked", "rate_limited"}
 
 
 def _result_status(

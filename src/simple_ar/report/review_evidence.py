@@ -67,8 +67,6 @@ def review_evidence_locator(view: Mapping[str, Any], *, max_chars: int = 4000, m
             for index, child in enumerate(value):
                 walk(child, [*path, str(index)])
         elif isinstance(value, (str, int, float, bool)) or value is None:
-            if value == "":
-                return
             try:
                 role = _role(view, path)
             except LLMResponseError:
@@ -231,7 +229,7 @@ def validate_evidence_quotes(quotes: list[ReportEvidenceQuote], view: Mapping[st
         if (reference.mode == "quotation" and not present and isinstance(value, str) and expected == "recorded_material"
                 and _source_passage_path(path)):
             present = bool(_layout_text(quote)) and _layout_text(quote) in _layout_text(value)
-        if not quote or not present:
+        if (reference.mode == "quotation" and not quote) or not present:
             raise LLMResponseError(f"Review evidence quote is absent or changed at {reference.pointer}.")
         if reference.role != expected:
             raise LLMResponseError(f"Review evidence role is {expected}, not {reference.role}, at {reference.pointer}.")
